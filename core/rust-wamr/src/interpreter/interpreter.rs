@@ -8,6 +8,7 @@ pub struct Interpreter {
     pub operand_stack: OperandStack,
     pub control_stack: ControlStack,
     pub instance: Option<Arc<Mutex<Instance>>>,
+    pub locals: Vec<WasmValue>,
 }
 
 impl Interpreter {
@@ -16,6 +17,7 @@ impl Interpreter {
             operand_stack: OperandStack::new(MAX_STACK_SIZE),
             control_stack: ControlStack::new(),
             instance: None,
+            locals: Vec::new(),
         }
     }
 
@@ -24,6 +26,7 @@ impl Interpreter {
             operand_stack: OperandStack::new(MAX_STACK_SIZE),
             control_stack: ControlStack::new(),
             instance: Some(instance),
+            locals: Vec::new(),
         }
     }
 
@@ -90,19 +93,82 @@ impl Interpreter {
             0x04 => {}
             0x05 => {}
             0x0B => {}
-            0x0C => {}
-            0x0D => {}
-            0x0E => {}
+            0x0C => {
+                let arity = self.operand_stack.pop_i32()? as u32;
+                let frame = ControlFrame::new(0, arity, vec![]);
+                self.control_stack.push(frame);
+            }
+            0x0D => {
+                let _cond = self.operand_stack.pop_i32()?;
+                let arity = self.operand_stack.pop_i32()? as u32;
+                let frame = ControlFrame::new(0, arity, vec![]);
+                self.control_stack.push(frame);
+            }
+            0x0E => {
+                if let Some(frame) = self.control_stack.pop_frame() {
+                    self.control_stack.push(frame);
+                }
+            }
             0x0F => return Ok(()),
-            0x10 => {}
+            0x10 => {
+                let _func_idx = self.operand_stack.pop_i32()? as u32;
+            }
             0x11 => {}
             0x1A => drop(self.operand_stack.pop()),
             0x1B => {}
-            0x20 => {}
-            0x21 => {}
-            0x22 => {}
-            0x23 => {}
-            0x24 => {}
+            0x20 => {
+                let idx = self.operand_stack.pop_i32()? as usize;
+                if idx < self.locals.len() {
+                    self.operand_stack.push(self.locals[idx].clone());
+                }
+            }
+            0x21 => {
+                let idx = self.operand_stack.pop_i32()? as usize;
+                let val = self
+                    .operand_stack
+                    .pop()
+                    .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
+                if idx < self.locals.len() {
+                    self.locals[idx] = val;
+                } else {
+                    self.locals.push(val);
+                }
+            }
+            0x22 => {
+                let idx = self.operand_stack.pop_i32()? as usize;
+                let val = self
+                    .operand_stack
+                    .pop()
+                    .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
+                if idx < self.locals.len() {
+                    self.locals[idx] = val.clone();
+                } else {
+                    self.locals.push(val.clone());
+                }
+                self.operand_stack.push(val);
+            }
+            0x23 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(global) = instance.globals.get(idx as usize) {
+                        self.operand_stack.push(global.value.clone());
+                    }
+                }
+            }
+            0x24 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let val = self
+                    .operand_stack
+                    .pop()
+                    .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(global) = instance.globals.get_mut(idx as usize) {
+                        global.value = val;
+                    }
+                }
+            }
             0x25 => {}
             0x26 => {}
             0x27 => {}
@@ -114,8 +180,28 @@ impl Interpreter {
             0x2D => {}
             0x2E => {}
             0x2F => {}
-            0x3F => {}
-            0x40 => {}
+            0x3F => {
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(mem) = instance.memories.first() {
+                        self.operand_stack.push(WasmValue::I32(mem.size() as i32));
+                    }
+                }
+            }
+            0x40 => {
+                let pages = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(mem) = instance.memories.first_mut() {
+                        let old_size = mem.size();
+                        if mem.grow(pages).is_ok() {
+                            self.operand_stack.push(WasmValue::I32(old_size as i32));
+                        } else {
+                            self.operand_stack.push(WasmValue::I32(-1));
+                        }
+                    }
+                }
+            }
             0x41 => {
                 let val = self.operand_stack.pop_i32()?;
                 self.operand_stack.push(WasmValue::I32(val));
