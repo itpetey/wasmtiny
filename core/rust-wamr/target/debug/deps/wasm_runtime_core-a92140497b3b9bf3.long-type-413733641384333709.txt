@@ -1,1 +1,0 @@
-(dyn for<'a> Fn(&'a [values::WasmValue]) -> std::result::Result<Vec<values::WasmValue>, runtime::error::WasmError> + Send + Sync + 'static)
