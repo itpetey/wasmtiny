@@ -176,6 +176,7 @@ impl Default for JitRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{Func, FunctionType, Module, NumType, ValType};
 
     #[test]
     fn test_compiler_creation() {
@@ -194,5 +195,200 @@ mod tests {
     fn test_jit_runtime() {
         let runtime = JitRuntime::new();
         assert_eq!(runtime.compiler.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_compile_function() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(
+            vec![ValType::Num(NumType::I32), ValType::Num(NumType::I32)],
+            vec![ValType::Num(NumType::I32)],
+        ));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x20, 0x00, 0x20, 0x01, 0x6A, 0x0F],
+        });
+
+        let mut compiler = JitCompiler::new();
+        let result = compiler.compile(&module, 0);
+        assert!(result.is_ok());
+        let compiled = result.unwrap();
+        assert_eq!(compiled.id, 0);
+        assert_eq!(compiled.tier, CompilationTier::Baseline);
+    }
+
+    #[test]
+    fn test_cache_miss_and_hit() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x0F],
+        });
+
+        let mut compiler = JitCompiler::new();
+
+        let result1 = compiler.compile(&module, 0);
+        assert!(result1.is_ok());
+        assert_eq!(compiler.cache_size(), 1);
+
+        let result2 = compiler.compile(&module, 0);
+        assert!(result2.is_ok());
+        assert_eq!(compiler.cache_size(), 1);
+    }
+
+    #[test]
+    fn test_ir_translation_local_get() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![ValType::Num(NumType::I32)], vec![]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x20, 0x00, 0x0F],
+        });
+
+        let mut compiler = JitCompiler::new();
+        let result = compiler.compile(&module, 0).unwrap();
+        assert!(result.code.len() > 0);
+    }
+
+    #[test]
+    fn test_ir_translation_i32_add() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(
+            vec![ValType::Num(NumType::I32), ValType::Num(NumType::I32)],
+            vec![ValType::Num(NumType::I32)],
+        ));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x20, 0x00, 0x20, 0x01, 0x6A, 0x0F],
+        });
+
+        let mut compiler = JitCompiler::new();
+        let result = compiler.compile(&module, 0).unwrap();
+        assert!(result.code.len() > 0);
+    }
+
+    #[test]
+    fn test_compile_multiple_functions() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.types.push(FunctionType::new(
+            vec![ValType::Num(NumType::I32)],
+            vec![ValType::Num(NumType::I32)],
+        ));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x0F],
+        });
+        module.funcs.push(Func {
+            type_idx: 1,
+            locals: vec![],
+            body: vec![0x20, 0x00, 0x0F],
+        });
+
+        let mut compiler = JitCompiler::new();
+
+        let result0 = compiler.compile(&module, 0);
+        assert!(result0.is_ok());
+
+        let result1 = compiler.compile(&module, 1);
+        assert!(result1.is_ok());
+
+        assert_eq!(compiler.cache_size(), 2);
+    }
+
+    #[test]
+    fn test_clear_cache() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x0F],
+        });
+
+        let mut compiler = JitCompiler::new();
+        compiler.compile(&module, 0).unwrap();
+        assert_eq!(compiler.cache_size(), 1);
+
+        compiler.clear_cache();
+        assert_eq!(compiler.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_get_compiled_function() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x0F],
+        });
+
+        let mut compiler = JitCompiler::new();
+        compiler.compile(&module, 0).unwrap();
+
+        let compiled = compiler.get_compiled(0);
+        assert!(compiled.is_some());
+        assert_eq!(compiled.unwrap().id, 0);
+
+        let not_found = compiler.get_compiled(1);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_compile_invalid_function_index() {
+        let module = Module::new();
+
+        let mut compiler = JitCompiler::new();
+        let result = compiler.compile(&module, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_jit_runtime_compile_module() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x0F],
+        });
+
+        let mut runtime = JitRuntime::new();
+        let result = runtime.compile_module(&module);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_jit_runtime_compile_function() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x0F],
+        });
+
+        let mut runtime = JitRuntime::new();
+        let result = runtime.compile_function(&module, 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_jit_runtime_execute() {
+        let runtime = JitRuntime::new();
+        let result = runtime.execute(0, 0, &[]);
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], WasmValue::I32(0));
     }
 }

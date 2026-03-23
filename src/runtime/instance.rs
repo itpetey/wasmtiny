@@ -51,6 +51,10 @@ impl Store {
 }
 
 impl Instance {
+    pub fn module(&self) -> &Module {
+        &self.module
+    }
+
     pub fn new(module: Arc<Module>) -> Self {
         let mut instance = Self {
             module,

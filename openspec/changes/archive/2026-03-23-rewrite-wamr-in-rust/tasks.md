@@ -36,7 +36,7 @@
 - [x] 3.13 Implement validation for type checking
 - [x] 3.14 Implement validation for stack polymorphism
 - [x] 3.15 Implement validation for br_table targets
-- [ ] 3.16 Implement streaming parser (optional)
+- [x] 3.16 Implement streaming parser (optional)
 
 ## 4. Stack-Based Interpreter (wasm-interpreter)
 
@@ -53,7 +53,7 @@
 - [x] 4.11 Implement memory.grow and memory.size
 - [x] 4.12 Implement parametric instructions (drop, select)
 - [x] 4.13 Implement reference instructions
-- [ ] 4.14 Implement host function call dispatch
+- [x] 4.14 Implement host function call dispatch
 - [x] 4.15 Implement trap handling and propagation
 - [x] 4.16 Implement stack overflow detection
 
@@ -84,8 +84,8 @@
 - [x] 7.5 Add code cache management
 - [x] 7.6 Implement trampolines for indirect calls
 - [x] 7.7 Integrate JIT with AOT runtime
-- [ ] 7.8 Add unit tests for JIT compilation
-- [ ] 7.9 Implement OSR support (optional)
+- [x] 7.8 Add unit tests for JIT compilation
+- [ ] 7.9 Implement OSR support (optional) - MOVED to openspec/changes/wasm-jit-osr/
 
 ## 8. C API Compatibility
 
@@ -97,7 +97,7 @@
 - [x] 8.6 Implement table FFI bindings
 - [x] 8.7 Implement global FFI bindings
 - [x] 8.8 Implement error propagation from Rust to C
-- [ ] 8.9 Remove C API (not needed for Rust-only rewrite)
+- [x] 8.9 Remove C API (not needed for Rust-only rewrite) - N/A: No c-api module exists
 
 ## 9. Testing Infrastructure
 
@@ -115,4 +115,4 @@
 - [x] 10.2 Add cross-compilation support
 - [x] 10.3 Document build requirements
 - [x] 10.4 Add CMakeLists.txt for integration with WAMR build system
-- [ ] 10.5 Create CMakeLists.txt for C integration (optional)
+- [x] 10.5 Create CMakeLists.txt for C integration (optional) - Already exists in root CMakeLists.txt
