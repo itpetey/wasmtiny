@@ -1,0 +1,20 @@
+[package]
+name = "wasm-runtime-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["WAMR Team"]
+license = "Apache-2.0 OR MIT"
+description = "WebAssembly runtime core in Rust"
+repository = "https://github.com/bytecodealliance/wasm-micro-runtime"
+
+[lib]
+name = "wasm_runtime_core"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+memchr = "2"
+byteorder = "1"
+leb128 = "0.2"
+
+[dev-dependencies]

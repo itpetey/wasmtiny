@@ -1,1 +1,0 @@
-(dyn for<'a, 'b> Fn(&'a mut Store, &'b [WasmValue]) -> std::result::Result<Vec<WasmValue>, WasmError> + Send + Sync + 'static)
