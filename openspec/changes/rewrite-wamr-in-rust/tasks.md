@@ -49,13 +49,13 @@
 - [x] 4.7 Implement call instructions (call, call_indirect)
 - [x] 4.8 Implement local instructions (local.get, local.set, local.tee)
 - [x] 4.9 Implement global instructions
-- [ ] 4.10 Implement table instructions
+- [x] 4.10 Implement table instructions
 - [x] 4.11 Implement memory.grow and memory.size
 - [x] 4.12 Implement parametric instructions (drop, select)
-- [ ] 4.13 Implement reference instructions
+- [x] 4.13 Implement reference instructions
 - [ ] 4.14 Implement host function call dispatch
-- [ ] 4.15 Implement trap handling and propagation
-- [ ] 4.16 Implement stack overflow detection
+- [x] 4.15 Implement trap handling and propagation
+- [x] 4.16 Implement stack overflow detection
 
 ## 5. Fast Interpreter Mode
 
