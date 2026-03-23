@@ -1,24 +1,24 @@
-use crate::loader::Parser;
-use crate::runtime::{
-    Global, GlobalType, Memory, Module, Result, Table, ValType, WasmError, WasmValue,
-};
+use crate::loader::{Parser, Validator};
+use crate::runtime::{Instance, Module, Result, WasmError};
+use std::sync::Arc;
 
 use super::runtime::{AotExport, AotModule};
 
 pub struct AotLoader {
     parser: Parser,
+    validator: Validator,
 }
 
 impl AotLoader {
     pub fn new() -> Self {
         Self {
             parser: Parser::new(),
+            validator: Validator::new(),
         }
     }
 
     pub fn load(&self, data: &[u8]) -> Result<AotModule> {
-        self.validate(data)?;
-        let module = self.parser.parse(data)?;
+        let module = self.parse_validated_module(data)?;
         self.convert_to_aot_module(&module)
     }
 
@@ -26,41 +26,50 @@ impl AotLoader {
         self.load(data)
     }
 
-    fn validate(&self, data: &[u8]) -> Result<()> {
-        if data.len() < 4 {
-            return Err(WasmError::Load("AOT data too short".to_string()));
-        }
+    pub fn validate(&self, data: &[u8]) -> Result<()> {
+        self.parse_validated_module(data).map(|_| ())
+    }
 
-        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if magic != 0x6D736100 {
-            return Err(WasmError::Load("Invalid AOT magic".to_string()));
-        }
-
-        Ok(())
+    fn parse_validated_module(&self, data: &[u8]) -> Result<Module> {
+        let module = self.parser.parse(data)?;
+        self.validator.validate(&module)?;
+        Ok(module)
     }
 
     fn convert_to_aot_module(&self, module: &Module) -> Result<AotModule> {
         let mut aot_module = AotModule::from_module(module);
-
-        for mem_type in &module.memories {
-            let memory = Memory::new(mem_type.clone());
-            aot_module.set_memory(memory);
-        }
-
-        for table_type in &module.tables {
-            let table = Table::new(table_type.clone());
-            aot_module.add_table(table);
-        }
-
-        for global_type in &module.globals {
-            let global = Global::new(global_type.clone(), WasmValue::I32(0)).unwrap_or_else(|_| {
-                Global::new(
-                    GlobalType::new(ValType::Num(crate::runtime::NumType::I32), false),
-                    WasmValue::I32(0),
-                )
-                .unwrap()
-            });
-            aot_module.add_global(global);
+        if module.imports.is_empty() {
+            let instance = Instance::new(Arc::new(module.clone()))?;
+            aot_module.memories = instance
+                .memories
+                .iter()
+                .map(|memory| {
+                    memory
+                        .lock()
+                        .map_err(poisoned_lock)
+                        .map(|memory| memory.clone())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            aot_module.tables = instance
+                .tables
+                .iter()
+                .map(|table| {
+                    table
+                        .lock()
+                        .map_err(poisoned_lock)
+                        .map(|table| table.clone())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            aot_module.globals = instance
+                .globals
+                .iter()
+                .map(|global| {
+                    global
+                        .lock()
+                        .map_err(poisoned_lock)
+                        .map(|global| global.clone())
+                })
+                .collect::<Result<Vec<_>>>()?;
         }
 
         for export in &module.exports {
@@ -77,6 +86,10 @@ impl AotLoader {
     }
 }
 
+fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
+    WasmError::Runtime("instance lock poisoned".to_string())
+}
+
 impl Default for AotLoader {
     fn default() -> Self {
         Self::new()
@@ -86,7 +99,6 @@ impl Default for AotLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::NumType;
 
     #[test]
     fn test_load_valid_aot() {
@@ -102,5 +114,12 @@ mod tests {
         let wasm_data = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
         let result = loader.load(&wasm_data);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_truncated_header_with_valid_magic() {
+        let loader = AotLoader::new();
+        let truncated = vec![0x00, 0x61, 0x73, 0x6D];
+        assert!(loader.validate(&truncated).is_err());
     }
 }

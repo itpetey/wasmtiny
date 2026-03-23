@@ -1,4 +1,5 @@
 use super::Result;
+use super::WasmValue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NumType {
@@ -83,6 +84,18 @@ impl Limits {
             Limits::MinMax(_, max) => Some(*max),
         }
     }
+
+    pub fn matches_required(&self, required: &Limits) -> bool {
+        if self.min() < required.min() {
+            return false;
+        }
+
+        match (self.max(), required.max()) {
+            (_, None) => true,
+            (Some(actual), Some(required)) => actual <= required,
+            (None, Some(_)) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +107,10 @@ pub struct TableType {
 impl TableType {
     pub fn new(elem_type: RefType, limits: Limits) -> Self {
         Self { elem_type, limits }
+    }
+
+    pub fn matches_required(&self, required: &TableType) -> bool {
+        self.elem_type == required.elem_type && self.limits.matches_required(&required.limits)
     }
 }
 
@@ -109,6 +126,10 @@ impl MemoryType {
 
     pub fn page_size() -> u32 {
         65536
+    }
+
+    pub fn matches_required(&self, required: &MemoryType) -> bool {
+        self.limits.matches_required(&required.limits)
     }
 }
 
@@ -127,18 +148,19 @@ impl GlobalType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     pub type_: TableType,
-    pub data: Vec<u32>,
+    pub data: Vec<WasmValue>,
 }
 
 impl Table {
     pub fn new(type_: TableType) -> Self {
         let size = type_.limits.min() as usize;
+        let default = WasmValue::NullRef(type_.elem_type);
         Self {
             type_,
-            data: vec![0; size],
+            data: vec![default; size],
         }
     }
 
@@ -146,13 +168,18 @@ impl Table {
         self.data.len() as u32
     }
 
-    pub fn get(&self, idx: u32) -> Option<u32> {
+    pub fn get(&self, idx: u32) -> Option<WasmValue> {
         self.data.get(idx as usize).copied()
     }
 
-    pub fn set(&mut self, idx: u32, val: u32) -> Result<()> {
+    pub fn set(&mut self, idx: u32, val: WasmValue) -> Result<()> {
         if idx as usize >= self.data.len() {
             return Err(super::WasmError::Trap(super::TrapCode::TableOutOfBounds));
+        }
+        if val.val_type() != ValType::Ref(self.type_.elem_type) {
+            return Err(super::WasmError::Validation(
+                "table element type mismatch".to_string(),
+            ));
         }
         self.data[idx as usize] = val;
         Ok(())
@@ -162,12 +189,14 @@ impl Table {
         let old_size = self.size();
         let new_size = old_size.saturating_add(delta);
         if let Some(max) = self.type_.limits.max()
-            && new_size > max {
-                return Err(super::WasmError::Runtime(
-                    "table size exceeds maximum".to_string(),
-                ));
-            }
-        self.data.resize(new_size as usize, 0);
+            && new_size > max
+        {
+            return Err(super::WasmError::Runtime(
+                "table size exceeds maximum".to_string(),
+            ));
+        }
+        self.data
+            .resize(new_size as usize, WasmValue::NullRef(self.type_.elem_type));
         Ok(old_size)
     }
 }
@@ -240,13 +269,24 @@ mod tests {
     }
 
     #[test]
+    fn test_limits_match_required_subtyping() {
+        assert!(Limits::MinMax(2, 3).matches_required(&Limits::MinMax(1, 4)));
+        assert!(Limits::MinMax(2, 3).matches_required(&Limits::Min(1)));
+        assert!(!Limits::MinMax(1, 5).matches_required(&Limits::MinMax(2, 4)));
+        assert!(!Limits::Min(2).matches_required(&Limits::MinMax(1, 4)));
+    }
+
+    #[test]
     fn test_table() {
         let table_type = TableType::new(RefType::FuncRef, Limits::Min(10));
         let mut table = Table::new(table_type);
         assert_eq!(table.size(), 10);
-        assert_eq!(table.get(5), Some(0));
-        table.set(5, 42).unwrap();
-        assert_eq!(table.get(5), Some(42));
+        assert_eq!(
+            table.get(5),
+            Some(super::super::WasmValue::NullRef(RefType::FuncRef))
+        );
+        table.set(5, super::super::WasmValue::FuncRef(42)).unwrap();
+        assert_eq!(table.get(5), Some(super::super::WasmValue::FuncRef(42)));
     }
 
     #[test]

@@ -92,6 +92,10 @@ impl OperandStack {
     pub fn clear(&mut self) {
         self.slots.clear();
     }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.slots.truncate(len);
+    }
 }
 
 pub struct ControlStack {
@@ -126,6 +130,30 @@ impl ControlStack {
     pub fn clear(&mut self) {
         self.frames.clear();
     }
+
+    pub fn last(&self) -> Option<&ControlFrame> {
+        self.frames.last()
+    }
+
+    pub fn last_mut(&mut self) -> Option<&mut ControlFrame> {
+        self.frames.last_mut()
+    }
+
+    pub fn frames(&self) -> &[ControlFrame] {
+        &self.frames
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.frames.truncate(len);
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&ControlFrame> {
+        self.frames.get(idx)
+    }
+
+    pub fn get_mut(&mut self, idx: usize) -> Option<&mut ControlFrame> {
+        self.frames.get_mut(idx)
+    }
 }
 
 impl Default for ControlStack {
@@ -135,22 +163,42 @@ impl Default for ControlStack {
 }
 
 #[derive(Debug, Clone)]
+pub enum FrameKind {
+    Function,
+    Block,
+    Loop,
+}
+
+#[derive(Debug, Clone)]
 pub struct ControlFrame {
+    pub kind: FrameKind,
     pub position: usize,
     pub code: Vec<u8>,
     pub arity: usize,
+    pub label_arity: usize,
     pub local_count: usize,
     pub height: usize,
+    pub locals: Vec<WasmValue>,
 }
 
 impl ControlFrame {
-    pub fn new(param_count: u32, result_count: u32, code: Vec<u8>) -> Self {
+    pub fn new(
+        kind: FrameKind,
+        param_count: u32,
+        result_count: u32,
+        label_count: u32,
+        code: Vec<u8>,
+        locals: Vec<WasmValue>,
+    ) -> Self {
         Self {
+            kind,
             position: 0,
             code,
             arity: result_count as usize,
+            label_arity: label_count as usize,
             local_count: param_count as usize,
             height: 0,
+            locals,
         }
     }
 
@@ -224,7 +272,7 @@ mod tests {
     #[test]
     fn test_control_stack() {
         let mut stack = ControlStack::new();
-        let frame = ControlFrame::new(0, 0, vec![]);
+        let frame = ControlFrame::new(FrameKind::Function, 0, 0, 0, vec![], vec![]);
         stack.push(frame);
         assert_eq!(stack.len(), 1);
     }

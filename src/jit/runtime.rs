@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-pub struct JitRuntime {
+pub struct JitCodeCache {
     trampolines: HashMap<u32, Trampoline>,
     compiled_code: HashMap<u64, Vec<u8>>,
 }
@@ -12,7 +12,7 @@ pub(crate) struct Trampoline {
     target: u32,
 }
 
-impl JitRuntime {
+impl JitCodeCache {
     pub fn new() -> Self {
         Self {
             trampolines: HashMap::new(),
@@ -42,7 +42,7 @@ impl JitRuntime {
     }
 }
 
-impl Default for JitRuntime {
+impl Default for JitCodeCache {
     fn default() -> Self {
         Self::new()
     }
@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn test_runtime_creation() {
-        let runtime = JitRuntime::new();
+        let runtime = JitCodeCache::new();
         assert!(runtime.get_compiled(0).is_none());
     }
 }

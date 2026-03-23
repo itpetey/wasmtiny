@@ -140,6 +140,30 @@ impl<R: Read> BinaryReader<R> {
         }
         Ok(result)
     }
+
+    pub fn read_sleb128_i64(&mut self) -> Result<i64> {
+        let mut result = 0i64;
+        let mut shift = 0;
+        let mut byte;
+        loop {
+            byte = self.read_u8()?;
+            result |= ((byte & 0x7F) as i64) << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            if shift > 64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "sleb128 overflow",
+                ));
+            }
+        }
+        if shift < 64 && (byte & 0x40) != 0 {
+            result |= !0_i64 << shift;
+        }
+        Ok(result)
+    }
 }
 
 impl<R: Read> Read for BinaryReader<R> {
