@@ -138,6 +138,94 @@ impl AotRuntime {
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
         module.call_native(func_idx, args)
     }
+
+    pub fn memory_grow(&mut self, module_idx: u32, delta: u32) -> Result<i32> {
+        let module = self
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        if let Some(ref mut memory) = module.memory {
+            let old_size = memory.size();
+            memory.grow(delta)?;
+            Ok(old_size as i32)
+        } else {
+            Err(WasmError::Runtime("no memory".into()))
+        }
+    }
+
+    pub fn memory_size(&self, module_idx: u32) -> Result<i32> {
+        let module = self
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        if let Some(ref memory) = module.memory {
+            Ok(memory.size() as i32)
+        } else {
+            Err(WasmError::Runtime("no memory".into()))
+        }
+    }
+
+    pub fn table_grow(&mut self, module_idx: u32, table_idx: u32, delta: u32) -> Result<i32> {
+        let module = self
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        if let Some(ref mut table) = module.tables.get_mut(table_idx as usize) {
+            let old_size = table.data.len() as u32;
+            let new_size = old_size.saturating_add(delta);
+            if let Some(max) = table.type_.limits.max() {
+                if new_size > max {
+                    return Ok(-1);
+                }
+            }
+            table.data.resize(new_size as usize, 0);
+            Ok(old_size as i32)
+        } else {
+            Err(WasmError::Runtime("table not found".into()))
+        }
+    }
+
+    pub fn table_size(&self, module_idx: u32, table_idx: u32) -> Result<i32> {
+        let module = self
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        if let Some(ref table) = module.tables.get(table_idx as usize) {
+            Ok(table.data.len() as i32)
+        } else {
+            Err(WasmError::Runtime("table not found".into()))
+        }
+    }
+
+    pub fn get_global_value(&self, module_idx: u32, global_idx: u32) -> Result<WasmValue> {
+        let module = self
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        if let Some(ref global) = module.globals.get(global_idx as usize) {
+            Ok(global.value.clone())
+        } else {
+            Err(WasmError::Runtime("global not found".into()))
+        }
+    }
+
+    pub fn set_global_value(
+        &mut self,
+        module_idx: u32,
+        global_idx: u32,
+        value: WasmValue,
+    ) -> Result<()> {
+        let module = self
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        if let Some(ref mut global) = module.globals.get_mut(global_idx as usize) {
+            global.value = value;
+            Ok(())
+        } else {
+            Err(WasmError::Runtime("global not found".into()))
+        }
+    }
 }
 
 impl Default for AotRuntime {
