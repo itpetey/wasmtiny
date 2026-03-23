@@ -59,27 +59,31 @@
 
 ## 5. Fast Interpreter Mode
 
-- [ ] 5.1 Implement register-based IR representation
-- [ ] 5.2 Convert bytecode to register IR
-- [ ] 5.3 Optimize redundant loads/stores
-- [ ] 5.4 Optimize constant folding
-- [ ] 5.5 Integrate fast interpreter with core interpreter
+- [x] 5.1 Implement register-based IR representation
+- [x] 5.2 Convert bytecode to register IR
+- [x] 5.3 Optimize redundant loads/stores
+- [x] 5.4 Optimize constant folding
+- [x] 5.5 Integrate fast interpreter with core interpreter
 
 ## 6. AOT Runtime (wasm-aot-runtime)
 
 - [x] 6.1 Define AOT module format structures
 - [x] 6.2 Implement AOT loader
-- [ ] 6.3 Implement native function table dispatch
-- [ ] 6.4 Implement memory management for AOT
-- [ ] 6.5 Implement table management
-- [ ] 6.6 Implement global variable access
-- [ ] 6.7 Implement trap handling
+- [x] 6.3 Implement native function table dispatch
+- [x] 6.4 Implement memory management for AOT
+- [x] 6.5 Implement table management
+- [x] 6.6 Implement global variable access
+- [x] 6.7 Implement trap handling
 
 ## 7. Fast JIT (wasm-fast-jit) - Using Cranelift
 
-- [ ] 7.1 Add cranelift and cranelift-wasm dependencies to Cargo.toml
-- [ ] 7.2 Implement WASM-to-Cranelift IR translation
-- [ ] 7.3 Configure cranelift for WASM calling convention
+- [x] 7.1 Add cranelift and cranelift-wasm dependencies to Cargo.toml
+- [x] 7.2 Implement WASM-to-Cranelift IR translation
+- [x] 7.3 Configure cranelift for WASM calling convention
+- [x] 7.4 Implement JIT compilation pipeline
+- [x] 7.5 Add code cache management
+- [x] 7.6 Implement trampolines for indirect calls
+- [x] 7.7 Integrate JIT with AOT runtime
 - [ ] 7.4 Implement code cache for compiled functions
 - [ ] 7.5 Implement trampoline generation for indirect calls
 - [ ] 7.6 Implement OSR support (optional)
@@ -104,11 +108,12 @@
 - [x] 9.4 Add unit tests for interpreter execution
 - [x] 9.5 Add unit tests for memory operations
 - [x] 9.6 Add unit tests for error handling
-- [ ] 9.7 Create integration test harness
+- [x] 9.7 Create integration test harness
 
 ## 10. Build System
 
 - [x] 10.1 Configure cargo build profiles
 - [x] 10.2 Add cross-compilation support
 - [x] 10.3 Document build requirements
+- [x] 10.4 Add CMakeLists.txt for integration with WAMR build system
 - [ ] 10.4 Create CMakeLists.txt for C integration (optional)
