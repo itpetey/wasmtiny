@@ -1,5 +1,5 @@
 use super::{
-    FunctionType, Global, ImportKind, Memory, Module, Result, Table, ValType, WasmError, WasmValue,
+    FunctionType, Global, ImportKind, Memory, Module, Result, Table, WasmError, WasmValue,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -91,12 +91,12 @@ impl Store {
 
     pub fn register_native_func(
         &mut self,
-        name: &str,
+        _name: &str,
         func: Box<dyn HostFunc>,
         func_type: FunctionType,
     ) -> u32 {
-        let idx = self.register_native(func, func_type);
-        idx
+        
+        self.register_native(func, func_type)
     }
 
     pub fn get_native_func(&self, idx: u32) -> Option<&NativeFuncRef> {

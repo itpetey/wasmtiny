@@ -96,7 +96,7 @@ impl AotModule {
         self.native_functions.len() as u32
     }
 
-    pub fn get_func_type(&self, func_idx: u32) -> Option<&crate::runtime::FunctionType> {
+    pub fn get_func_type(&self, _func_idx: u32) -> Option<&crate::runtime::FunctionType> {
         None
     }
 }
@@ -181,11 +181,10 @@ impl AotRuntime {
         if let Some(ref mut table) = module.tables.get_mut(table_idx as usize) {
             let old_size = table.data.len() as u32;
             let new_size = old_size.saturating_add(delta);
-            if let Some(max) = table.type_.limits.max() {
-                if new_size > max {
+            if let Some(max) = table.type_.limits.max()
+                && new_size > max {
                     return Ok(-1);
                 }
-            }
             table.data.resize(new_size as usize, 0);
             Ok(old_size as i32)
         } else {

@@ -27,13 +27,12 @@ impl Memory {
         let old_size = self.size();
         let new_size = old_size.saturating_add(delta);
 
-        if let Some(max) = self.mem_type.limits.max() {
-            if new_size > max {
+        if let Some(max) = self.mem_type.limits.max()
+            && new_size > max {
                 return Err(WasmError::Runtime(
                     "memory size exceeds maximum".to_string(),
                 ));
             }
-        }
 
         if new_size > MAX_PAGES {
             return Err(WasmError::Runtime(

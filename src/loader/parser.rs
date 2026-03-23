@@ -69,7 +69,7 @@ impl Parser {
                     return Err(WasmError::Load(format!(
                         "unknown section id: {}",
                         section_id
-                    )))
+                    )));
                 }
             }
         }
@@ -172,7 +172,7 @@ impl Parser {
                     return Err(WasmError::Load(format!(
                         "unknown import kind: {}",
                         kind_byte
-                    )))
+                    )));
                 }
             };
 
@@ -289,7 +289,7 @@ impl Parser {
                     return Err(WasmError::Load(format!(
                         "unknown export kind: {}",
                         kind_byte
-                    )))
+                    )));
                 }
             };
 

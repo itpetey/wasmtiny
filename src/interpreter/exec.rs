@@ -180,8 +180,8 @@ impl Interpreter {
 
                 if let Some(ref instance) = self.instance {
                     let instance = instance.lock().unwrap();
-                    if let Some(table) = instance.tables.first() {
-                        if (func_idx as usize) < table.data.len() {
+                    if let Some(table) = instance.tables.first()
+                        && (func_idx as usize) < table.data.len() {
                             let target_func_idx = table.data[func_idx as usize];
 
                             if let Some(func) = instance.module().func_at(target_func_idx) {
@@ -217,7 +217,6 @@ impl Interpreter {
                                 self.control_stack.push(frame);
                             }
                         }
-                    }
                 } else {
                     return Err(WasmError::Runtime("no instance available".to_string()));
                 }
@@ -301,11 +300,10 @@ impl Interpreter {
                             .operand_stack
                             .pop()
                             .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
-                        if let WasmValue::FuncRef(fidx) = val {
-                            if elem_idx < table.data.len() {
+                        if let WasmValue::FuncRef(fidx) = val
+                            && elem_idx < table.data.len() {
                                 table.data[elem_idx] = fidx;
                             }
-                        }
                     }
                 }
             }
