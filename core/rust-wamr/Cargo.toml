@@ -1,9 +1,5 @@
 [workspace]
 resolver = "2"
-members = [
-    ".",
-    "c_api",
-]
 
 [package]
 name = "wasm-runtime-core"
