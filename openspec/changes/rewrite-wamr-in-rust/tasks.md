@@ -44,14 +44,14 @@
 - [x] 4.2 Implement control stack (`Vec<ControlFrame>`)
 - [x] 4.3 Implement `Frame` struct with labels
 - [x] 4.4 Implement numeric instructions (i32, i64, f32, f64)
-- [ ] 4.5 Implement memory instructions (load/store)
-- [ ] 4.6 Implement control flow instructions (block, loop, if, br, br_if, br_table)
-- [ ] 4.7 Implement call instructions (call, call_indirect)
-- [ ] 4.8 Implement local instructions (local.get, local.set, local.tee)
-- [ ] 4.9 Implement global instructions
+- [x] 4.5 Implement memory instructions (load/store)
+- [x] 4.6 Implement control flow instructions (block, loop, if, br, br_if, br_table)
+- [x] 4.7 Implement call instructions (call, call_indirect)
+- [x] 4.8 Implement local instructions (local.get, local.set, local.tee)
+- [x] 4.9 Implement global instructions
 - [ ] 4.10 Implement table instructions
-- [ ] 4.11 Implement memory.grow and memory.size
-- [ ] 4.12 Implement parametric instructions (drop, select)
+- [x] 4.11 Implement memory.grow and memory.size
+- [x] 4.12 Implement parametric instructions (drop, select)
 - [ ] 4.13 Implement reference instructions
 - [ ] 4.14 Implement host function call dispatch
 - [ ] 4.15 Implement trap handling and propagation
