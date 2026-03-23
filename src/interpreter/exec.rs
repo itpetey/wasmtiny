@@ -180,7 +180,7 @@ impl Interpreter {
 
                 if let Some(ref instance) = self.instance {
                     let instance = instance.lock().unwrap();
-                    if let Some(table) = instance.tables.get(0) {
+                    if let Some(table) = instance.tables.first() {
                         if (func_idx as usize) < table.data.len() {
                             let target_func_idx = table.data[func_idx as usize];
 
