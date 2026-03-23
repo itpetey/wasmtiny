@@ -84,10 +84,8 @@
 - [x] 7.5 Add code cache management
 - [x] 7.6 Implement trampolines for indirect calls
 - [x] 7.7 Integrate JIT with AOT runtime
-- [ ] 7.4 Implement code cache for compiled functions
-- [ ] 7.5 Implement trampoline generation for indirect calls
-- [ ] 7.6 Implement OSR support (optional)
-- [ ] 7.7 Add unit tests for JIT compilation
+- [ ] 7.8 Add unit tests for JIT compilation
+- [ ] 7.9 Implement OSR support (optional)
 
 ## 8. C API Compatibility
 
@@ -99,6 +97,7 @@
 - [x] 8.6 Implement table FFI bindings
 - [x] 8.7 Implement global FFI bindings
 - [x] 8.8 Implement error propagation from Rust to C
+- [ ] 8.9 Remove C API (not needed for Rust-only rewrite)
 
 ## 9. Testing Infrastructure
 
@@ -116,4 +115,4 @@
 - [x] 10.2 Add cross-compilation support
 - [x] 10.3 Document build requirements
 - [x] 10.4 Add CMakeLists.txt for integration with WAMR build system
-- [ ] 10.4 Create CMakeLists.txt for C integration (optional)
+- [ ] 10.5 Create CMakeLists.txt for C integration (optional)
