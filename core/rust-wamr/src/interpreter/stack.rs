@@ -14,8 +14,12 @@ impl OperandStack {
         }
     }
 
-    pub fn push(&mut self, value: WasmValue) {
+    pub fn push(&mut self, value: WasmValue) -> crate::runtime::Result<()> {
+        if self.slots.len() >= self.max_size {
+            return Err(crate::runtime::WasmError::Runtime("stack overflow".into()));
+        }
         self.slots.push(value);
+        Ok(())
     }
 
     pub fn pop(&mut self) -> Option<WasmValue> {

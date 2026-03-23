@@ -119,7 +119,7 @@ impl Interpreter {
             0x20 => {
                 let idx = self.operand_stack.pop_i32()? as usize;
                 if idx < self.locals.len() {
-                    self.operand_stack.push(self.locals[idx].clone());
+                    self.operand_stack.push(self.locals[idx].clone())?;
                 }
             }
             0x21 => {
@@ -145,14 +145,14 @@ impl Interpreter {
                 } else {
                     self.locals.push(val.clone());
                 }
-                self.operand_stack.push(val);
+                self.operand_stack.push(val)?;
             }
             0x23 => {
                 let idx = self.operand_stack.pop_i32()? as u32;
                 if let Some(ref instance) = self.instance {
                     let instance = instance.lock().unwrap();
                     if let Some(global) = instance.globals.get(idx as usize) {
-                        self.operand_stack.push(global.value.clone());
+                        self.operand_stack.push(global.value.clone())?;
                     }
                 }
             }
@@ -169,14 +169,251 @@ impl Interpreter {
                     }
                 }
             }
-            0x25 => {}
-            0x26 => {}
-            0x27 => {}
-            0x28 => {}
-            0x29 => {}
-            0x2A => {}
-            0x2B => {}
-            0x2C => {}
+            0x25 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get(idx as usize) {
+                        let elem_idx = self.operand_stack.pop_i32()? as usize;
+                        if elem_idx < table.data.len() {
+                            let func_idx = table.data[elem_idx];
+                            self.operand_stack.push(WasmValue::FuncRef(func_idx))?;
+                        }
+                    }
+                }
+            }
+            0x26 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        let elem_idx = self.operand_stack.pop_i32()? as usize;
+                        let val = self
+                            .operand_stack
+                            .pop()
+                            .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
+                        if let WasmValue::FuncRef(fidx) = val {
+                            if elem_idx < table.data.len() {
+                                table.data[elem_idx] = fidx;
+                            }
+                        }
+                    }
+                }
+            }
+            0x27 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get(idx as usize) {
+                        self.operand_stack
+                            .push(WasmValue::I32(table.data.len() as i32))?;
+                    }
+                }
+            }
+            0x28 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let delta = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        let old_size = table.data.len() as u32;
+                        let new_size = old_size.saturating_add(delta);
+                        if let Some(max) = table.type_.limits.max() {
+                            if new_size > max {
+                                self.operand_stack.push(WasmValue::I32(-1))?;
+                            } else {
+                                table.data.resize(new_size as usize, 0);
+                                self.operand_stack.push(WasmValue::I32(old_size as i32))?;
+                            }
+                        } else {
+                            table.data.resize(new_size as usize, 0);
+                            self.operand_stack.push(WasmValue::I32(old_size as i32))?;
+                        }
+                    }
+                }
+            }
+            0x29 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let _fill_val = self.operand_stack.pop_i32()?;
+                let count = self.operand_stack.pop_i32()? as usize;
+                let offset = self.operand_stack.pop_i32()? as usize;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        for i in offset..std::cmp::min(offset + count, table.data.len()) {
+                            table.data[i] = 0;
+                        }
+                    }
+                }
+            }
+            0x24 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let val = self
+                    .operand_stack
+                    .pop()
+                    .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(global) = instance.globals.get_mut(idx as usize) {
+                        global.value = val;
+                    }
+                }
+            }
+            0x25 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get(idx as usize) {
+                        let elem_idx = self.operand_stack.pop_i32()? as usize;
+                        if elem_idx < table.data.len() {
+                            let func_idx = table.data[elem_idx];
+                            self.operand_stack.push(WasmValue::FuncRef(func_idx))?;
+                        }
+                    }
+                }
+            }
+            0x26 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        let elem_idx = self.operand_stack.pop_i32()? as usize;
+                        let val = self
+                            .operand_stack
+                            .pop()
+                            .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
+                        if let WasmValue::FuncRef(fidx) = val {
+                            if elem_idx < table.data.len() {
+                                table.data[elem_idx] = fidx;
+                            }
+                        }
+                    }
+                }
+            }
+            0x27 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get(idx as usize) {
+                        self.operand_stack
+                            .push(WasmValue::I32(table.data.len() as i32));
+                    }
+                }
+            }
+            0x28 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let delta = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        let old_size = table.data.len() as u32;
+                        let new_size = old_size.saturating_add(delta);
+                        if let Some(max) = table.type_.limits.max() {
+                            if new_size > max {
+                                self.operand_stack.push(WasmValue::I32(-1));
+                            } else {
+                                table.data.resize(new_size as usize, 0);
+                                self.operand_stack.push(WasmValue::I32(old_size as i32));
+                            }
+                        } else {
+                            table.data.resize(new_size as usize, 0);
+                            self.operand_stack.push(WasmValue::I32(old_size as i32));
+                        }
+                    }
+                }
+            }
+            0x29 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let _fill_val = self.operand_stack.pop_i32()?;
+                let count = self.operand_stack.pop_i32()? as usize;
+                let offset = self.operand_stack.pop_i32()? as usize;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        for i in offset..std::cmp::min(offset + count, table.data.len()) {
+                            table.data[i] = 0;
+                        }
+                    }
+                }
+            }
+            0x26 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        let elem_idx = self.operand_stack.pop_i32()? as usize;
+                        let val = self
+                            .operand_stack
+                            .pop()
+                            .ok_or_else(|| WasmError::Runtime("stack underflow".into()))?;
+                        if let WasmValue::FuncRef(fidx) = val {
+                            if elem_idx < table.data.len() {
+                                table.data[elem_idx] = fidx;
+                            }
+                        }
+                    }
+                }
+            }
+            0x27 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get(idx as usize) {
+                        self.operand_stack
+                            .push(WasmValue::I32(table.data.len() as i32));
+                    }
+                }
+            }
+            0x28 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let delta = self.operand_stack.pop_i32()? as u32;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        let old_size = table.data.len() as u32;
+                        let new_size = old_size.saturating_add(delta);
+                        if let Some(max) = table.type_.limits.max() {
+                            if new_size > max {
+                                self.operand_stack.push(WasmValue::I32(-1));
+                            } else {
+                                table.data.resize(new_size as usize, 0);
+                                self.operand_stack.push(WasmValue::I32(old_size as i32));
+                            }
+                        } else {
+                            table.data.resize(new_size as usize, 0);
+                            self.operand_stack.push(WasmValue::I32(old_size as i32));
+                        }
+                    }
+                }
+            }
+            0x29 => {
+                let idx = self.operand_stack.pop_i32()? as u32;
+                let _fill_val = self.operand_stack.pop_i32()?;
+                let count = self.operand_stack.pop_i32()? as usize;
+                let offset = self.operand_stack.pop_i32()? as usize;
+                if let Some(ref instance) = self.instance {
+                    let mut instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get_mut(idx as usize) {
+                        for i in offset..std::cmp::min(offset + count, table.data.len()) {
+                            table.data[i] = 0;
+                        }
+                    }
+                }
+            }
+            0x2A => {
+                let _dst_idx = self.operand_stack.pop_i32()? as u32;
+                let _src_idx = self.operand_stack.pop_i32()? as u32;
+                let count = self.operand_stack.pop_i32()? as usize;
+            }
+            0x2B => {
+                let _table_idx = self.operand_stack.pop_i32()? as u32;
+                let _elem_idx = self.operand_stack.pop_i32()? as u32;
+                let _offset = self.operand_stack.pop_i32()?;
+                let _count = self.operand_stack.pop_i32()?;
+            }
+            0x2C => {
+                let _elem_idx = self.operand_stack.pop_i32()? as u32;
+            }
             0x2D => {}
             0x2E => {}
             0x2F => {}
@@ -595,6 +832,10 @@ impl Interpreter {
                 } else {
                     self.operand_stack.push(WasmValue::I32(0));
                 }
+            }
+            0xD2 => {
+                let func_idx = self.operand_stack.pop_i32()? as u32;
+                self.operand_stack.push(WasmValue::FuncRef(func_idx));
             }
             _ => {
                 return Err(WasmError::Runtime(format!(
