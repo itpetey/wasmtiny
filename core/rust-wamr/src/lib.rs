@@ -1,5 +1,4 @@
 pub mod aot_runtime;
-pub mod c_api;
 pub mod interpreter;
 pub mod jit;
 pub mod loader;
