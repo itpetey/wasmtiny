@@ -1,4 +1,4 @@
-use super::{Result, TrapCode, WasmError};
+use super::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NumType {

@@ -7,14 +7,14 @@ pub struct BinaryReader<R: Read> {
 }
 
 impl<R: Read> BinaryReader<R> {
-    pub fn new(mut reader: R) -> Self {
+    pub fn new(mut reader: R) -> Result<Self> {
         let mut data = Vec::new();
-        let _ = reader.read_to_end(&mut data);
-        Self {
+        reader.read_to_end(&mut data)?;
+        Ok(Self {
             data,
             position: 0,
             _phantom: std::marker::PhantomData,
-        }
+        })
     }
 
     pub fn from_data(data: Vec<u8>) -> Self {

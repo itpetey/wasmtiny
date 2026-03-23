@@ -1,4 +1,4 @@
-use crate::runtime::{Limits, MemoryType, Result, TrapCode, WasmError};
+use crate::runtime::{MemoryType, Result, TrapCode, WasmError};
 
 const PAGE_SIZE: u32 = 65536;
 const MAX_PAGES: u32 = 65536;
@@ -135,6 +135,8 @@ impl Memory {
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::Limits;
+
     use super::*;
 
     #[test]

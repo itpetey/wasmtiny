@@ -1,4 +1,4 @@
-use super::{Global, Import, ImportKind, Memory, Module, Result, Table, WasmError, WasmValue};
+use super::{Global, ImportKind, Memory, Module, Result, Table, WasmError, WasmValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 

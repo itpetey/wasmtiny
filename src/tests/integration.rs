@@ -1,6 +1,6 @@
 use crate::runtime::{ExportKind, ExportType};
-use crate::runtime::{FunctionType, Module, NumType, Result, ValType, WasmError, WasmValue};
-use std::sync::{Arc, Mutex};
+use crate::runtime::{FunctionType, Module, NumType, Result, ValType, WasmValue};
+use std::sync::Arc;
 
 pub struct IntegrationTestHarness {
     pub modules: Vec<Arc<Module>>,
@@ -43,7 +43,7 @@ pub struct ExpectedResult {
 }
 
 pub fn run_integration_test(
-    harness: &IntegrationTestHarness,
+    _harness: &IntegrationTestHarness,
     test: &WasmTest,
 ) -> Result<TestReport> {
     let parser = crate::loader::Parser::new();
@@ -143,7 +143,7 @@ pub fn run_all_tests() -> Vec<TestReport> {
     let mut reports = Vec::new();
     let harness = IntegrationTestHarness::new();
 
-    let add_module = create_simple_add_module();
+    let _add_module = create_simple_add_module();
     let test1 = WasmTest {
         name: "simple_add".to_string(),
         wasm_bytes: vec![],
@@ -154,7 +154,7 @@ pub fn run_all_tests() -> Vec<TestReport> {
         reports.push(report);
     }
 
-    let sub_module = create_simple_sub_module();
+    let _sub_module = create_simple_sub_module();
     let test2 = WasmTest {
         name: "simple_sub".to_string(),
         wasm_bytes: vec![],
@@ -165,7 +165,7 @@ pub fn run_all_tests() -> Vec<TestReport> {
         reports.push(report);
     }
 
-    let memory_module = create_memory_module();
+    let _memory_module = create_memory_module();
     let test3 = WasmTest {
         name: "memory_size".to_string(),
         wasm_bytes: vec![],
@@ -213,6 +213,6 @@ mod tests {
 
     #[test]
     fn test_run_all_tests() {
-        let reports = run_all_tests();
+        let _reports = run_all_tests();
     }
 }

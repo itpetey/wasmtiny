@@ -5,7 +5,6 @@ use crate::runtime::{
 use crate::runtime::{Func, Local};
 use crate::runtime::{FunctionType, Module, NumType, RefType, Result, ValType, WasmError};
 use crate::runtime::{GlobalType, Limits, MemoryType, TableType};
-use std::io::Cursor;
 
 pub struct StreamingParser {
     pub module: Module,
@@ -42,7 +41,7 @@ impl StreamingParser {
             let section_id = reader
                 .read_u8()
                 .map_err(|_| WasmError::Load("failed to read section id".to_string()))?;
-            let section_size = reader
+            let _section_size = reader
                 .read_u32()
                 .map_err(|_| WasmError::Load("failed to read section size".to_string()))?;
 
@@ -299,7 +298,7 @@ impl StreamingParser {
                 .iter()
                 .map(|(n, t)| Local {
                     count: *n,
-                    type_: t.clone(),
+                    type_: *t,
                 })
                 .collect();
             let body_size = 100;

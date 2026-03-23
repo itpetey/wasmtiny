@@ -1,4 +1,3 @@
-use crate::runtime::{Result, WasmError, WasmValue};
 use std::collections::HashMap;
 
 pub struct JitRuntime {
@@ -6,8 +5,10 @@ pub struct JitRuntime {
     compiled_code: HashMap<u64, Vec<u8>>,
 }
 
-struct Trampoline {
+pub(crate) struct Trampoline {
+    #[allow(dead_code)]
     code: Vec<u8>,
+    #[allow(dead_code)]
     target: u32,
 }
 
@@ -35,7 +36,8 @@ impl JitRuntime {
         self.compiled_code.get(&key)
     }
 
-    pub fn get_trampoline(&self, table_idx: u32) -> Option<&Trampoline> {
+    #[allow(dead_code)]
+    pub(crate) fn get_trampoline(&self, table_idx: u32) -> Option<&Trampoline> {
         self.trampolines.get(&table_idx)
     }
 }

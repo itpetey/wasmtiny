@@ -1,5 +1,4 @@
 use crate::runtime::{Result, WasmError};
-use std::io::Cursor;
 
 pub struct AotLoader;
 
