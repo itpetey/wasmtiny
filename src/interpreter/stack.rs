@@ -160,12 +160,12 @@ impl ControlFrame {
             Some(_) => {
                 return Err(crate::runtime::WasmError::Runtime(
                     "type mismatch".to_string(),
-                ))
+                ));
             }
             None => {
                 return Err(crate::runtime::WasmError::Runtime(
                     "stack underflow".to_string(),
-                ))
+                ));
             }
         };
         Ok(idx as i32)

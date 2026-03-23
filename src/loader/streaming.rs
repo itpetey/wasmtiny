@@ -130,7 +130,7 @@ impl StreamingParser {
                     return Err(WasmError::Load(format!(
                         "unknown import kind: {}",
                         kind_byte
-                    )))
+                    )));
                 }
             };
             self.module.imports.push(Import {
@@ -228,7 +228,7 @@ impl StreamingParser {
                     return Err(WasmError::Load(format!(
                         "unknown export kind: {}",
                         kind_byte
-                    )))
+                    )));
                 }
             };
             self.module.exports.push(ExportType {

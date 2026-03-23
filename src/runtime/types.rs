@@ -161,13 +161,12 @@ impl Table {
     pub fn grow(&mut self, delta: u32) -> Result<u32> {
         let old_size = self.size();
         let new_size = old_size.saturating_add(delta);
-        if let Some(max) = self.type_.limits.max() {
-            if new_size > max {
+        if let Some(max) = self.type_.limits.max()
+            && new_size > max {
                 return Err(super::WasmError::Runtime(
                     "table size exceeds maximum".to_string(),
                 ));
             }
-        }
         self.data.resize(new_size as usize, 0);
         Ok(old_size)
     }

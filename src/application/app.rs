@@ -1,5 +1,5 @@
 use crate::aot_runtime::loader::AotLoader;
-use crate::aot_runtime::runtime::{AotExport, AotModule, AotRuntime};
+use crate::aot_runtime::runtime::{AotExport, AotRuntime};
 use crate::runtime::{Result, Store, WasmError, WasmValue};
 use std::fs;
 use std::path::Path;
@@ -30,7 +30,7 @@ impl WasmApplication {
     }
 
     pub fn instantiate(&mut self, module_idx: u32) -> Result<()> {
-        let module = self
+        let _module = self
             .runtime
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
@@ -64,12 +64,12 @@ impl WasmApplication {
     }
 
     pub fn execute_start(&self, module_idx: u32) -> Result<()> {
-        let module = self
+        let _module = self
             .runtime
             .get_module(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
 
-        let store = Store::new();
+        let _store = Store::new();
 
         Ok(())
     }
