@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 pub struct Instance {
     module: Arc<Module>,
-    memories: Vec<Memory>,
-    tables: Vec<Table>,
-    globals: Vec<Global>,
+    pub memories: Vec<Memory>,
+    pub tables: Vec<Table>,
+    pub globals: Vec<Global>,
     funcs: Vec<Box<dyn HostFunc>>,
     exports: HashMap<String, Extern>,
 }
