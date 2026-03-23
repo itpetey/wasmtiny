@@ -111,9 +111,117 @@ impl Interpreter {
             }
             0x0F => return Ok(()),
             0x10 => {
-                let _func_idx = self.operand_stack.pop_i32()? as u32;
+                let func_idx = self.operand_stack.pop_i32()? as u32;
+
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    let import_count = instance.module().import_count() as u32;
+
+                    if func_idx < import_count {
+                        let func_type = instance.module().func_type(func_idx).ok_or_else(|| {
+                            WasmError::Validation(format!(
+                                "function type not found for func {}",
+                                func_idx
+                            ))
+                        })?;
+                        let param_count = func_type.params.len();
+                        drop(instance);
+
+                        let mut args = Vec::with_capacity(param_count);
+                        for _ in 0..param_count {
+                            if let Some(arg) = self.operand_stack.pop() {
+                                args.push(arg);
+                            }
+                        }
+                        args.reverse();
+
+                        let mut instance = self.instance.as_ref().unwrap().lock().unwrap();
+                        let results = instance.call(func_idx, &args)?;
+                        drop(instance);
+                        for val in results {
+                            self.operand_stack.push_unchecked(val);
+                        }
+                    } else {
+                        let wasm_func_idx = func_idx - import_count;
+                        if let Some(func) = instance.module().func_at(wasm_func_idx) {
+                            let func_type =
+                                instance.module().type_at(func.type_idx).ok_or_else(|| {
+                                    WasmError::Validation(format!(
+                                        "type {} not found",
+                                        func.type_idx
+                                    ))
+                                })?;
+
+                            let mut args = Vec::new();
+                            for _ in 0..func_type.params.len() {
+                                if let Some(arg) = self.operand_stack.pop() {
+                                    args.push(arg);
+                                }
+                            }
+                            args.reverse();
+
+                            self.locals = args;
+
+                            let frame = ControlFrame::new(
+                                func_type.params.len() as u32,
+                                func_type.results.len() as u32,
+                                func.body.clone(),
+                            );
+                            self.control_stack.push(frame);
+                        }
+                    }
+                } else {
+                    return Err(WasmError::Runtime("no instance available".to_string()));
+                }
             }
-            0x11 => {}
+            0x11 => {
+                let type_idx = self.operand_stack.pop_i32()? as u32;
+                let func_idx = self.operand_stack.pop_i32()? as u32;
+
+                if let Some(ref instance) = self.instance {
+                    let instance = instance.lock().unwrap();
+                    if let Some(table) = instance.tables.get(0) {
+                        if (func_idx as usize) < table.data.len() {
+                            let target_func_idx = table.data[func_idx as usize];
+
+                            if let Some(func) = instance.module().func_at(target_func_idx) {
+                                let func_type =
+                                    instance.module().type_at(func.type_idx).ok_or_else(|| {
+                                        WasmError::Validation(format!(
+                                            "type {} not found",
+                                            func.type_idx
+                                        ))
+                                    })?;
+
+                                if func_type.params.len() as u32 != type_idx {
+                                    return Err(WasmError::Runtime(
+                                        "call_indirect type mismatch".to_string(),
+                                    ));
+                                }
+
+                                let mut args = Vec::new();
+                                for _ in 0..func_type.params.len() {
+                                    if let Some(arg) = self.operand_stack.pop() {
+                                        args.push(arg);
+                                    }
+                                }
+                                args.reverse();
+
+                                self.locals = args;
+
+                                let frame = ControlFrame::new(
+                                    func_type.params.len() as u32,
+                                    func_type.results.len() as u32,
+                                    func.body.clone(),
+                                );
+                                self.control_stack.push(frame);
+                            }
+                        }
+                    }
+                } else {
+                    return Err(WasmError::Runtime("no instance available".to_string()));
+                }
+            }
             0x1A => drop(self.operand_stack.pop()),
             0x1B => {}
             0x20 => {
