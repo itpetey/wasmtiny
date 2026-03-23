@@ -91,6 +91,14 @@ impl AotModule {
     pub fn get_global_mut(&mut self, idx: u32) -> Option<&mut Global> {
         self.globals.get_mut(idx as usize)
     }
+
+    pub fn get_func_count(&self) -> u32 {
+        self.native_functions.len() as u32
+    }
+
+    pub fn get_func_type(&self, func_idx: u32) -> Option<&crate::runtime::FunctionType> {
+        None
+    }
 }
 
 pub struct AotRuntime {
@@ -337,5 +345,71 @@ mod tests {
 
         let short_data = vec![0x00, 0x61];
         assert!(validate_aot_data(&short_data).is_err());
+    }
+
+    #[test]
+    fn test_memory_grow() {
+        let mut runtime = AotRuntime::new();
+        let module_idx = runtime
+            .load_module(&[0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00])
+            .unwrap();
+
+        let mut aot_module = runtime.get_module_mut(module_idx).unwrap();
+        let mem_type = crate::runtime::MemoryType::new(crate::runtime::Limits::Min(1));
+        let memory = crate::memory::Memory::new(mem_type);
+        aot_module.set_memory(memory);
+        drop(aot_module);
+
+        let result = runtime.memory_grow(module_idx, 1);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_table_operations() {
+        let mut runtime = AotRuntime::new();
+        let module_idx = runtime
+            .load_module(&[0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00])
+            .unwrap();
+
+        let mut aot_module = runtime.get_module_mut(module_idx).unwrap();
+        let table = Table::new(TableType::new(RefType::FuncRef, Limits::Min(5)));
+        aot_module.add_table(table);
+        drop(aot_module);
+
+        let size = runtime.table_size(module_idx, 0).unwrap();
+        assert_eq!(size, 5);
+
+        let old_size = runtime.table_grow(module_idx, 0, 3).unwrap();
+        assert_eq!(old_size, 5);
+
+        let new_size = runtime.table_size(module_idx, 0).unwrap();
+        assert_eq!(new_size, 8);
+    }
+
+    #[test]
+    fn test_global_operations() {
+        let mut runtime = AotRuntime::new();
+        let module_idx = runtime
+            .load_module(&[0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00])
+            .unwrap();
+
+        let mut aot_module = runtime.get_module_mut(module_idx).unwrap();
+        let global = Global::new(
+            GlobalType::new(ValType::Num(NumType::I32), true),
+            WasmValue::I32(100),
+        )
+        .unwrap();
+        aot_module.add_global(global);
+        drop(aot_module);
+
+        let value = runtime.get_global_value(module_idx, 0).unwrap();
+        assert_eq!(value, WasmValue::I32(100));
+
+        runtime
+            .set_global_value(module_idx, 0, WasmValue::I32(200))
+            .unwrap();
+
+        let new_value = runtime.get_global_value(module_idx, 0).unwrap();
+        assert_eq!(new_value, WasmValue::I32(200));
     }
 }

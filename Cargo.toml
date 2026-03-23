@@ -6,7 +6,12 @@ description = "Tiny Rust WebAssembly runtime based on WAMR"
 repository = "https://github.com/seliumlabs/wasmtiny"
 license = "Apache-2.0 OR MIT"
 
+[[bin]]
+name = "wasmtiny"
+path = "src/main.rs"
+
 [dependencies]
 byteorder = "1"
 leb128 = "0.2"
 memchr = "2"
+clap = { version = "4", features = ["derive"] }
