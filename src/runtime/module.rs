@@ -13,6 +13,7 @@ pub struct Module {
     pub start: Option<u32>,
     pub data: Vec<DataSegment>,
     pub elems: Vec<ElemSegment>,
+    #[allow(dead_code)]
     names: HashMap<String, NameSection>,
 }
 
@@ -56,8 +57,11 @@ pub enum ElemKind {
 
 #[derive(Debug, Clone)]
 pub struct NameSection {
+    #[allow(dead_code)]
     pub module_name: Option<String>,
+    #[allow(dead_code)]
     pub func_names: HashMap<u32, String>,
+    #[allow(dead_code)]
     pub local_names: HashMap<u32, HashMap<u32, String>>,
 }
 

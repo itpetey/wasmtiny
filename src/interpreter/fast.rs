@@ -149,6 +149,7 @@ impl Default for IrBlock {
 pub struct FastInterpreter {
     registers: Vec<WasmValue>,
     blocks: HashMap<u32, IrBlock>,
+    #[allow(dead_code)]
     current_block: u32,
     local_count: u8,
 }
@@ -164,7 +165,7 @@ impl FastInterpreter {
     }
 
     pub fn compile_module(&mut self, module: &Module) -> Result<()> {
-        for (func_idx, func) in module.funcs.iter().enumerate() {
+        for (func_idx, _func) in module.funcs.iter().enumerate() {
             self.compile_function(module, func_idx as u32)?;
         }
         Ok(())
@@ -184,7 +185,7 @@ impl FastInterpreter {
             let opcode = func.body[i];
             match opcode {
                 0x20 => {
-                    let idx = func.body[i + 1] as u8;
+                    let idx = func.body[i + 1];
                     let dst = next_reg;
                     next_reg = next_reg.wrapping_add(1);
                     register_map.insert(idx as u32, dst);
@@ -192,7 +193,7 @@ impl FastInterpreter {
                     i += 2;
                 }
                 0x21 => {
-                    let idx = func.body[i + 1] as u8;
+                    let idx = func.body[i + 1];
                     let src = next_reg;
                     next_reg = next_reg.wrapping_add(1);
                     block.instructions.push(IrOpcode::StoreLocal { src, idx });
@@ -355,12 +356,12 @@ impl FastInterpreter {
                 IrOpcode::StoreGlobal { src: _, idx: _ } => {}
                 IrOpcode::LoadLocal { dst, idx } => {
                     if (*idx as usize) < self.registers.len() {
-                        self.registers[*dst as usize] = self.registers[*idx as usize].clone();
+                        self.registers[*dst as usize] = self.registers[*idx as usize];
                     }
                 }
                 IrOpcode::StoreLocal { src, idx } => {
                     if (*idx as usize) < self.registers.len() {
-                        self.registers[*idx as usize] = self.registers[*src as usize].clone();
+                        self.registers[*idx as usize] = self.registers[*src as usize];
                     }
                 }
                 IrOpcode::Add { dst, lhs, rhs } => {
@@ -411,33 +412,33 @@ impl FastInterpreter {
                 }
                 IrOpcode::And { dst, lhs, rhs } => {
                     let a = match &self.registers[*lhs as usize] {
-                        WasmValue::I32(v) => *v as i32,
+                        WasmValue::I32(v) => *v,
                         _ => 0,
                     };
                     let b = match &self.registers[*rhs as usize] {
-                        WasmValue::I32(v) => *v as i32,
+                        WasmValue::I32(v) => *v,
                         _ => 0,
                     };
                     self.registers[*dst as usize] = WasmValue::I32(a & b);
                 }
                 IrOpcode::Or { dst, lhs, rhs } => {
                     let a = match &self.registers[*lhs as usize] {
-                        WasmValue::I32(v) => *v as i32,
+                        WasmValue::I32(v) => *v,
                         _ => 0,
                     };
                     let b = match &self.registers[*rhs as usize] {
-                        WasmValue::I32(v) => *v as i32,
+                        WasmValue::I32(v) => *v,
                         _ => 0,
                     };
                     self.registers[*dst as usize] = WasmValue::I32(a | b);
                 }
                 IrOpcode::Xor { dst, lhs, rhs } => {
                     let a = match &self.registers[*lhs as usize] {
-                        WasmValue::I32(v) => *v as i32,
+                        WasmValue::I32(v) => *v,
                         _ => 0,
                     };
                     let b = match &self.registers[*rhs as usize] {
-                        WasmValue::I32(v) => *v as i32,
+                        WasmValue::I32(v) => *v,
                         _ => 0,
                     };
                     self.registers[*dst as usize] = WasmValue::I32(a ^ b);
@@ -455,7 +456,7 @@ impl FastInterpreter {
                     self.registers[*dst as usize] = WasmValue::I32(if result { 1 } else { 0 });
                 }
                 IrOpcode::Branch { target: _ } => break,
-                IrOpcode::BranchIf { cond, target } => {
+                IrOpcode::BranchIf { cond, target: _ } => {
                     let c = match &self.registers[*cond as usize] {
                         WasmValue::I32(v) => *v != 0,
                         _ => false,
@@ -465,18 +466,16 @@ impl FastInterpreter {
                     }
                 }
                 IrOpcode::Call {
-                    func_idx,
+                    func_idx: _,
                     args: _,
-                    result,
+                    result: Some(dst),
                 } => {
-                    if let Some(dst) = result {
-                        self.registers[*dst as usize] = WasmValue::I32(42);
-                    }
+                    self.registers[*dst as usize] = WasmValue::I32(42);
                 }
                 IrOpcode::Return { values } => {
                     let mut results = Vec::new();
                     for v in values {
-                        results.push(self.registers[*v as usize].clone());
+                        results.push(self.registers[*v as usize]);
                     }
                     return Ok(results);
                 }

@@ -1,4 +1,4 @@
-use crate::runtime::{Module, NumType, RefType, Result, ValType, WasmError};
+use crate::runtime::{Module, Result, ValType, WasmError};
 
 pub struct Validator;
 

@@ -1,5 +1,4 @@
 use crate::runtime::WasmValue;
-use std::fmt;
 
 pub struct OperandStack {
     slots: Vec<WasmValue>,
@@ -20,6 +19,14 @@ impl OperandStack {
         }
         self.slots.push(value);
         Ok(())
+    }
+
+    pub fn push_unchecked(&mut self, value: WasmValue) {
+        debug_assert!(
+            self.slots.len() < self.max_size,
+            "stack overflow (validated module should not reach this)"
+        );
+        self.slots.push(value);
     }
 
     pub fn pop(&mut self) -> Option<WasmValue> {
@@ -208,7 +215,7 @@ mod tests {
     #[test]
     fn test_operand_stack() {
         let mut stack = OperandStack::new(100);
-        stack.push(WasmValue::I32(42));
+        stack.push_unchecked(WasmValue::I32(42));
         assert_eq!(stack.len(), 1);
         assert_eq!(stack.pop(), Some(WasmValue::I32(42)));
         assert!(stack.is_empty());

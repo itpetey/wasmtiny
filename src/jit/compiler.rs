@@ -1,6 +1,5 @@
 use crate::runtime::{Module, Result, WasmError, WasmValue};
 use std::collections::HashMap;
-use std::sync::RwLock;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CompilationTier {
@@ -148,7 +147,7 @@ impl JitRuntime {
     pub fn compile_function(&mut self, module: &Module, func_idx: u32) -> Result<CompiledFunction> {
         let compiled = self.compiler.compile(module, func_idx)?;
 
-        if let Some(func) = module.func_at(func_idx) {
+        if let Some(_func) = module.func_at(func_idx) {
             self.compiled_code
                 .insert(func_idx as u64, compiled.code.as_ptr() as *const ());
         }
@@ -162,7 +161,7 @@ impl JitRuntime {
         func_idx: u32,
         args: &[WasmValue],
     ) -> Result<Vec<WasmValue>> {
-        let _ = (module_idx, func_idx, args);
+        std::hint::black_box((module_idx, func_idx, args));
 
         Ok(vec![WasmValue::I32(0)])
     }

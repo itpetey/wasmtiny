@@ -32,7 +32,7 @@ pub enum AotExport {
 }
 
 impl AotModule {
-    pub fn from_module(module: &Module) -> Self {
+    pub fn from_module(_module: &Module) -> Self {
         Self {
             native_functions: Vec::new(),
             memory: None,
@@ -190,7 +190,7 @@ impl AotRuntime {
             .get_module(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
 
-        if let Some(ref table) = module.tables.get(table_idx as usize) {
+        if let Some(table) = module.tables.get(table_idx as usize) {
             Ok(table.data.len() as i32)
         } else {
             Err(WasmError::Runtime("table not found".into()))
@@ -202,8 +202,8 @@ impl AotRuntime {
             .get_module(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
 
-        if let Some(ref global) = module.globals.get(global_idx as usize) {
-            Ok(global.value.clone())
+        if let Some(global) = module.globals.get(global_idx as usize) {
+            Ok(global.value)
         } else {
             Err(WasmError::Runtime("global not found".into()))
         }
