@@ -3,7 +3,7 @@ use crate::runtime::{MemoryType, Result, TrapCode, WasmError};
 const PAGE_SIZE: u32 = 65536;
 const MAX_PAGES: u32 = 65536;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Memory {
     mem_type: MemoryType,
     data: Vec<u8>,
@@ -23,16 +23,21 @@ impl Memory {
         (self.data.len() / PAGE_SIZE as usize) as u32
     }
 
+    pub fn type_(&self) -> &MemoryType {
+        &self.mem_type
+    }
+
     pub fn grow(&mut self, delta: u32) -> Result<u32> {
         let old_size = self.size();
         let new_size = old_size.saturating_add(delta);
 
         if let Some(max) = self.mem_type.limits.max()
-            && new_size > max {
-                return Err(WasmError::Runtime(
-                    "memory size exceeds maximum".to_string(),
-                ));
-            }
+            && new_size > max
+        {
+            return Err(WasmError::Runtime(
+                "memory size exceeds maximum".to_string(),
+            ));
+        }
 
         if new_size > MAX_PAGES {
             return Err(WasmError::Runtime(

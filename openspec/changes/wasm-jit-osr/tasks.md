@@ -1,9 +1,9 @@
 ## 1. OSR Infrastructure
 
-- [ ] 1.1 Add call counter to JitCompiler for tracking function invocations
-- [ ] 1.2 Implement hot function detection threshold (1000 calls)
-- [ ] 1.3 Add OSR candidate queue for functions awaiting optimization
-- [ ] 1.4 Create OsrContext struct for managing OSR state
+- [x] 1.1 Add call counter to JitCompiler for tracking function invocations
+- [x] 1.2 Implement hot function detection threshold (1000 calls)
+- [x] 1.3 Add OSR candidate queue for functions awaiting optimization
+- [x] 1.4 Create OsrContext struct for managing OSR state
 
 ## 2. OSR Compilation
 

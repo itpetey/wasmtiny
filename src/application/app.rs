@@ -1,6 +1,6 @@
 use crate::aot_runtime::loader::AotLoader;
 use crate::aot_runtime::runtime::{AotExport, AotRuntime};
-use crate::runtime::{Result, Store, WasmError, WasmValue};
+use crate::runtime::{FunctionType, HostFunc, Result, WasmError, WasmValue};
 use std::fs;
 use std::path::Path;
 
@@ -30,27 +30,83 @@ impl WasmApplication {
     }
 
     pub fn instantiate(&mut self, module_idx: u32) -> Result<()> {
-        let _module = self
+        let module = self
             .runtime
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.instantiate()
+    }
 
-        Ok(())
+    pub fn register_host_function(
+        &mut self,
+        module_idx: u32,
+        import_module: &str,
+        name: &str,
+        func: Box<dyn HostFunc>,
+        func_type: FunctionType,
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.register_host_import(import_module, name, func, func_type)
+    }
+
+    pub fn register_memory_import(
+        &mut self,
+        module_idx: u32,
+        import_module: &str,
+        name: &str,
+        memory: crate::runtime::Memory,
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.register_memory_import(import_module, name, memory)
+    }
+
+    pub fn register_table_import(
+        &mut self,
+        module_idx: u32,
+        import_module: &str,
+        name: &str,
+        table: crate::runtime::Table,
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.register_table_import(import_module, name, table)
+    }
+
+    pub fn register_global_import(
+        &mut self,
+        module_idx: u32,
+        import_module: &str,
+        name: &str,
+        global: crate::runtime::Global,
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.register_global_import(import_module, name, global)
     }
 
     pub fn call_function(
-        &self,
+        &mut self,
         module_idx: u32,
         func_name: &str,
         args: &[WasmValue],
     ) -> Result<Vec<WasmValue>> {
         let module = self
             .runtime
-            .get_module(module_idx)
+            .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
 
-        if let Some(AotExport::Function(func_idx)) = module.get_export(func_name) {
-            module.call_native(*func_idx, args)
+        if let Some(AotExport::Function(func_idx)) = module.get_export(func_name).cloned() {
+            module.invoke_function(func_idx, args)
         } else {
             Err(WasmError::Runtime(format!(
                 "function {} not found",
@@ -59,17 +115,18 @@ impl WasmApplication {
         }
     }
 
-    pub fn execute_main(&self, module_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+    pub fn execute_main(&mut self, module_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.call_function(module_idx, "main", args)
     }
 
-    pub fn execute_start(&self, module_idx: u32) -> Result<()> {
-        let _module = self
+    pub fn execute_start(&mut self, module_idx: u32) -> Result<()> {
+        let module = self
             .runtime
-            .get_module(module_idx)
+            .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-
-        let _store = Store::new();
+        if let Some(start_idx) = module.start_function() {
+            let _ = module.invoke_function(start_idx, &[])?;
+        }
 
         Ok(())
     }
@@ -84,6 +141,70 @@ impl Default for WasmApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{FunctionType, Global, GlobalType, NumType, ValType};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CountingHostFunc;
+
+    impl HostFunc for CountingHostFunc {
+        fn call(
+            &self,
+            store: &mut crate::runtime::Store,
+            _args: &[WasmValue],
+        ) -> Result<Vec<WasmValue>> {
+            let count = store.get_native_func_count() as i32;
+            store.register_native(Box::new(NoopHostFunc), FunctionType::empty());
+            Ok(vec![WasmValue::I32(count)])
+        }
+
+        fn function_type(&self) -> Option<&FunctionType> {
+            static FUNC_TYPE: std::sync::OnceLock<FunctionType> = std::sync::OnceLock::new();
+            Some(
+                FUNC_TYPE
+                    .get_or_init(|| FunctionType::new(vec![], vec![ValType::Num(NumType::I32)])),
+            )
+        }
+    }
+
+    struct NoopHostFunc;
+
+    impl HostFunc for NoopHostFunc {
+        fn call(
+            &self,
+            _store: &mut crate::runtime::Store,
+            _args: &[WasmValue],
+        ) -> Result<Vec<WasmValue>> {
+            Ok(vec![])
+        }
+
+        fn function_type(&self) -> Option<&FunctionType> {
+            static FUNC_TYPE: std::sync::OnceLock<FunctionType> = std::sync::OnceLock::new();
+            Some(FUNC_TYPE.get_or_init(FunctionType::empty))
+        }
+    }
+
+    struct StartHostFunc {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl HostFunc for StartHostFunc {
+        fn call(
+            &self,
+            _store: &mut crate::runtime::Store,
+            _args: &[WasmValue],
+        ) -> Result<Vec<WasmValue>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![])
+        }
+
+        fn function_type(&self) -> Option<&FunctionType> {
+            static FUNC_TYPE: std::sync::OnceLock<FunctionType> = std::sync::OnceLock::new();
+            Some(FUNC_TYPE.get_or_init(FunctionType::empty))
+        }
+    }
 
     #[test]
     fn test_application_creation() {
@@ -113,5 +234,122 @@ mod tests {
         let idx = app.load_module_from_memory(&wasm_data).unwrap();
         let result = app.instantiate(idx);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_instantiate_rejects_missing_imports() {
+        let mut app = WasmApplication::new();
+        let wasm_data = vec![
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x0C, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b's', b't', 0x00, 0x00,
+        ];
+
+        let idx = app.load_module_from_memory(&wasm_data).unwrap();
+        assert!(app.instantiate(idx).is_err());
+    }
+
+    #[test]
+    fn test_call_function_with_host_import() {
+        let mut app = WasmApplication::new();
+        let wasm_data = vec![
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x02, 0x0C, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b's', b't', 0x00,
+            0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, b'm', b'a', b'i', b'n', 0x00,
+            0x01, 0x0A, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0B,
+        ];
+
+        let idx = app.load_module_from_memory(&wasm_data).unwrap();
+        app.register_host_function(
+            idx,
+            "env",
+            "host",
+            Box::new(CountingHostFunc),
+            FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]),
+        )
+        .unwrap();
+        let first = app.call_function(idx, "main", &[]).unwrap();
+        let second = app.call_function(idx, "main", &[]).unwrap();
+
+        assert_eq!(first, vec![WasmValue::I32(0)]);
+        assert_eq!(second, vec![WasmValue::I32(1)]);
+    }
+
+    #[test]
+    fn test_call_exported_imported_function() {
+        let mut app = WasmApplication::new();
+        let wasm_data = vec![
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x02, 0x0C, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b's', b't', 0x00,
+            0x00, 0x07, 0x08, 0x01, 0x04, b'm', b'a', b'i', b'n', 0x00, 0x00,
+        ];
+
+        let idx = app.load_module_from_memory(&wasm_data).unwrap();
+        app.register_host_function(
+            idx,
+            "env",
+            "host",
+            Box::new(CountingHostFunc),
+            FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]),
+        )
+        .unwrap();
+
+        let first = app.call_function(idx, "main", &[]).unwrap();
+        let second = app.call_function(idx, "main", &[]).unwrap();
+
+        assert_eq!(first, vec![WasmValue::I32(0)]);
+        assert_eq!(second, vec![WasmValue::I32(1)]);
+    }
+
+    #[test]
+    fn test_call_function_with_global_import() {
+        let mut app = WasmApplication::new();
+        let wasm_data = vec![
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x02, 0x0A, 0x01, 0x03, b'e', b'n', b'v', 0x01, b'g', 0x03, 0x7F, 0x01, 0x03,
+            0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, b'm', b'a', b'i', b'n', 0x00, 0x00, 0x0A,
+            0x0A, 0x01, 0x08, 0x00, 0x41, 0x07, 0x24, 0x00, 0x23, 0x00, 0x0B,
+        ];
+
+        let idx = app.load_module_from_memory(&wasm_data).unwrap();
+        app.register_global_import(
+            idx,
+            "env",
+            "g",
+            Global::new(
+                GlobalType::new(ValType::Num(NumType::I32), true),
+                WasmValue::I32(0),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let results = app.call_function(idx, "main", &[]).unwrap();
+        assert_eq!(results, vec![WasmValue::I32(7)]);
+    }
+
+    #[test]
+    fn test_execute_start_with_imported_function() {
+        let mut app = WasmApplication::new();
+        let wasm_data = vec![
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x0C, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'i', b'n', b'i', b't', 0x00, 0x00,
+            0x08, 0x01, 0x00,
+        ];
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let idx = app.load_module_from_memory(&wasm_data).unwrap();
+        app.register_host_function(
+            idx,
+            "env",
+            "init",
+            Box::new(StartHostFunc {
+                calls: calls.clone(),
+            }),
+            FunctionType::empty(),
+        )
+        .unwrap();
+
+        app.execute_start(idx).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

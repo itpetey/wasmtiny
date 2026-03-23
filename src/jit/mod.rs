@@ -1,5 +1,5 @@
-pub mod compiler;
-pub mod runtime;
+mod compiler;
+mod runtime;
 
 pub use compiler::JitCompiler;
-pub use runtime::JitRuntime;
+pub use runtime::JitCodeCache;

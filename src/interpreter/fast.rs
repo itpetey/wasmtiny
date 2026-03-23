@@ -173,7 +173,7 @@ impl FastInterpreter {
 
     fn compile_function(&mut self, module: &Module, func_idx: u32) -> Result<()> {
         let func = module
-            .func_at(func_idx)
+            .defined_func_at(func_idx)
             .ok_or_else(|| WasmError::Runtime(format!("function {} not found", func_idx)))?;
 
         let mut block = IrBlock::new();
