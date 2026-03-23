@@ -16,8 +16,6 @@ include_directories (${IWASM_AOT_DIR})
 
 list (APPEND c_source_all
   ${IWASM_AOT_DIR}/aot_intrinsic.c
-  ${IWASM_AOT_DIR}/aot_loader.c
-  ${IWASM_AOT_DIR}/aot_runtime.c
 )
 
 if (WAMR_BUILD_LINUX_PERF EQUAL 1)

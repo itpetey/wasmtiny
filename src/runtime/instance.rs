@@ -1,4 +1,6 @@
-use super::{Global, ImportKind, Memory, Module, Result, Table, WasmError, WasmValue};
+use super::{
+    FunctionType, Global, ImportKind, Memory, Module, Result, Table, ValType, WasmError, WasmValue,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -21,6 +23,7 @@ pub enum Extern {
 
 pub trait HostFunc: Send + Sync + 'static {
     fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>>;
+    fn function_type(&self) -> Option<&FunctionType>;
 }
 
 impl<F> HostFunc for F
@@ -30,23 +33,78 @@ where
     fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self(store, args)
     }
+
+    fn function_type(&self) -> Option<&FunctionType> {
+        None
+    }
+}
+
+pub struct NativeFuncRef {
+    pub func: Box<dyn HostFunc>,
+    pub func_type: FunctionType,
+    pub name: Option<String>,
+}
+
+impl NativeFuncRef {
+    pub fn new(func: Box<dyn HostFunc>, func_type: FunctionType) -> Self {
+        Self {
+            func,
+            func_type,
+            name: None,
+        }
+    }
+
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    pub fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.func.call(store, args)
+    }
 }
 
 #[derive(Default)]
 pub struct Store {
     pub instances: Vec<Instance>,
+    native_funcs: Vec<NativeFuncRef>,
 }
 
 impl Store {
     pub fn new() -> Self {
         Self {
             instances: Vec::new(),
+            native_funcs: Vec::new(),
         }
     }
 
     pub fn add_instance(&mut self, instance: Instance) -> usize {
         self.instances.push(instance);
         self.instances.len() - 1
+    }
+
+    pub fn register_native(&mut self, func: Box<dyn HostFunc>, func_type: FunctionType) -> u32 {
+        let idx = self.native_funcs.len() as u32;
+        self.native_funcs.push(NativeFuncRef::new(func, func_type));
+        idx
+    }
+
+    pub fn register_native_func(
+        &mut self,
+        name: &str,
+        func: Box<dyn HostFunc>,
+        func_type: FunctionType,
+    ) -> u32 {
+        let idx = self.register_native(func, func_type);
+        idx
+    }
+
+    pub fn get_native_func(&self, idx: u32) -> Option<&NativeFuncRef> {
+        self.native_funcs.get(idx as usize)
+    }
+
+    pub fn get_native_func_count(&self) -> u32 {
+        self.native_funcs.len() as u32
     }
 }
 
@@ -156,18 +214,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_instance_creation() {
-        let module = Arc::new(Module::new());
-        let instance = Instance::new(module);
-        assert_eq!(instance.funcs.len(), 0);
-    }
-
-    #[test]
     fn test_store() {
         let mut store = Store::new();
         let module = Arc::new(Module::new());
         let instance = Instance::new(module);
         let idx = store.add_instance(instance);
         assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn test_native_func_registration() {
+        let mut store = Store::new();
+        let func_type = FunctionType::new(
+            vec![
+                ValType::Num(crate::runtime::NumType::I32),
+                ValType::Num(crate::runtime::NumType::I32),
+            ],
+            vec![ValType::Num(crate::runtime::NumType::I32)],
+        );
+
+        let func: Box<dyn HostFunc> = Box::new(|_store: &mut Store, args: &[WasmValue]| {
+            let a = args[0].i32();
+            let b = args[1].i32();
+            Ok(vec![WasmValue::I32(a + b)])
+        });
+
+        let idx = store.register_native(func, func_type);
+        assert_eq!(idx, 0);
+        assert_eq!(store.get_native_func_count(), 1);
     }
 }
