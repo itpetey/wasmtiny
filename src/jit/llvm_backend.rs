@@ -30,6 +30,8 @@ use llvm_sys::target::{
     LLVM_InitializeNativeAsmParser, LLVM_InitializeNativeAsmPrinter, LLVM_InitializeNativeTarget,
 };
 
+#[cfg(feature = "llvm-jit")]
+use super::llvm_runtime::{clear_trap, take_trap};
 use super::wasm_to_llvm::WasmToLlvmTranslator;
 
 struct CompiledFunction {
@@ -77,6 +79,44 @@ pub struct CompiledLlvmFunction {
 }
 
 impl LlvmJit {
+    #[cfg(feature = "llvm-jit")]
+    fn validate_module_compatibility(module: &Module) -> Result<()> {
+        for (type_idx, func_type) in module.types.iter().enumerate() {
+            if func_type.results.len() > 1 {
+                return Err(WasmError::Runtime(format!(
+                    "LLVM JIT does not support multi-value function type {}",
+                    type_idx
+                )));
+            }
+            if func_type
+                .params
+                .iter()
+                .chain(func_type.results.iter())
+                .any(|value_type| matches!(value_type, ValType::Ref(_)))
+            {
+                return Err(WasmError::Runtime(format!(
+                    "LLVM JIT does not support reference-typed function type {}",
+                    type_idx
+                )));
+            }
+        }
+
+        for (func_idx, func) in module.funcs.iter().enumerate() {
+            if func
+                .locals
+                .iter()
+                .any(|local| matches!(local.type_, ValType::Ref(_)))
+            {
+                return Err(WasmError::Runtime(format!(
+                    "LLVM JIT does not support reference-typed locals in function {}",
+                    func_idx
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Creates a new LLVM JIT instance.
     ///
     /// Initialises the LLVM native target, ASM printer, and ASM parser,
@@ -192,6 +232,22 @@ impl LlvmJit {
         register_helper!("llvm_jit_i64_store8", llvm_jit_i64_store8 as *const u8);
         register_helper!("llvm_jit_i64_store16", llvm_jit_i64_store16 as *const u8);
         register_helper!("llvm_jit_i64_store32", llvm_jit_i64_store32 as *const u8);
+        register_helper!("llvm_jit_i32_div_s", llvm_jit_i32_div_s as *const u8);
+        register_helper!("llvm_jit_i32_div_u", llvm_jit_i32_div_u as *const u8);
+        register_helper!("llvm_jit_i32_rem_s", llvm_jit_i32_rem_s as *const u8);
+        register_helper!("llvm_jit_i32_rem_u", llvm_jit_i32_rem_u as *const u8);
+        register_helper!("llvm_jit_i64_div_s", llvm_jit_i64_div_s as *const u8);
+        register_helper!("llvm_jit_i64_div_u", llvm_jit_i64_div_u as *const u8);
+        register_helper!("llvm_jit_i64_rem_s", llvm_jit_i64_rem_s as *const u8);
+        register_helper!("llvm_jit_i64_rem_u", llvm_jit_i64_rem_u as *const u8);
+        register_helper!("llvm_jit_f32_min", llvm_jit_f32_min as *const u8);
+        register_helper!("llvm_jit_f64_min", llvm_jit_f64_min as *const u8);
+        register_helper!("llvm_jit_has_trap", llvm_jit_has_trap as *const u8);
+        register_helper!(
+            "llvm_jit_trap_unreachable",
+            llvm_jit_trap_unreachable as *const u8
+        );
+        register_helper!("llvm_jit_call_import", llvm_jit_call_import as *const u8);
 
         Ok(())
     }
@@ -215,6 +271,8 @@ impl LlvmJit {
     /// Returns an error if translation or compilation fails for any function.
     #[cfg(feature = "llvm-jit")]
     pub fn compile_module(&mut self, module: &Module) -> Result<Vec<CompiledLlvmFunction>> {
+        Self::validate_module_compatibility(module)?;
+
         if !self.helpers_registered {
             self.register_runtime_helpers()?;
             self.helpers_registered = true;
@@ -222,6 +280,7 @@ impl LlvmJit {
 
         unsafe {
             let mut compiled = Vec::new();
+            let mut pending_functions = Vec::new();
 
             let import_func_count = module
                 .imports
@@ -245,7 +304,7 @@ impl LlvmJit {
                     let mut translator = WasmToLlvmTranslator::new(context)?;
                     let translate_result = translator.translate_function(func, func_idx, module);
 
-                    let (llvm_module, _llvm_func) = match translate_result {
+                    let llvm_module = match translate_result {
                         Ok(result) => result,
                         Err(e) => {
                             LLVMOrcDisposeThreadSafeContext(ts_context);
@@ -253,27 +312,26 @@ impl LlvmJit {
                         }
                     };
 
-                    let compile_result = self.compile_and_add(llvm_module, ts_context, func_idx);
-
-                    let entry_point = match compile_result {
-                        Ok(ep) => ep,
-                        Err(e) => {
-                            return Err(e);
-                        }
-                    };
-
-                    self.compiled_functions.insert(
-                        func_idx,
-                        CompiledFunction {
-                            entry_point,
-                            func_type,
-                        },
-                    );
-                    compiled.push(CompiledLlvmFunction {
-                        func_idx,
-                        entry_point,
-                    });
+                    self.add_module(llvm_module, ts_context)?;
+                    pending_functions.push((func_idx, func_type));
                 }
+            }
+
+            for (func_idx, func_type) in pending_functions {
+                let entry_name = format!("wasm_entry_{}", func_idx);
+                let entry_point = self.lookup_symbol(&entry_name)?;
+
+                self.compiled_functions.insert(
+                    func_idx,
+                    CompiledFunction {
+                        entry_point,
+                        func_type,
+                    },
+                );
+                compiled.push(CompiledLlvmFunction {
+                    func_idx,
+                    entry_point,
+                });
             }
 
             Ok(compiled)
@@ -281,17 +339,12 @@ impl LlvmJit {
     }
 
     #[cfg(feature = "llvm-jit")]
-    fn compile_and_add(
+    fn add_module(
         &mut self,
         llvm_module: LLVMModuleRef,
         ts_context: LLVMOrcThreadSafeContextRef,
-        func_idx: u32,
-    ) -> Result<*const u8> {
+    ) -> Result<()> {
         unsafe {
-            let func_name = format!("wasm_func_{}", func_idx);
-            let func_name_c = CString::new(func_name.clone())
-                .map_err(|_| WasmError::Runtime("Function name contains NUL byte".to_string()))?;
-
             let mut error_msg: *mut i8 = ptr::null_mut();
             let result = LLVMVerifyModule(
                 llvm_module,
@@ -330,16 +383,23 @@ impl LlvmJit {
             }
 
             LLVMOrcDisposeThreadSafeContext(ts_context);
-            let mut symbol: LLVMOrcExecutorAddress = 0;
-            let result = LLVMOrcLLJITLookup(self.lljit, &mut symbol, func_name_c.as_ptr());
+            Ok(())
+        }
+    }
 
+    #[cfg(feature = "llvm-jit")]
+    fn lookup_symbol(&self, symbol_name: &str) -> Result<*const u8> {
+        unsafe {
+            let symbol_name_c = CString::new(symbol_name)
+                .map_err(|_| WasmError::Runtime("Symbol name contains NUL byte".to_string()))?;
+            let mut symbol: LLVMOrcExecutorAddress = 0;
+            let result = LLVMOrcLLJITLookup(self.lljit, &mut symbol, symbol_name_c.as_ptr());
             if !result.is_null() || symbol == 0 {
                 return Err(WasmError::Runtime(format!(
                     "Failed to lookup symbol {}",
-                    func_name
+                    symbol_name
                 )));
             }
-
             Ok(symbol as *const u8)
         }
     }
@@ -397,6 +457,30 @@ impl LlvmJit {
         }
     }
 
+    fn pack_arg(value: &WasmValue) -> Result<u64> {
+        match value {
+            WasmValue::I32(v) => Ok(*v as u32 as u64),
+            WasmValue::I64(v) => Ok(*v as u64),
+            WasmValue::F32(v) => Ok(v.to_bits() as u64),
+            WasmValue::F64(v) => Ok(v.to_bits()),
+            _ => Err(WasmError::Runtime(
+                "LLVM JIT currently supports numeric arguments only".to_string(),
+            )),
+        }
+    }
+
+    fn unpack_result(raw: u64, value_type: ValType) -> Result<WasmValue> {
+        match value_type {
+            ValType::Num(NumType::I32) => Ok(WasmValue::I32(raw as u32 as i32)),
+            ValType::Num(NumType::I64) => Ok(WasmValue::I64(raw as i64)),
+            ValType::Num(NumType::F32) => Ok(WasmValue::F32(f32::from_bits(raw as u32))),
+            ValType::Num(NumType::F64) => Ok(WasmValue::F64(f64::from_bits(raw))),
+            _ => Err(WasmError::Runtime(
+                "LLVM JIT currently supports numeric results only".to_string(),
+            )),
+        }
+    }
+
     /// Invokes a compiled function with the given arguments.
     ///
     /// # Arguments
@@ -417,8 +501,7 @@ impl LlvmJit {
     ///
     /// # Safety
     ///
-    /// This function uses `std::mem::transmute` to create function pointers.
-    /// The caller must ensure the memory context is set for the current thread.
+    /// The caller must ensure the execution context is set for the current thread.
     #[cfg(feature = "llvm-jit")]
     pub fn invoke_function(&self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         let compiled = self
@@ -437,111 +520,39 @@ impl LlvmJit {
             )));
         }
 
-        unsafe {
-            let params = &func_type.params;
-            let results = &func_type.results;
-
-            match (params.as_slice(), results.as_slice()) {
-                ([], []) => {
-                    let func: extern "C" fn() = std::mem::transmute(entry_point);
-                    func();
-                    Ok(vec![])
-                }
-                ([], [ValType::Num(NumType::I32)]) => {
-                    let func: extern "C" fn() -> i32 = std::mem::transmute(entry_point);
-                    Ok(vec![WasmValue::I32(func())])
-                }
-                ([], [ValType::Num(NumType::I64)]) => {
-                    let func: extern "C" fn() -> i64 = std::mem::transmute(entry_point);
-                    Ok(vec![WasmValue::I64(func())])
-                }
-                ([], [ValType::Num(NumType::F32)]) => {
-                    let func: extern "C" fn() -> f32 = std::mem::transmute(entry_point);
-                    Ok(vec![WasmValue::F32(func())])
-                }
-                ([], [ValType::Num(NumType::F64)]) => {
-                    let func: extern "C" fn() -> f64 = std::mem::transmute(entry_point);
-                    Ok(vec![WasmValue::F64(func())])
-                }
-                ([ValType::Num(NumType::I32)], []) => {
-                    let func: extern "C" fn(i32) = std::mem::transmute(entry_point);
-                    let a = args[0].i32()?;
-                    func(a);
-                    Ok(vec![])
-                }
-                ([ValType::Num(NumType::I32)], [ValType::Num(NumType::I32)]) => {
-                    let func: extern "C" fn(i32) -> i32 = std::mem::transmute(entry_point);
-                    let a = args[0].i32()?;
-                    Ok(vec![WasmValue::I32(func(a))])
-                }
-                ([ValType::Num(NumType::I32), ValType::Num(NumType::I32)], []) => {
-                    let func: extern "C" fn(i32, i32) = std::mem::transmute(entry_point);
-                    let a = args[0].i32()?;
-                    let b = args[1].i32()?;
-                    func(a, b);
-                    Ok(vec![])
-                }
-                (
-                    [ValType::Num(NumType::I32), ValType::Num(NumType::I32)],
-                    [ValType::Num(NumType::I32)],
-                ) => {
-                    let func: extern "C" fn(i32, i32) -> i32 = std::mem::transmute(entry_point);
-                    let a = args[0].i32()?;
-                    let b = args[1].i32()?;
-                    Ok(vec![WasmValue::I32(func(a, b))])
-                }
-                ([ValType::Num(NumType::I64)], []) => {
-                    let func: extern "C" fn(i64) = std::mem::transmute(entry_point);
-                    let a = args[0].i64()?;
-                    func(a);
-                    Ok(vec![])
-                }
-                ([ValType::Num(NumType::I64)], [ValType::Num(NumType::I64)]) => {
-                    let func: extern "C" fn(i64) -> i64 = std::mem::transmute(entry_point);
-                    let a = args[0].i64()?;
-                    Ok(vec![WasmValue::I64(func(a))])
-                }
-                ([ValType::Num(NumType::I64), ValType::Num(NumType::I64)], []) => {
-                    let func: extern "C" fn(i64, i64) = std::mem::transmute(entry_point);
-                    let a = args[0].i64()?;
-                    let b = args[1].i64()?;
-                    func(a, b);
-                    Ok(vec![])
-                }
-                (
-                    [ValType::Num(NumType::I64), ValType::Num(NumType::I64)],
-                    [ValType::Num(NumType::I64)],
-                ) => {
-                    let func: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(entry_point);
-                    let a = args[0].i64()?;
-                    let b = args[1].i64()?;
-                    Ok(vec![WasmValue::I64(func(a, b))])
-                }
-                (
-                    [ValType::Num(NumType::F32), ValType::Num(NumType::F32)],
-                    [ValType::Num(NumType::F32)],
-                ) => {
-                    let func: extern "C" fn(f32, f32) -> f32 = std::mem::transmute(entry_point);
-                    let a = args[0].f32()?;
-                    let b = args[1].f32()?;
-                    Ok(vec![WasmValue::F32(func(a, b))])
-                }
-                (
-                    [ValType::Num(NumType::F64), ValType::Num(NumType::F64)],
-                    [ValType::Num(NumType::F64)],
-                ) => {
-                    let func: extern "C" fn(f64, f64) -> f64 = std::mem::transmute(entry_point);
-                    let a = args[0].f64()?;
-                    let b = args[1].f64()?;
-                    Ok(vec![WasmValue::F64(func(a, b))])
-                }
-                _ => Err(WasmError::Runtime(format!(
-                    "Unsupported function signature: {} params, {} results",
-                    params.len(),
-                    results.len()
-                ))),
+        for (idx, (arg, expected_type)) in args.iter().zip(func_type.params.iter()).enumerate() {
+            if arg.val_type() != *expected_type {
+                return Err(WasmError::Runtime(format!(
+                    "Argument {} type mismatch: expected {:?}, got {:?}",
+                    idx,
+                    expected_type,
+                    arg.val_type()
+                )));
             }
         }
+
+        let mut packed_args = Vec::with_capacity(args.len());
+        for arg in args {
+            packed_args.push(Self::pack_arg(arg)?);
+        }
+        let mut packed_results = vec![0u64; func_type.results.len().max(1)];
+
+        unsafe {
+            clear_trap();
+            let func: extern "C" fn(*const u64, *mut u64) = std::mem::transmute(entry_point);
+            func(packed_args.as_ptr(), packed_results.as_mut_ptr());
+
+            if let Some(code) = take_trap() {
+                return Err(WasmError::Trap(code));
+            }
+        }
+
+        let mut results = Vec::with_capacity(func_type.results.len());
+        for (idx, result_type) in func_type.results.iter().copied().enumerate() {
+            results.push(Self::unpack_result(packed_results[idx], result_type)?);
+        }
+
+        Ok(results)
     }
 }
 
