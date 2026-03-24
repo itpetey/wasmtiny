@@ -5,11 +5,8 @@ pub mod jit;
 pub mod loader;
 pub mod memory;
 pub mod runtime;
-pub mod tests;
 
 pub use application::WasmApplication;
-pub use runtime::WasmValue;
-
 pub use runtime::ExportType;
 pub use runtime::FunctionType;
 pub use runtime::Global;
@@ -26,3 +23,4 @@ pub use runtime::TableType;
 pub use runtime::TrapCode;
 pub use runtime::ValType;
 pub use runtime::WasmError;
+pub use runtime::WasmValue;
