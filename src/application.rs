@@ -5,7 +5,9 @@ use std::fs;
 use std::path::Path;
 
 #[cfg(feature = "llvm-jit")]
-use crate::jit::{LlvmJit, set_memory_context};
+use crate::jit::{LlvmJit, set_execution_context};
+#[cfg(feature = "llvm-jit")]
+use std::collections::HashMap;
 
 pub enum ExecutionMode {
     Interpreter,
@@ -17,18 +19,52 @@ pub struct WasmApplication {
     runtime: AotRuntime,
     loader: AotLoader,
     #[cfg(feature = "llvm-jit")]
-    llvm_jit: Option<LlvmJit>,
+    llvm_jits: HashMap<u32, LlvmJit>,
     #[cfg(feature = "llvm-jit")]
     execution_mode: ExecutionMode,
 }
 
 impl WasmApplication {
+    #[cfg(feature = "llvm-jit")]
+    fn validate_llvm_compatibility(module: &crate::runtime::Module) -> Result<()> {
+        for (type_idx, func_type) in module.types.iter().enumerate() {
+            if func_type.results.len() > 1 {
+                return Err(WasmError::Runtime(format!(
+                    "LLVM JIT does not support multi-value function type {}",
+                    type_idx
+                )));
+            }
+            if func_type
+                .params
+                .iter()
+                .chain(func_type.results.iter())
+                .any(|value_type| value_type.is_reference())
+            {
+                return Err(WasmError::Runtime(format!(
+                    "LLVM JIT does not support reference-typed function type {}",
+                    type_idx
+                )));
+            }
+        }
+
+        for (func_idx, func) in module.funcs.iter().enumerate() {
+            if func.locals.iter().any(|local| local.type_.is_reference()) {
+                return Err(WasmError::Runtime(format!(
+                    "LLVM JIT does not support reference-typed locals in function {}",
+                    func_idx
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             runtime: AotRuntime::new(),
             loader: AotLoader::new(),
             #[cfg(feature = "llvm-jit")]
-            llvm_jit: None,
+            llvm_jits: HashMap::new(),
             #[cfg(feature = "llvm-jit")]
             execution_mode: ExecutionMode::Interpreter,
         }
@@ -50,17 +86,19 @@ impl WasmApplication {
             .runtime
             .get_module(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        Self::validate_llvm_compatibility(aot_module.module())?;
 
         let module_name = format!("module_{}", module_idx);
         let mut llvm_jit = LlvmJit::new(&module_name)?;
 
         match llvm_jit.compile_module(aot_module.module()) {
             Ok(_) => {
-                self.llvm_jit = Some(llvm_jit);
+                self.llvm_jits.insert(module_idx, llvm_jit);
                 self.execution_mode = ExecutionMode::LlvmJit;
                 Ok(())
             }
             Err(e) => {
+                self.llvm_jits.remove(&module_idx);
                 self.execution_mode = ExecutionMode::Interpreter;
                 Err(e)
             }
@@ -156,8 +194,10 @@ impl WasmApplication {
         args: &[WasmValue],
     ) -> Result<Vec<WasmValue>> {
         #[cfg(feature = "llvm-jit")]
-        if matches!(self.execution_mode, ExecutionMode::LlvmJit) && self.llvm_jit.is_some() {
-            let (func_idx, memory_context) = {
+        if matches!(self.execution_mode, ExecutionMode::LlvmJit)
+            && self.llvm_jits.contains_key(&module_idx)
+        {
+            let (func_idx, module_ptr, memory_context) = {
                 let module = self.runtime.get_module_mut(module_idx).ok_or_else(|| {
                     WasmError::Runtime(format!("module {} not found", module_idx))
                 })?;
@@ -170,14 +210,13 @@ impl WasmApplication {
                     )));
                 };
 
-                (func_idx, module.memory_context())
+                (func_idx, module as *mut _, module.memory_context())
             };
 
-            if let Some((memory_ptr, memory_len)) = memory_context {
-                set_memory_context(memory_ptr, memory_len);
-            }
+            let (memory_ptr, memory_len) = memory_context.unwrap_or((std::ptr::null_mut(), 0));
+            set_execution_context(module_ptr, memory_ptr, memory_len);
 
-            if let Some(ref llvm_jit) = self.llvm_jit {
+            if let Some(llvm_jit) = self.llvm_jits.get(&module_idx) {
                 return llvm_jit.invoke_function(func_idx, args);
             }
         }
@@ -203,22 +242,23 @@ impl WasmApplication {
 
     pub fn execute_start(&mut self, module_idx: u32) -> Result<()> {
         #[cfg(feature = "llvm-jit")]
-        if matches!(self.execution_mode, ExecutionMode::LlvmJit) && self.llvm_jit.is_some() {
-            let (start_idx, memory_context) = {
+        if matches!(self.execution_mode, ExecutionMode::LlvmJit)
+            && self.llvm_jits.contains_key(&module_idx)
+        {
+            let (start_idx, module_ptr, memory_context) = {
                 let module = self.runtime.get_module_mut(module_idx).ok_or_else(|| {
                     WasmError::Runtime(format!("module {} not found", module_idx))
                 })?;
                 let Some(start_idx) = module.start_function() else {
                     return Ok(());
                 };
-                (start_idx, module.memory_context())
+                (start_idx, module as *mut _, module.memory_context())
             };
 
-            if let Some((memory_ptr, memory_len)) = memory_context {
-                set_memory_context(memory_ptr, memory_len);
-            }
+            let (memory_ptr, memory_len) = memory_context.unwrap_or((std::ptr::null_mut(), 0));
+            set_execution_context(module_ptr, memory_ptr, memory_len);
 
-            if let Some(ref llvm_jit) = self.llvm_jit {
+            if let Some(llvm_jit) = self.llvm_jits.get(&module_idx) {
                 let _ = llvm_jit.invoke_function(start_idx, &[])?;
                 return Ok(());
             }

@@ -18,4 +18,4 @@ pub use runtime::JitCodeCache;
 #[cfg(feature = "llvm-jit")]
 pub use llvm_backend::LlvmJit;
 #[cfg(feature = "llvm-jit")]
-pub use llvm_runtime::set_memory_context;
+pub use llvm_runtime::{set_execution_context, set_memory_context};
