@@ -94,6 +94,10 @@ impl AotModule {
         &self.module
     }
 
+    pub fn imports(&self) -> &[crate::runtime::Import] {
+        &self.module.imports
+    }
+
     pub fn register_native(&mut self, func: NativeFunc) -> u32 {
         let idx = self.native_functions.len() as u32;
         self.native_functions.push(func);

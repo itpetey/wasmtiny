@@ -199,10 +199,12 @@ impl WasmToLlvmTranslator {
 
             let llvm_func_type = self.create_function_type(func_type)?;
             let func_name = format!("wasm_func_{}", func_idx);
-            let func_name_c = std::ffi::CString::new(func_name).unwrap();
+            let func_name_c = std::ffi::CString::new(func_name)
+                .map_err(|_| WasmError::Runtime("Function name contains NUL byte".to_string()))?;
 
             let module_name = format!("wasm_module_func_{}", func_idx);
-            let module_name_c = std::ffi::CString::new(module_name).unwrap();
+            let module_name_c = std::ffi::CString::new(module_name)
+                .map_err(|_| WasmError::Runtime("Module name contains NUL byte".to_string()))?;
 
             let llvm_module =
                 LLVMModuleCreateWithNameInContext(module_name_c.as_ptr(), self.context);
@@ -304,7 +306,8 @@ impl WasmToLlvmTranslator {
         name: &str,
         ret_type: LLVMTypeRef,
     ) -> LLVMValueRef {
-        let name_c = std::ffi::CString::new(name).unwrap();
+        let name_c =
+            std::ffi::CString::new(name).expect("runtime helper name should not contain NUL");
         let existing = LLVMGetNamedFunction(module, name_c.as_ptr());
         if !existing.is_null() {
             return existing;
@@ -322,7 +325,8 @@ impl WasmToLlvmTranslator {
         name: &str,
         val_type: LLVMTypeRef,
     ) -> LLVMValueRef {
-        let name_c = std::ffi::CString::new(name).unwrap();
+        let name_c =
+            std::ffi::CString::new(name).expect("runtime helper name should not contain NUL");
         let existing = LLVMGetNamedFunction(module, name_c.as_ptr());
         if !existing.is_null() {
             return existing;
@@ -801,6 +805,258 @@ impl WasmToLlvmTranslator {
                         value_stack.push(result);
                     }
                 }
+                0x5B => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOEQ,
+                            a,
+                            b,
+                            c"f32_eq".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f32_eq_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x5C => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealONE,
+                            a,
+                            b,
+                            c"f32_ne".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f32_ne_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x5D => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOLT,
+                            a,
+                            b,
+                            c"f32_lt".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f32_lt_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x5E => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOGT,
+                            a,
+                            b,
+                            c"f32_gt".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f32_gt_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x5F => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOLE,
+                            a,
+                            b,
+                            c"f32_le".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f32_le_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x60 => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOGE,
+                            a,
+                            b,
+                            c"f32_ge".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f32_ge_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x61 => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOEQ,
+                            a,
+                            b,
+                            c"f64_eq".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f64_eq_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x62 => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealONE,
+                            a,
+                            b,
+                            c"f64_ne".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f64_ne_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x63 => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOLT,
+                            a,
+                            b,
+                            c"f64_lt".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f64_lt_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x64 => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOGT,
+                            a,
+                            b,
+                            c"f64_gt".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f64_gt_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x65 => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOLE,
+                            a,
+                            b,
+                            c"f64_le".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f64_le_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
+                0x66 => {
+                    pc += 1;
+                    if value_stack.len() >= 2 {
+                        let b = value_stack.pop().unwrap();
+                        let a = value_stack.pop().unwrap();
+                        let cmp = LLVMBuildFCmp(
+                            self.builder,
+                            LLVMRealPredicate::LLVMRealOGE,
+                            a,
+                            b,
+                            c"f64_ge".as_ptr(),
+                        );
+                        let result = LLVMBuildZExt(
+                            self.builder,
+                            cmp,
+                            LLVMInt32TypeInContext(self.context),
+                            c"f64_ge_result".as_ptr(),
+                        );
+                        value_stack.push(result);
+                    }
+                }
                 0x7C => {
                     pc += 1;
                     if value_stack.len() >= 2 {
@@ -1042,462 +1298,6 @@ impl WasmToLlvmTranslator {
                             a,
                             LLVMDoubleTypeInContext(self.context),
                             c"f32_promote".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA7 => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOEQ,
-                            a,
-                            b,
-                            c"f32_eq".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_eq_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA8 => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealONE,
-                            a,
-                            b,
-                            c"f32_ne".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_ne_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA9 => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLT,
-                            a,
-                            b,
-                            c"f32_lt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_lt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xAA => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGT,
-                            a,
-                            b,
-                            c"f32_gt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_gt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xAB => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLE,
-                            a,
-                            b,
-                            c"f32_le".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_le_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xAC => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGE,
-                            a,
-                            b,
-                            c"f32_ge".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_ge_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xAD => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOEQ,
-                            a,
-                            b,
-                            c"f64_eq".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_eq_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xAE => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealONE,
-                            a,
-                            b,
-                            c"f64_ne".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_ne_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xAF => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLT,
-                            a,
-                            b,
-                            c"f64_lt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_lt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xB0 => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGT,
-                            a,
-                            b,
-                            c"f64_gt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_gt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xB1 => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLE,
-                            a,
-                            b,
-                            c"f64_le".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_le_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xB2 => {
-                    pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGE,
-                            a,
-                            b,
-                            c"f64_ge".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_ge_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xBC => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildBitCast(
-                            self.builder,
-                            a,
-                            LLVMInt32TypeInContext(self.context),
-                            c"i32_reinterpret_f32".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xBD => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildBitCast(
-                            self.builder,
-                            a,
-                            LLVMInt64TypeInContext(self.context),
-                            c"i64_reinterpret_f64".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xBE => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildBitCast(
-                            self.builder,
-                            a,
-                            LLVMFloatTypeInContext(self.context),
-                            c"f32_reinterpret_i32".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xBF => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildBitCast(
-                            self.builder,
-                            a,
-                            LLVMDoubleTypeInContext(self.context),
-                            c"f64_reinterpret_i64".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC0 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildSIToFP(
-                            self.builder,
-                            a,
-                            LLVMFloatTypeInContext(self.context),
-                            c"f32_convert_i32_s".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC1 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildUIToFP(
-                            self.builder,
-                            a,
-                            LLVMFloatTypeInContext(self.context),
-                            c"f32_convert_i32_u".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC2 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildSIToFP(
-                            self.builder,
-                            a,
-                            LLVMFloatTypeInContext(self.context),
-                            c"f32_convert_i64_s".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC3 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildUIToFP(
-                            self.builder,
-                            a,
-                            LLVMFloatTypeInContext(self.context),
-                            c"f32_convert_i64_u".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC4 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildSIToFP(
-                            self.builder,
-                            a,
-                            LLVMDoubleTypeInContext(self.context),
-                            c"f64_convert_i32_s".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC5 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildUIToFP(
-                            self.builder,
-                            a,
-                            LLVMDoubleTypeInContext(self.context),
-                            c"f64_convert_i32_u".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC6 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildSIToFP(
-                            self.builder,
-                            a,
-                            LLVMDoubleTypeInContext(self.context),
-                            c"f64_convert_i64_s".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xC7 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildUIToFP(
-                            self.builder,
-                            a,
-                            LLVMDoubleTypeInContext(self.context),
-                            c"f64_convert_i64_u".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA2 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFPToSI(
-                            self.builder,
-                            a,
-                            LLVMInt32TypeInContext(self.context),
-                            c"i32_trunc_f32_s".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA3 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFPToUI(
-                            self.builder,
-                            a,
-                            LLVMInt32TypeInContext(self.context),
-                            c"i32_trunc_f32_u".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA4 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFPToSI(
-                            self.builder,
-                            a,
-                            LLVMInt64TypeInContext(self.context),
-                            c"i64_trunc_f32_s".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA5 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFPToUI(
-                            self.builder,
-                            a,
-                            LLVMInt64TypeInContext(self.context),
-                            c"i64_trunc_f32_u".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
-                }
-                0xA6 => {
-                    pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFPToSI(
-                            self.builder,
-                            a,
-                            LLVMInt32TypeInContext(self.context),
-                            c"i32_trunc_f64_s".as_ptr(),
                         );
                         value_stack.push(result);
                     }
@@ -2009,7 +1809,10 @@ impl WasmToLlvmTranslator {
                     let current_fn = LLVMGetBasicBlockParent(current_block);
                     let module = LLVMGetGlobalParent(current_fn);
                     let callee_name = format!("wasm_func_{}", func_idx);
-                    let callee_name_c = std::ffi::CString::new(callee_name.clone()).unwrap();
+                    let callee_name_c =
+                        std::ffi::CString::new(callee_name.clone()).map_err(|_| {
+                            WasmError::Runtime("Callee name contains NUL byte".to_string())
+                        })?;
                     let callee = LLVMGetNamedFunction(module, callee_name_c.as_ptr());
                     if !callee.is_null() {
                         let param_count = LLVMCountParams(callee) as usize;

@@ -155,6 +155,31 @@ impl WasmApplication {
         func_name: &str,
         args: &[WasmValue],
     ) -> Result<Vec<WasmValue>> {
+        #[cfg(feature = "llvm-jit")]
+        if matches!(self.execution_mode, ExecutionMode::LlvmJit)
+            && let Some(ref llvm_jit) = self.llvm_jit
+        {
+            let module = self
+                .runtime
+                .get_module(module_idx)
+                .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+            if let Some(AotExport::Function(func_idx)) = module.get_export(func_name).cloned() {
+                let adjusted_idx = func_idx
+                    - module
+                        .imports()
+                        .iter()
+                        .filter(|import| matches!(import.kind, crate::runtime::ImportKind::Func(_)))
+                        .count() as u32;
+                return llvm_jit.invoke_function(adjusted_idx, args);
+            } else {
+                return Err(WasmError::Runtime(format!(
+                    "function {} not found",
+                    func_name
+                )));
+            }
+        }
+
         let module = self
             .runtime
             .get_module_mut(module_idx)
