@@ -4,9 +4,22 @@ use crate::runtime::{FunctionType, HostFunc, Result, WasmError, WasmValue};
 use std::fs;
 use std::path::Path;
 
+#[cfg(feature = "llvm-jit")]
+use crate::jit::LlvmJit;
+
+pub enum ExecutionMode {
+    Interpreter,
+    #[cfg(feature = "llvm-jit")]
+    LlvmJit,
+}
+
 pub struct WasmApplication {
     runtime: AotRuntime,
     loader: AotLoader,
+    #[cfg(feature = "llvm-jit")]
+    llvm_jit: Option<LlvmJit>,
+    #[cfg(feature = "llvm-jit")]
+    execution_mode: ExecutionMode,
 }
 
 impl WasmApplication {
@@ -14,7 +27,44 @@ impl WasmApplication {
         Self {
             runtime: AotRuntime::new(),
             loader: AotLoader::new(),
+            #[cfg(feature = "llvm-jit")]
+            llvm_jit: None,
+            #[cfg(feature = "llvm-jit")]
+            execution_mode: ExecutionMode::Interpreter,
         }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        self.execution_mode = mode;
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    pub fn compile_with_llvm(&mut self, module_idx: u32) -> Result<()> {
+        let aot_module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        let module_name = format!("module_{}", module_idx);
+        let mut llvm_jit = LlvmJit::new(&module_name)?;
+
+        match llvm_jit.compile_module(aot_module.module()) {
+            Ok(_) => {
+                self.llvm_jit = Some(llvm_jit);
+                self.execution_mode = ExecutionMode::LlvmJit;
+                Ok(())
+            }
+            Err(e) => {
+                self.execution_mode = ExecutionMode::Interpreter;
+                Err(e)
+            }
+        }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    pub fn compile_with_llvm_fallback(&mut self, module_idx: u32) {
+        let _ = self.compile_with_llvm(module_idx);
     }
 
     pub fn load_module_from_file<P: AsRef<Path>>(&mut self, path: P) -> Result<u32> {
