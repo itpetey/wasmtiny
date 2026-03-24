@@ -323,6 +323,21 @@ impl AotModule {
         }
     }
 
+    pub fn memory_context(&mut self) -> Option<(*mut u8, usize)> {
+        if self.import_counts().0 > 0 {
+            self.imported_memory(0).and_then(|memory| {
+                memory
+                    .lock()
+                    .ok()
+                    .map(|mut memory| (memory.as_mut_ptr(), memory.len_bytes()))
+            })
+        } else {
+            self.memories
+                .first_mut()
+                .map(|memory| (memory.as_mut_ptr(), memory.len_bytes()))
+        }
+    }
+
     pub fn add_table(&mut self, table: Table) -> u32 {
         let idx = (self.import_counts().1 + self.tables.len()) as u32;
         self.tables.push(table);

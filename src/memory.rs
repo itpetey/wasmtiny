@@ -135,6 +135,14 @@ impl Memory {
     pub fn write_f64(&mut self, offset: u32, val: f64) -> Result<()> {
         self.write_u64(offset, val.to_bits())
     }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.data.as_mut_ptr()
+    }
+
+    pub fn len_bytes(&self) -> usize {
+        self.data.len()
+    }
 }
 
 #[cfg(test)]

@@ -385,6 +385,186 @@ impl WasmToLlvmTranslator {
     }
 
     #[cfg(feature = "llvm-jit")]
+    fn pop_binary_operands(
+        &self,
+        value_stack: &mut Vec<LLVMValueRef>,
+    ) -> Option<(LLVMValueRef, LLVMValueRef)> {
+        if value_stack.len() < 2 {
+            return None;
+        }
+
+        let b = value_stack.pop()?;
+        let a = value_stack.pop()?;
+        Some((a, b))
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn read_effective_addr(
+        &mut self,
+        bytecode: &[u8],
+        pc: &mut usize,
+        addr: LLVMValueRef,
+    ) -> Result<LLVMValueRef> {
+        let _align = self.read_uleb(bytecode, pc)?;
+        let offset = self.read_uleb(bytecode, pc)?;
+        if offset == 0 {
+            return Ok(addr);
+        }
+
+        let offset_val = LLVMConstInt(LLVMInt32TypeInContext(self.context), offset as u64, 0);
+        Ok(LLVMBuildAdd(
+            self.builder,
+            addr,
+            offset_val,
+            c"eff_addr".as_ptr(),
+        ))
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn translate_runtime_load_op(
+        &mut self,
+        bytecode: &[u8],
+        pc: &mut usize,
+        value_stack: &mut Vec<LLVMValueRef>,
+        module: LLVMModuleRef,
+        helper_name: &str,
+        ret_type: LLVMTypeRef,
+    ) -> Result<()> {
+        *pc += 1;
+        if let Some(addr) = value_stack.pop() {
+            let eff_addr = self.read_effective_addr(bytecode, pc, addr)?;
+            let value = self.call_runtime_load(module, helper_name, ret_type, eff_addr);
+            value_stack.push(value);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn translate_runtime_store_op(
+        &mut self,
+        bytecode: &[u8],
+        pc: &mut usize,
+        value_stack: &mut Vec<LLVMValueRef>,
+        module: LLVMModuleRef,
+        helper_name: &str,
+        val_type: LLVMTypeRef,
+    ) -> Result<()> {
+        *pc += 1;
+        if let Some((addr, value)) = self.pop_binary_operands(value_stack) {
+            let eff_addr = self.read_effective_addr(bytecode, pc, addr)?;
+            self.call_runtime_store(module, helper_name, val_type, eff_addr, value);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn push_int_compare(
+        &mut self,
+        value_stack: &mut Vec<LLVMValueRef>,
+        predicate: LLVMIntPredicate,
+        cmp_name: *const i8,
+        result_name: *const i8,
+    ) {
+        if let Some((a, b)) = self.pop_binary_operands(value_stack) {
+            let cmp = LLVMBuildICmp(self.builder, predicate, a, b, cmp_name);
+            let result = LLVMBuildZExt(
+                self.builder,
+                cmp,
+                LLVMInt32TypeInContext(self.context),
+                result_name,
+            );
+            value_stack.push(result);
+        }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn push_float_compare(
+        &mut self,
+        value_stack: &mut Vec<LLVMValueRef>,
+        predicate: LLVMRealPredicate,
+        cmp_name: *const i8,
+        result_name: *const i8,
+    ) {
+        if let Some((a, b)) = self.pop_binary_operands(value_stack) {
+            let cmp = LLVMBuildFCmp(self.builder, predicate, a, b, cmp_name);
+            let result = LLVMBuildZExt(
+                self.builder,
+                cmp,
+                LLVMInt32TypeInContext(self.context),
+                result_name,
+            );
+            value_stack.push(result);
+        }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn push_binary_op<F>(
+        &mut self,
+        value_stack: &mut Vec<LLVMValueRef>,
+        name: *const i8,
+        build: F,
+    ) where
+        F: FnOnce(LLVMBuilderRef, LLVMValueRef, LLVMValueRef, *const i8) -> LLVMValueRef,
+    {
+        if let Some((a, b)) = self.pop_binary_operands(value_stack) {
+            let result = build(self.builder, a, b, name);
+            value_stack.push(result);
+        }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn push_shift_op<F>(
+        &mut self,
+        value_stack: &mut Vec<LLVMValueRef>,
+        name: *const i8,
+        build: F,
+    ) where
+        F: FnOnce(LLVMBuilderRef, LLVMValueRef, LLVMValueRef, *const i8) -> LLVMValueRef,
+    {
+        if let Some((a, b)) = self.pop_binary_operands(value_stack) {
+            let shift = LLVMBuildTrunc(
+                self.builder,
+                b,
+                LLVMInt8TypeInContext(self.context),
+                c"shift".as_ptr(),
+            );
+            let result = build(self.builder, a, shift, name);
+            value_stack.push(result);
+        }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn push_unary_op<F>(
+        &mut self,
+        value_stack: &mut Vec<LLVMValueRef>,
+        name: *const i8,
+        build: F,
+    ) where
+        F: FnOnce(LLVMBuilderRef, LLVMValueRef, *const i8) -> LLVMValueRef,
+    {
+        if let Some(a) = value_stack.pop() {
+            let result = build(self.builder, a, name);
+            value_stack.push(result);
+        }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn push_typed_unary_op<F>(
+        &mut self,
+        value_stack: &mut Vec<LLVMValueRef>,
+        target_type: LLVMTypeRef,
+        name: *const i8,
+        build: F,
+    ) where
+        F: FnOnce(LLVMBuilderRef, LLVMValueRef, LLVMTypeRef, *const i8) -> LLVMValueRef,
+    {
+        if let Some(a) = value_stack.pop() {
+            let result = build(self.builder, a, target_type, name);
+            value_stack.push(result);
+        }
+    }
+
+    #[cfg(feature = "llvm-jit")]
     unsafe fn translate_body(
         &mut self,
         bytecode: &[u8],
@@ -460,120 +640,87 @@ impl WasmToLlvmTranslator {
                 }
                 0x6A => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildAdd(self.builder, a, b, c"add".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"add".as_ptr(),
+                        |builder, a, b, name| LLVMBuildAdd(builder, a, b, name),
+                    );
                 }
                 0x6B => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildSub(self.builder, a, b, c"sub".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"sub".as_ptr(),
+                        |builder, a, b, name| LLVMBuildSub(builder, a, b, name),
+                    );
                 }
                 0x6C => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildMul(self.builder, a, b, c"mul".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"mul".as_ptr(),
+                        |builder, a, b, name| LLVMBuildMul(builder, a, b, name),
+                    );
                 }
                 0x6D => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildSDiv(self.builder, a, b, c"div_s".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"div_s".as_ptr(),
+                        |builder, a, b, name| LLVMBuildSDiv(builder, a, b, name),
+                    );
                 }
                 0x6E => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildUDiv(self.builder, a, b, c"div_u".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"div_u".as_ptr(),
+                        |builder, a, b, name| LLVMBuildUDiv(builder, a, b, name),
+                    );
                 }
                 0x71 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildAnd(self.builder, a, b, c"and".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"and".as_ptr(),
+                        |builder, a, b, name| LLVMBuildAnd(builder, a, b, name),
+                    );
                 }
                 0x72 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildOr(self.builder, a, b, c"or".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(&mut value_stack, c"or".as_ptr(), |builder, a, b, name| {
+                        LLVMBuildOr(builder, a, b, name)
+                    });
                 }
                 0x73 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildXor(self.builder, a, b, c"xor".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"xor".as_ptr(),
+                        |builder, a, b, name| LLVMBuildXor(builder, a, b, name),
+                    );
                 }
                 0x74 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let b_trunc = LLVMBuildTrunc(
-                            self.builder,
-                            b,
-                            LLVMInt8TypeInContext(self.context),
-                            c"shift".as_ptr(),
-                        );
-                        let result = LLVMBuildShl(self.builder, a, b_trunc, c"shl".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_shift_op(&mut value_stack, c"shl".as_ptr(), |builder, a, b, name| {
+                        LLVMBuildShl(builder, a, b, name)
+                    });
                 }
                 0x75 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let b_trunc = LLVMBuildTrunc(
-                            self.builder,
-                            b,
-                            LLVMInt8TypeInContext(self.context),
-                            c"shift".as_ptr(),
-                        );
-                        let result = LLVMBuildAShr(self.builder, a, b_trunc, c"shr_s".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_shift_op(
+                        &mut value_stack,
+                        c"shr_s".as_ptr(),
+                        |builder, a, b, name| LLVMBuildAShr(builder, a, b, name),
+                    );
                 }
                 0x76 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let b_trunc = LLVMBuildTrunc(
-                            self.builder,
-                            b,
-                            LLVMInt8TypeInContext(self.context),
-                            c"shift".as_ptr(),
-                        );
-                        let result = LLVMBuildLShr(self.builder, a, b_trunc, c"shr_u".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_shift_op(
+                        &mut value_stack,
+                        c"shr_u".as_ptr(),
+                        |builder, a, b, name| LLVMBuildLShr(builder, a, b, name),
+                    );
                 }
                 0x45 => {
                     pc += 1;
@@ -597,1062 +744,641 @@ impl WasmToLlvmTranslator {
                 }
                 0x46 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntEQ,
-                            a,
-                            b,
-                            c"eq".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"eq_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntEQ,
+                        c"eq".as_ptr(),
+                        c"eq_result".as_ptr(),
+                    );
                 }
                 0x47 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntNE,
-                            a,
-                            b,
-                            c"ne".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"ne_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntNE,
+                        c"ne".as_ptr(),
+                        c"ne_result".as_ptr(),
+                    );
                 }
                 0x48 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntSLT,
-                            a,
-                            b,
-                            c"lt_s".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"lt_s_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntSLT,
+                        c"lt_s".as_ptr(),
+                        c"lt_s_result".as_ptr(),
+                    );
                 }
                 0x49 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntULT,
-                            a,
-                            b,
-                            c"lt_u".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"lt_u_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntULT,
+                        c"lt_u".as_ptr(),
+                        c"lt_u_result".as_ptr(),
+                    );
                 }
                 0x4A => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntSGT,
-                            a,
-                            b,
-                            c"gt_s".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"gt_s_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntSGT,
+                        c"gt_s".as_ptr(),
+                        c"gt_s_result".as_ptr(),
+                    );
                 }
                 0x4B => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntUGT,
-                            a,
-                            b,
-                            c"gt_u".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"gt_u_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntUGT,
+                        c"gt_u".as_ptr(),
+                        c"gt_u_result".as_ptr(),
+                    );
                 }
                 0x4C => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntSLE,
-                            a,
-                            b,
-                            c"le_s".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"le_s_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntSLE,
+                        c"le_s".as_ptr(),
+                        c"le_s_result".as_ptr(),
+                    );
                 }
                 0x4D => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntULE,
-                            a,
-                            b,
-                            c"le_u".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"le_u_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntULE,
+                        c"le_u".as_ptr(),
+                        c"le_u_result".as_ptr(),
+                    );
                 }
                 0x4E => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntSGE,
-                            a,
-                            b,
-                            c"ge_s".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"ge_s_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntSGE,
+                        c"ge_s".as_ptr(),
+                        c"ge_s_result".as_ptr(),
+                    );
                 }
                 0x4F => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildICmp(
-                            self.builder,
-                            LLVMIntPredicate::LLVMIntUGE,
-                            a,
-                            b,
-                            c"ge_u".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"ge_u_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_int_compare(
+                        &mut value_stack,
+                        LLVMIntPredicate::LLVMIntUGE,
+                        c"ge_u".as_ptr(),
+                        c"ge_u_result".as_ptr(),
+                    );
                 }
                 0x5B => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOEQ,
-                            a,
-                            b,
-                            c"f32_eq".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_eq_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOEQ,
+                        c"f32_eq".as_ptr(),
+                        c"f32_eq_result".as_ptr(),
+                    );
                 }
                 0x5C => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealONE,
-                            a,
-                            b,
-                            c"f32_ne".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_ne_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealONE,
+                        c"f32_ne".as_ptr(),
+                        c"f32_ne_result".as_ptr(),
+                    );
                 }
                 0x5D => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLT,
-                            a,
-                            b,
-                            c"f32_lt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_lt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOLT,
+                        c"f32_lt".as_ptr(),
+                        c"f32_lt_result".as_ptr(),
+                    );
                 }
                 0x5E => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGT,
-                            a,
-                            b,
-                            c"f32_gt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_gt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOGT,
+                        c"f32_gt".as_ptr(),
+                        c"f32_gt_result".as_ptr(),
+                    );
                 }
                 0x5F => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLE,
-                            a,
-                            b,
-                            c"f32_le".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_le_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOLE,
+                        c"f32_le".as_ptr(),
+                        c"f32_le_result".as_ptr(),
+                    );
                 }
                 0x60 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGE,
-                            a,
-                            b,
-                            c"f32_ge".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f32_ge_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOGE,
+                        c"f32_ge".as_ptr(),
+                        c"f32_ge_result".as_ptr(),
+                    );
                 }
                 0x61 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOEQ,
-                            a,
-                            b,
-                            c"f64_eq".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_eq_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOEQ,
+                        c"f64_eq".as_ptr(),
+                        c"f64_eq_result".as_ptr(),
+                    );
                 }
                 0x62 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealONE,
-                            a,
-                            b,
-                            c"f64_ne".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_ne_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealONE,
+                        c"f64_ne".as_ptr(),
+                        c"f64_ne_result".as_ptr(),
+                    );
                 }
                 0x63 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLT,
-                            a,
-                            b,
-                            c"f64_lt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_lt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOLT,
+                        c"f64_lt".as_ptr(),
+                        c"f64_lt_result".as_ptr(),
+                    );
                 }
                 0x64 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGT,
-                            a,
-                            b,
-                            c"f64_gt".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_gt_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOGT,
+                        c"f64_gt".as_ptr(),
+                        c"f64_gt_result".as_ptr(),
+                    );
                 }
                 0x65 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOLE,
-                            a,
-                            b,
-                            c"f64_le".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_le_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOLE,
+                        c"f64_le".as_ptr(),
+                        c"f64_le_result".as_ptr(),
+                    );
                 }
                 0x66 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let cmp = LLVMBuildFCmp(
-                            self.builder,
-                            LLVMRealPredicate::LLVMRealOGE,
-                            a,
-                            b,
-                            c"f64_ge".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            cmp,
-                            LLVMInt32TypeInContext(self.context),
-                            c"f64_ge_result".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_float_compare(
+                        &mut value_stack,
+                        LLVMRealPredicate::LLVMRealOGE,
+                        c"f64_ge".as_ptr(),
+                        c"f64_ge_result".as_ptr(),
+                    );
                 }
                 0x7C => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildAdd(self.builder, a, b, c"i64_add".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_add".as_ptr(),
+                        |builder, a, b, name| LLVMBuildAdd(builder, a, b, name),
+                    );
                 }
                 0x7D => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildSub(self.builder, a, b, c"i64_sub".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_sub".as_ptr(),
+                        |builder, a, b, name| LLVMBuildSub(builder, a, b, name),
+                    );
                 }
                 0x7E => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildMul(self.builder, a, b, c"i64_mul".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_mul".as_ptr(),
+                        |builder, a, b, name| LLVMBuildMul(builder, a, b, name),
+                    );
                 }
                 0x7F => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildSDiv(self.builder, a, b, c"i64_div_s".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_div_s".as_ptr(),
+                        |builder, a, b, name| LLVMBuildSDiv(builder, a, b, name),
+                    );
                 }
                 0x80 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildUDiv(self.builder, a, b, c"i64_div_u".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_div_u".as_ptr(),
+                        |builder, a, b, name| LLVMBuildUDiv(builder, a, b, name),
+                    );
                 }
                 0x83 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildAnd(self.builder, a, b, c"i64_and".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_and".as_ptr(),
+                        |builder, a, b, name| LLVMBuildAnd(builder, a, b, name),
+                    );
                 }
                 0x84 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildOr(self.builder, a, b, c"i64_or".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_or".as_ptr(),
+                        |builder, a, b, name| LLVMBuildOr(builder, a, b, name),
+                    );
                 }
                 0x85 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildXor(self.builder, a, b, c"i64_xor".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"i64_xor".as_ptr(),
+                        |builder, a, b, name| LLVMBuildXor(builder, a, b, name),
+                    );
                 }
                 0x86 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let b_trunc = LLVMBuildTrunc(
-                            self.builder,
-                            b,
-                            LLVMInt8TypeInContext(self.context),
-                            c"shift".as_ptr(),
-                        );
-                        let result = LLVMBuildShl(self.builder, a, b_trunc, c"i64_shl".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_shift_op(
+                        &mut value_stack,
+                        c"i64_shl".as_ptr(),
+                        |builder, a, b, name| LLVMBuildShl(builder, a, b, name),
+                    );
                 }
                 0x87 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let b_trunc = LLVMBuildTrunc(
-                            self.builder,
-                            b,
-                            LLVMInt8TypeInContext(self.context),
-                            c"shift".as_ptr(),
-                        );
-                        let result = LLVMBuildAShr(self.builder, a, b_trunc, c"i64_shr_s".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_shift_op(
+                        &mut value_stack,
+                        c"i64_shr_s".as_ptr(),
+                        |builder, a, b, name| LLVMBuildAShr(builder, a, b, name),
+                    );
                 }
                 0x88 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let b_trunc = LLVMBuildTrunc(
-                            self.builder,
-                            b,
-                            LLVMInt8TypeInContext(self.context),
-                            c"shift".as_ptr(),
-                        );
-                        let result = LLVMBuildLShr(self.builder, a, b_trunc, c"i64_shr_u".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_shift_op(
+                        &mut value_stack,
+                        c"i64_shr_u".as_ptr(),
+                        |builder, a, b, name| LLVMBuildLShr(builder, a, b, name),
+                    );
                 }
                 0x8C => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFAdd(self.builder, a, b, c"f32_add".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f32_add".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFAdd(builder, a, b, name),
+                    );
                 }
                 0x8D => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFSub(self.builder, a, b, c"f32_sub".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f32_sub".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFSub(builder, a, b, name),
+                    );
                 }
                 0x8E => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFMul(self.builder, a, b, c"f32_mul".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f32_mul".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFMul(builder, a, b, name),
+                    );
                 }
                 0x8F => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFDiv(self.builder, a, b, c"f32_div".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f32_div".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFDiv(builder, a, b, name),
+                    );
                 }
                 0x90 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFRem(self.builder, a, b, c"f32_min".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f32_min".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFRem(builder, a, b, name),
+                    );
                 }
                 0x91 => {
                     pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFNeg(self.builder, a, c"f32_neg".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_unary_op(
+                        &mut value_stack,
+                        c"f32_neg".as_ptr(),
+                        |builder, a, name| LLVMBuildFNeg(builder, a, name),
+                    );
                 }
                 0x92 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFAdd(self.builder, a, b, c"f64_add".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f64_add".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFAdd(builder, a, b, name),
+                    );
                 }
                 0x93 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFSub(self.builder, a, b, c"f64_sub".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f64_sub".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFSub(builder, a, b, name),
+                    );
                 }
                 0x94 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFMul(self.builder, a, b, c"f64_mul".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f64_mul".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFMul(builder, a, b, name),
+                    );
                 }
                 0x95 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFDiv(self.builder, a, b, c"f64_div".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f64_div".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFDiv(builder, a, b, name),
+                    );
                 }
                 0x96 => {
                     pc += 1;
-                    if value_stack.len() >= 2 {
-                        let b = value_stack.pop().unwrap();
-                        let a = value_stack.pop().unwrap();
-                        let result = LLVMBuildFRem(self.builder, a, b, c"f64_min".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_binary_op(
+                        &mut value_stack,
+                        c"f64_min".as_ptr(),
+                        |builder, a, b, name| LLVMBuildFRem(builder, a, b, name),
+                    );
                 }
                 0x97 => {
                     pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFNeg(self.builder, a, c"f64_neg".as_ptr());
-                        value_stack.push(result);
-                    }
+                    self.push_unary_op(
+                        &mut value_stack,
+                        c"f64_neg".as_ptr(),
+                        |builder, a, name| LLVMBuildFNeg(builder, a, name),
+                    );
                 }
                 0x98 => {
                     pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFPTrunc(
-                            self.builder,
-                            a,
-                            LLVMFloatTypeInContext(self.context),
-                            c"f64_demote".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_typed_unary_op(
+                        &mut value_stack,
+                        LLVMFloatTypeInContext(self.context),
+                        c"f64_demote".as_ptr(),
+                        |builder, a, target_type, name| {
+                            LLVMBuildFPTrunc(builder, a, target_type, name)
+                        },
+                    );
                 }
                 0x99 => {
                     pc += 1;
-                    if let Some(a) = value_stack.pop() {
-                        let result = LLVMBuildFPExt(
-                            self.builder,
-                            a,
-                            LLVMDoubleTypeInContext(self.context),
-                            c"f32_promote".as_ptr(),
-                        );
-                        value_stack.push(result);
-                    }
+                    self.push_typed_unary_op(
+                        &mut value_stack,
+                        LLVMDoubleTypeInContext(self.context),
+                        c"f32_promote".as_ptr(),
+                        |builder, a, target_type, name| {
+                            LLVMBuildFPExt(builder, a, target_type, name)
+                        },
+                    );
                 }
                 0x1A => {
                     pc += 1;
                     value_stack.pop();
                 }
                 0x28 => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_i32_load",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_load",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
                 }
                 0x29 => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_i64_load",
-                            LLVMInt64TypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_load",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
                 }
                 0x2A => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_f32_load",
-                            LLVMFloatTypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_f32_load",
+                        LLVMFloatTypeInContext(self.context),
+                    )?;
                 }
                 0x2B => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_f64_load",
-                            LLVMDoubleTypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_f64_load",
+                        LLVMDoubleTypeInContext(self.context),
+                    )?;
                 }
                 0x2C => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_i32_load8_s",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_load8_s",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
                 }
                 0x2D => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_i32_load8_u",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_load8_u",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
                 }
                 0x2E => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_i32_load16_s",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_load16_s",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
                 }
                 0x2F => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if let Some(addr) = value_stack.pop() {
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        let value = self.call_runtime_load(
-                            module,
-                            "llvm_jit_i32_load16_u",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                        );
-                        value_stack.push(value);
-                    }
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_load16_u",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
+                }
+                0x30 => {
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_load8_s",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
+                }
+                0x31 => {
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_load8_u",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
+                }
+                0x32 => {
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_load16_s",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
+                }
+                0x33 => {
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_load16_u",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
+                }
+                0x34 => {
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_load32_s",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
+                }
+                0x35 => {
+                    self.translate_runtime_load_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_load32_u",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
                 }
                 0x36 => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if value_stack.len() >= 2 {
-                        let value = value_stack.pop().unwrap();
-                        let addr = value_stack.pop().unwrap();
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        self.call_runtime_store(
-                            module,
-                            "llvm_jit_i32_store",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                            value,
-                        );
-                    }
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_store",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
                 }
                 0x37 => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if value_stack.len() >= 2 {
-                        let value = value_stack.pop().unwrap();
-                        let addr = value_stack.pop().unwrap();
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        self.call_runtime_store(
-                            module,
-                            "llvm_jit_i64_store",
-                            LLVMInt64TypeInContext(self.context),
-                            eff_addr,
-                            value,
-                        );
-                    }
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_store",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
                 }
                 0x38 => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if value_stack.len() >= 2 {
-                        let value = value_stack.pop().unwrap();
-                        let addr = value_stack.pop().unwrap();
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        self.call_runtime_store(
-                            module,
-                            "llvm_jit_f32_store",
-                            LLVMFloatTypeInContext(self.context),
-                            eff_addr,
-                            value,
-                        );
-                    }
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_f32_store",
+                        LLVMFloatTypeInContext(self.context),
+                    )?;
                 }
                 0x39 => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if value_stack.len() >= 2 {
-                        let value = value_stack.pop().unwrap();
-                        let addr = value_stack.pop().unwrap();
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        self.call_runtime_store(
-                            module,
-                            "llvm_jit_f64_store",
-                            LLVMDoubleTypeInContext(self.context),
-                            eff_addr,
-                            value,
-                        );
-                    }
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_f64_store",
+                        LLVMDoubleTypeInContext(self.context),
+                    )?;
                 }
                 0x3A => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if value_stack.len() >= 2 {
-                        let value = value_stack.pop().unwrap();
-                        let addr = value_stack.pop().unwrap();
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        self.call_runtime_store(
-                            module,
-                            "llvm_jit_i32_store8",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                            value,
-                        );
-                    }
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_store8",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
                 }
                 0x3B => {
-                    pc += 1;
-                    let _align = self.read_uleb(bytecode, &mut pc)?;
-                    let offset = self.read_uleb(bytecode, &mut pc)? as i32;
-                    if value_stack.len() >= 2 {
-                        let value = value_stack.pop().unwrap();
-                        let addr = value_stack.pop().unwrap();
-                        let eff_addr = if offset != 0 {
-                            let offset_val = LLVMConstInt(
-                                LLVMInt32TypeInContext(self.context),
-                                offset as u64,
-                                1,
-                            );
-                            LLVMBuildAdd(self.builder, addr, offset_val, c"eff_addr".as_ptr())
-                        } else {
-                            addr
-                        };
-                        self.call_runtime_store(
-                            module,
-                            "llvm_jit_i32_store16",
-                            LLVMInt32TypeInContext(self.context),
-                            eff_addr,
-                            value,
-                        );
-                    }
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i32_store16",
+                        LLVMInt32TypeInContext(self.context),
+                    )?;
+                }
+                0x3C => {
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_store8",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
+                }
+                0x3D => {
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_store16",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
+                }
+                0x3E => {
+                    self.translate_runtime_store_op(
+                        bytecode,
+                        &mut pc,
+                        &mut value_stack,
+                        module,
+                        "llvm_jit_i64_store32",
+                        LLVMInt64TypeInContext(self.context),
+                    )?;
                 }
                 0x02 => {
                     pc += 1;
