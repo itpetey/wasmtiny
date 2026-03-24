@@ -45,6 +45,8 @@ pub struct LlvmJit {
     #[cfg(feature = "llvm-jit")]
     main_dylib: LLVMOrcJITDylibRef,
     compiled_functions: HashMap<u32, CompiledFunction>,
+    #[cfg(feature = "llvm-jit")]
+    helpers_registered: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +118,7 @@ impl LlvmJit {
                 lljit,
                 main_dylib,
                 compiled_functions: HashMap::new(),
+                helpers_registered: false,
             })
         }
     }
@@ -166,6 +169,11 @@ impl LlvmJit {
 
     #[cfg(feature = "llvm-jit")]
     pub fn compile_module(&mut self, module: &Module) -> Result<Vec<CompiledLlvmFunction>> {
+        if !self.helpers_registered {
+            self.register_runtime_helpers()?;
+            self.helpers_registered = true;
+        }
+
         unsafe {
             let mut compiled = Vec::new();
 
@@ -344,7 +352,7 @@ impl LlvmJit {
     }
 
     #[cfg(feature = "llvm-jit")]
-    pub fn invoke_function(&self, func_idx: u32, _args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+    pub fn invoke_function(&self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         let compiled = self
             .compiled_functions
             .get(&func_idx)
@@ -353,36 +361,117 @@ impl LlvmJit {
         let entry_point = compiled.entry_point;
         let func_type = &compiled.func_type;
 
+        if args.len() != func_type.params.len() {
+            return Err(WasmError::Runtime(format!(
+                "Argument count mismatch: expected {}, got {}",
+                func_type.params.len(),
+                args.len()
+            )));
+        }
+
         unsafe {
-            match func_type.results.as_slice() {
-                [] => {
+            let params = &func_type.params;
+            let results = &func_type.results;
+
+            match (params.as_slice(), results.as_slice()) {
+                ([], []) => {
                     let func: extern "C" fn() = std::mem::transmute(entry_point);
                     func();
                     Ok(vec![])
                 }
-                [ValType::Num(NumType::I32)] => {
+                ([], [ValType::Num(NumType::I32)]) => {
                     let func: extern "C" fn() -> i32 = std::mem::transmute(entry_point);
-                    let result = func();
-                    Ok(vec![WasmValue::I32(result)])
+                    Ok(vec![WasmValue::I32(func())])
                 }
-                [ValType::Num(NumType::I64)] => {
+                ([], [ValType::Num(NumType::I64)]) => {
                     let func: extern "C" fn() -> i64 = std::mem::transmute(entry_point);
-                    let result = func();
-                    Ok(vec![WasmValue::I64(result)])
+                    Ok(vec![WasmValue::I64(func())])
                 }
-                [ValType::Num(NumType::F32)] => {
+                ([], [ValType::Num(NumType::F32)]) => {
                     let func: extern "C" fn() -> f32 = std::mem::transmute(entry_point);
-                    let result = func();
-                    Ok(vec![WasmValue::F32(result)])
+                    Ok(vec![WasmValue::F32(func())])
                 }
-                [ValType::Num(NumType::F64)] => {
+                ([], [ValType::Num(NumType::F64)]) => {
                     let func: extern "C" fn() -> f64 = std::mem::transmute(entry_point);
-                    let result = func();
-                    Ok(vec![WasmValue::F64(result)])
+                    Ok(vec![WasmValue::F64(func())])
                 }
-                _ => Err(WasmError::Runtime(
-                    "Multi-value returns not yet supported".to_string(),
-                )),
+                ([ValType::Num(NumType::I32)], []) => {
+                    let func: extern "C" fn(i32) = std::mem::transmute(entry_point);
+                    let a = args[0].i32()?;
+                    func(a);
+                    Ok(vec![])
+                }
+                ([ValType::Num(NumType::I32)], [ValType::Num(NumType::I32)]) => {
+                    let func: extern "C" fn(i32) -> i32 = std::mem::transmute(entry_point);
+                    let a = args[0].i32()?;
+                    Ok(vec![WasmValue::I32(func(a))])
+                }
+                ([ValType::Num(NumType::I32), ValType::Num(NumType::I32)], []) => {
+                    let func: extern "C" fn(i32, i32) = std::mem::transmute(entry_point);
+                    let a = args[0].i32()?;
+                    let b = args[1].i32()?;
+                    func(a, b);
+                    Ok(vec![])
+                }
+                (
+                    [ValType::Num(NumType::I32), ValType::Num(NumType::I32)],
+                    [ValType::Num(NumType::I32)],
+                ) => {
+                    let func: extern "C" fn(i32, i32) -> i32 = std::mem::transmute(entry_point);
+                    let a = args[0].i32()?;
+                    let b = args[1].i32()?;
+                    Ok(vec![WasmValue::I32(func(a, b))])
+                }
+                ([ValType::Num(NumType::I64)], []) => {
+                    let func: extern "C" fn(i64) = std::mem::transmute(entry_point);
+                    let a = args[0].i64()?;
+                    func(a);
+                    Ok(vec![])
+                }
+                ([ValType::Num(NumType::I64)], [ValType::Num(NumType::I64)]) => {
+                    let func: extern "C" fn(i64) -> i64 = std::mem::transmute(entry_point);
+                    let a = args[0].i64()?;
+                    Ok(vec![WasmValue::I64(func(a))])
+                }
+                ([ValType::Num(NumType::I64), ValType::Num(NumType::I64)], []) => {
+                    let func: extern "C" fn(i64, i64) = std::mem::transmute(entry_point);
+                    let a = args[0].i64()?;
+                    let b = args[1].i64()?;
+                    func(a, b);
+                    Ok(vec![])
+                }
+                (
+                    [ValType::Num(NumType::I64), ValType::Num(NumType::I64)],
+                    [ValType::Num(NumType::I64)],
+                ) => {
+                    let func: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(entry_point);
+                    let a = args[0].i64()?;
+                    let b = args[1].i64()?;
+                    Ok(vec![WasmValue::I64(func(a, b))])
+                }
+                (
+                    [ValType::Num(NumType::F32), ValType::Num(NumType::F32)],
+                    [ValType::Num(NumType::F32)],
+                ) => {
+                    let func: extern "C" fn(f32, f32) -> f32 = std::mem::transmute(entry_point);
+                    let a = args[0].f32()?;
+                    let b = args[1].f32()?;
+                    Ok(vec![WasmValue::F32(func(a, b))])
+                }
+                (
+                    [ValType::Num(NumType::F64), ValType::Num(NumType::F64)],
+                    [ValType::Num(NumType::F64)],
+                ) => {
+                    let func: extern "C" fn(f64, f64) -> f64 = std::mem::transmute(entry_point);
+                    let a = args[0].f64()?;
+                    let b = args[1].f64()?;
+                    Ok(vec![WasmValue::F64(func(a, b))])
+                }
+                _ => Err(WasmError::Runtime(format!(
+                    "Unsupported function signature: {} params, {} results",
+                    params.len(),
+                    results.len()
+                ))),
             }
         }
     }
