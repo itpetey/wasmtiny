@@ -1,8 +1,111 @@
+use crate::jit::emitter::{Address, Condition, Emitter, Reg};
+use crate::jit::regalloc::LinearScanAllocator;
 #[cfg(test)]
 use crate::runtime::WasmValue;
 use crate::runtime::{Module, Result, WasmError};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+
+const WASM_UNREACHABLE: u8 = 0x00;
+const WASM_NOP: u8 = 0x01;
+#[allow(dead_code)]
+const WASM_BLOCK: u8 = 0x02;
+#[allow(dead_code)]
+const WASM_LOOP: u8 = 0x03;
+#[allow(dead_code)]
+const WASM_IF: u8 = 0x04;
+#[allow(dead_code)]
+const WASM_ELSE: u8 = 0x05;
+#[allow(dead_code)]
+const WASM_END: u8 = 0x0B;
+#[allow(dead_code)]
+const WASM_BR: u8 = 0x0C;
+#[allow(dead_code)]
+const WASM_BR_IF: u8 = 0x0D;
+#[allow(dead_code)]
+const WASM_BR_TABLE: u8 = 0x0E;
+const WASM_RETURN: u8 = 0x0F;
+#[allow(dead_code)]
+const WASM_CALL: u8 = 0x10;
+#[allow(dead_code)]
+const WASM_CALL_INDIRECT: u8 = 0x11;
+const WASM_DROP: u8 = 0x1A;
+#[allow(dead_code)]
+const WASM_SELECT: u8 = 0x1B;
+const WASM_LOCAL_GET: u8 = 0x20;
+const WASM_LOCAL_SET: u8 = 0x21;
+const WASM_LOCAL_TEE: u8 = 0x22;
+#[allow(dead_code)]
+const WASM_GLOBAL_GET: u8 = 0x23;
+#[allow(dead_code)]
+const WASM_GLOBAL_SET: u8 = 0x24;
+const WASM_I32_LOAD: u8 = 0x28;
+const WASM_I64_LOAD: u8 = 0x29;
+#[allow(dead_code)]
+const WASM_F32_LOAD: u8 = 0x2A;
+#[allow(dead_code)]
+const WASM_F64_LOAD: u8 = 0x2B;
+const WASM_I32_STORE: u8 = 0x36;
+const WASM_I64_STORE: u8 = 0x37;
+#[allow(dead_code)]
+const WASM_F32_STORE: u8 = 0x38;
+#[allow(dead_code)]
+const WASM_F64_STORE: u8 = 0x39;
+const WASM_I32_CONST: u8 = 0x41;
+#[allow(dead_code)]
+const WASM_I64_CONST: u8 = 0x42;
+const WASM_I32_ADD: u8 = 0x6A;
+const WASM_I32_SUB: u8 = 0x6B;
+const WASM_I32_MUL: u8 = 0x6C;
+const WASM_I32_DIV_S: u8 = 0x6D;
+const WASM_I32_DIV_U: u8 = 0x6E;
+const WASM_I32_REM_S: u8 = 0x6F;
+const WASM_I32_REM_U: u8 = 0x70;
+const WASM_I32_AND: u8 = 0x71;
+const WASM_I32_OR: u8 = 0x72;
+const WASM_I32_XOR: u8 = 0x73;
+const WASM_I32_SHL: u8 = 0x74;
+const WASM_I32_SHR_S: u8 = 0x75;
+const WASM_I32_SHR_U: u8 = 0x76;
+#[allow(dead_code)]
+const WASM_I32_ROTL: u8 = 0x79;
+#[allow(dead_code)]
+const WASM_I32_ROTR: u8 = 0x7A;
+const WASM_I32_EQZ: u8 = 0x45;
+const WASM_I32_EQ: u8 = 0x46;
+const WASM_I32_NE: u8 = 0x47;
+const WASM_I32_LT_S: u8 = 0x48;
+const WASM_I32_LT_U: u8 = 0x49;
+const WASM_I32_GT_S: u8 = 0x4A;
+const WASM_I32_GT_U: u8 = 0x4B;
+const WASM_I32_LE_S: u8 = 0x4C;
+const WASM_I32_LE_U: u8 = 0x4D;
+const WASM_I32_GE_S: u8 = 0x4E;
+const WASM_I32_GE_U: u8 = 0x4F;
+const WASM_I64_EQZ: u8 = 0x50;
+const WASM_I64_EQ: u8 = 0x51;
+const WASM_I64_NE: u8 = 0x52;
+const WASM_I64_LT_S: u8 = 0x53;
+const WASM_I64_LT_U: u8 = 0x54;
+const WASM_I64_GT_S: u8 = 0x55;
+const WASM_I64_GT_U: u8 = 0x56;
+const WASM_I64_LE_S: u8 = 0x57;
+const WASM_I64_LE_U: u8 = 0x58;
+const WASM_I64_GE_S: u8 = 0x59;
+const WASM_I64_GE_U: u8 = 0x5A;
+const WASM_I64_ADD: u8 = 0x7C;
+const WASM_I64_SUB: u8 = 0x7D;
+const WASM_I64_MUL: u8 = 0x7E;
+const WASM_I64_DIV_S: u8 = 0x7F;
+const WASM_I64_DIV_U: u8 = 0x80;
+const WASM_I64_REM_S: u8 = 0x81;
+const WASM_I64_REM_U: u8 = 0x82;
+const WASM_I64_AND: u8 = 0x83;
+const WASM_I64_OR: u8 = 0x84;
+const WASM_I64_XOR: u8 = 0x85;
+const WASM_I64_SHL: u8 = 0x86;
+const WASM_I64_SHR_S: u8 = 0x87;
+const WASM_I64_SHR_U: u8 = 0x88;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CompilationTier {
@@ -24,6 +127,31 @@ pub struct JitCompiler {
     osr_queue: OsrQueue,
     osr_compilation_queue: OsrCompilationQueue,
     osr_enabled: bool,
+    memory_size: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BlockKind {
+    Block,
+    Loop,
+    If,
+}
+
+#[derive(Clone, Debug)]
+struct BlockInfo {
+    id: usize,
+    kind: BlockKind,
+    #[allow(dead_code)]
+    wasm_pc: usize,
+    x64_start: usize,
+    x64_else: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct PatchSite {
+    x64_pos: usize,
+    target_block_id: usize,
+    is_rel8: bool,
 }
 
 #[allow(clippy::new_without_default)]
@@ -36,7 +164,12 @@ impl JitCompiler {
             osr_queue: OsrQueue::new(),
             osr_compilation_queue: OsrCompilationQueue::new(),
             osr_enabled: false,
+            memory_size: 65536,
         }
+    }
+
+    pub fn set_memory_size(&mut self, size: u32) {
+        self.memory_size = size;
     }
 
     pub fn compile(&mut self, module: &Module, func_idx: u32) -> Result<CompiledFunction> {
@@ -48,7 +181,7 @@ impl JitCompiler {
 
         let func = Self::defined_func(module, func_idx)?;
 
-        let code = self.translate_wasm_to_ir(&func.body)?;
+        let code = self.translate_wasm_to_x64(&func.body, &func.locals)?;
 
         let compiled = CompiledFunction {
             id: func_idx as u64,
@@ -60,56 +193,819 @@ impl JitCompiler {
         Ok(compiled)
     }
 
-    fn translate_wasm_to_ir(&self, bytecode: &[u8]) -> Result<Vec<u8>> {
-        let mut ir = Vec::new();
-        let mut i = 0;
+    fn translate_wasm_to_x64(
+        &self,
+        bytecode: &[u8],
+        locals: &[crate::runtime::Local],
+    ) -> Result<Vec<u8>> {
+        let mut emitter = Emitter::new();
+        let mut block_stack: Vec<BlockInfo> = Vec::new();
+        let mut patch_sites: Vec<PatchSite> = Vec::new();
+        let mut pc: usize = 0;
+        let local_count: u32 = locals.iter().map(|l| l.count).sum();
+        let mem_size = self.memory_size;
 
-        while i < bytecode.len() {
-            let opcode = bytecode[i];
+        let stack_size = ((local_count as usize * 8 + 8) / 16 * 16) as u8;
+        emitter.emit_sub_rsp(stack_size.max(16));
+
+        let mut operand_stack_depth: usize = 0;
+        let mut next_block_id: usize = 0;
+
+        while pc < bytecode.len() {
+            let opcode = bytecode[pc];
             match opcode {
-                0x20 => {
-                    let mut cursor = i + 1;
-                    let local_idx = Self::read_uleb(bytecode, &mut cursor)?;
-                    ir.push(0x01);
-                    ir.push(u8::try_from(local_idx).map_err(|_| {
-                        WasmError::Runtime(format!(
-                            "local.get index {} exceeds JIT operand width",
-                            local_idx
-                        ))
-                    })?);
-                    i = cursor;
+                WASM_LOCAL_GET => {
+                    pc += 1;
+                    let local_idx = Self::read_uleb(bytecode, &mut pc)?;
+                    let offset = LinearScanAllocator::spill_slot_offset(local_idx);
+                    let addr = Address::new(Reg::Rsp).with_displacement(offset);
+                    emitter.emit_mov_rm(Reg::Rax, &addr);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth += 1;
                 }
-                0x21 => {
-                    let mut cursor = i + 1;
-                    let local_idx = Self::read_uleb(bytecode, &mut cursor)?;
-                    ir.push(0x02);
-                    ir.push(u8::try_from(local_idx).map_err(|_| {
-                        WasmError::Runtime(format!(
-                            "local.set index {} exceeds JIT operand width",
-                            local_idx
-                        ))
-                    })?);
-                    i = cursor;
+                WASM_LOCAL_SET => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in local.set".to_string(),
+                        ));
+                    }
+                    pc += 1;
+                    let local_idx = Self::read_uleb(bytecode, &mut pc)?;
+                    emitter.emit_pop(Reg::Rax);
+                    let offset = LinearScanAllocator::spill_slot_offset(local_idx);
+                    let addr = Address::new(Reg::Rsp).with_displacement(offset);
+                    emitter.emit_mov_mr(&addr, Reg::Rax);
+                    operand_stack_depth -= 1;
                 }
-                0x6A => {
-                    ir.push(0x10);
-                    i += 1;
+                WASM_LOCAL_TEE => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in local.tee".to_string(),
+                        ));
+                    }
+                    pc += 1;
+                    let local_idx = Self::read_uleb(bytecode, &mut pc)?;
+                    let offset = LinearScanAllocator::spill_slot_offset(local_idx);
+                    let addr = Address::new(Reg::Rsp).with_displacement(offset);
+                    emitter.emit_mov_mr(&addr, Reg::Rax);
+                    emitter.emit_push(Reg::Rax);
                 }
-                0x6B => {
-                    ir.push(0x11);
-                    i += 1;
+                WASM_I32_LOAD => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.load".to_string(),
+                        ));
+                    }
+                    pc += 1;
+                    let _align = Self::read_uleb(bytecode, &mut pc)?;
+                    let offset = Self::read_uleb(bytecode, &mut pc)? as i32;
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_add_ri(Reg::Rax, offset);
+                    emitter.emit_cmp_ri(Reg::Rax, (mem_size - 4) as i32);
+                    emitter.emit_jcc_rel8(Condition::BelowOrEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_mov_rm(Reg::Rax, &Address::new(Reg::Rax).with_displacement(0));
+                    emitter.emit_push(Reg::Rax);
                 }
-                0x6C => {
-                    ir.push(0x12);
-                    i += 1;
+                WASM_I64_LOAD => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.load".to_string(),
+                        ));
+                    }
+                    pc += 1;
+                    let _align = Self::read_uleb(bytecode, &mut pc)?;
+                    let offset = Self::read_uleb(bytecode, &mut pc)? as i32;
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_add_ri(Reg::Rax, offset);
+                    emitter.emit_cmp_ri(Reg::Rax, (mem_size - 8) as i32);
+                    emitter.emit_jcc_rel8(Condition::BelowOrEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_mov_rm(Reg::Rax, &Address::new(Reg::Rax).with_displacement(0));
+                    emitter.emit_push(Reg::Rax);
                 }
-                0x6D => {
-                    ir.push(0x13);
-                    i += 1;
+                WASM_I32_STORE => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.store".to_string(),
+                        ));
+                    }
+                    pc += 1;
+                    let _align = Self::read_uleb(bytecode, &mut pc)?;
+                    let offset = Self::read_uleb(bytecode, &mut pc)? as i32;
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_add_ri(Reg::Rcx, offset);
+                    emitter.emit_cmp_ri(Reg::Rcx, (mem_size - 4) as i32);
+                    emitter.emit_jcc_rel8(Condition::BelowOrEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_mov_mr(&Address::new(Reg::Rcx).with_displacement(0), Reg::Rax);
+                    operand_stack_depth -= 2;
                 }
-                0x0F => {
-                    ir.push(0xFF);
-                    i += 1;
+                WASM_I64_STORE => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.store".to_string(),
+                        ));
+                    }
+                    pc += 1;
+                    let _align = Self::read_uleb(bytecode, &mut pc)?;
+                    let offset = Self::read_uleb(bytecode, &mut pc)? as i32;
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_add_ri(Reg::Rcx, offset);
+                    emitter.emit_cmp_ri(Reg::Rcx, (mem_size - 8) as i32);
+                    emitter.emit_jcc_rel8(Condition::BelowOrEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_mov_mr(&Address::new(Reg::Rcx).with_displacement(0), Reg::Rax);
+                    operand_stack_depth -= 2;
+                }
+                WASM_I32_ADD => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i32.add".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_add_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_SUB => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i32.sub".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_sub_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_MUL => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i32.mul".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_mul_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_DIV_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.div_s".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_cdq();
+                    emitter.emit_div_i32(Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_DIV_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.div_u".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_xor_rr(Reg::Rdx, Reg::Rdx);
+                    emitter.emit_div_u32(Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_REM_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.rem_s".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_cdq();
+                    emitter.emit_div_i32(Reg::Rcx);
+                    emitter.emit_push(Reg::Rdx);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_REM_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.rem_u".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_xor_rr(Reg::Rdx, Reg::Rdx);
+                    emitter.emit_div_u32(Reg::Rcx);
+                    emitter.emit_push(Reg::Rdx);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_AND | WASM_I32_OR | WASM_I32_XOR => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in bitwise op".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    match opcode {
+                        WASM_I32_AND => emitter.emit_and_rr(Reg::Rax, Reg::Rcx),
+                        WASM_I32_OR => emitter.emit_or_rr(Reg::Rax, Reg::Rcx),
+                        WASM_I32_XOR => emitter.emit_xor_rr(Reg::Rax, Reg::Rcx),
+                        _ => {}
+                    }
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_SHL => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i32.shl".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_shl_cl(Reg::Rax);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_SHR_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.shr_s".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_sar_cl(Reg::Rax);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_SHR_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.shr_u".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_shr_cl(Reg::Rax);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_CONST => {
+                    pc += 1;
+                    let val = Self::read_uleb(bytecode, &mut pc)?;
+                    emitter.emit_mov_ri32(Reg::Rax, val);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth += 1;
+                }
+                WASM_I32_EQZ => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime("stack underflow in i32.eqz".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_cmp_ri(Reg::Rax, 0);
+                    emitter.emit_mov_ra(Reg::Rax, 0);
+                    emitter.emit_mov_ri32(Reg::Rcx, 1);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 4);
+                    emitter.emit_mov_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    pc += 1;
+                }
+                WASM_I32_EQ => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i32.eq".to_string()));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::Equal);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_NE => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i32.ne".to_string()));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::NotEqual);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_LT_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.lt_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::LessSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_LT_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.lt_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::Below);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_GT_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.gt_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::GreaterSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_GT_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.gt_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::Above);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_LE_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.le_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::LessOrEqualSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_LE_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.le_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::BelowOrEqual);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_GE_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.ge_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::GreaterOrEqualSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I32_GE_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i32.ge_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i32_compare(&mut emitter, Condition::AboveOrEqual);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_ADD => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i64.add".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_add_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_SUB => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i64.sub".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_sub_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_MUL => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i64.mul".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_mul_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_DIV_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.div_s".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_cqo();
+                    emitter.emit_div_i64(Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_DIV_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.div_u".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_xor_rr(Reg::Rdx, Reg::Rdx);
+                    emitter.emit_div_u64(Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_REM_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.rem_s".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_cqo();
+                    emitter.emit_div_i64(Reg::Rcx);
+                    emitter.emit_push(Reg::Rdx);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_REM_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.rem_u".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rcx, Reg::Rcx);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 2);
+                    emitter.emit_int3();
+                    emitter.emit_xor_rr(Reg::Rdx, Reg::Rdx);
+                    emitter.emit_div_u64(Reg::Rcx);
+                    emitter.emit_push(Reg::Rdx);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_AND | WASM_I64_OR | WASM_I64_XOR => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64 bitwise".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_pop(Reg::Rcx);
+                    match opcode {
+                        WASM_I64_AND => emitter.emit_and_rr(Reg::Rax, Reg::Rcx),
+                        WASM_I64_OR => emitter.emit_or_rr(Reg::Rax, Reg::Rcx),
+                        WASM_I64_XOR => emitter.emit_xor_rr(Reg::Rax, Reg::Rcx),
+                        _ => {}
+                    }
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_SHL => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i64.shl".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_shl_cl(Reg::Rax);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_SHR_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.shr_s".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_sar_cl(Reg::Rax);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_SHR_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.shr_u".to_string(),
+                        ));
+                    }
+                    emitter.emit_pop(Reg::Rcx);
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_shr_cl(Reg::Rax);
+                    emitter.emit_push(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_EQZ => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime("stack underflow in i64.eqz".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rax, Reg::Rax);
+                    emitter.emit_mov_ri32(Reg::Rax, 0);
+                    emitter.emit_mov_ri32(Reg::Rcx, 1);
+                    emitter.emit_jcc_rel8(Condition::NotEqual, 4);
+                    emitter.emit_mov_rr(Reg::Rax, Reg::Rcx);
+                    emitter.emit_push(Reg::Rax);
+                    pc += 1;
+                }
+                WASM_I64_EQ => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i64.eq".to_string()));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::Equal);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_NE => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime("stack underflow in i64.ne".to_string()));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::NotEqual);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_LT_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.lt_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::LessSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_LT_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.lt_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::Below);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_GT_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.gt_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::GreaterSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_GT_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.gt_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::Above);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_LE_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.le_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::LessOrEqualSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_LE_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.le_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::BelowOrEqual);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_GE_S => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.ge_s".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::GreaterOrEqualSigned);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_I64_GE_U => {
+                    if operand_stack_depth < 2 {
+                        return Err(WasmError::Runtime(
+                            "stack underflow in i64.ge_u".to_string(),
+                        ));
+                    }
+                    Self::emit_i64_compare(&mut emitter, Condition::AboveOrEqual);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_NOP => {
+                    pc += 1;
+                }
+                WASM_DROP => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime("stack underflow in drop".to_string()));
+                    }
+                    emitter.emit_pop(Reg::Rax);
+                    operand_stack_depth -= 1;
+                    pc += 1;
+                }
+                WASM_RETURN => {
+                    emitter.emit_add_rsp(stack_size.max(16));
+                    emitter.emit_ret();
+                    pc += 1;
+                }
+                WASM_UNREACHABLE => {
+                    emitter.emit_int3();
+                    pc += 1;
+                }
+                WASM_BLOCK => {
+                    pc += 1;
+                    let _block_type = Self::read_uleb(bytecode, &mut pc)?;
+                    let block_id = next_block_id;
+                    next_block_id += 1;
+                    block_stack.push(BlockInfo {
+                        id: block_id,
+                        kind: BlockKind::Block,
+                        wasm_pc: pc,
+                        x64_start: emitter.code().len(),
+                        x64_else: None,
+                    });
+                }
+                WASM_LOOP => {
+                    pc += 1;
+                    let _block_type = Self::read_uleb(bytecode, &mut pc)?;
+                    let block_id = next_block_id;
+                    next_block_id += 1;
+                    block_stack.push(BlockInfo {
+                        id: block_id,
+                        kind: BlockKind::Loop,
+                        wasm_pc: pc,
+                        x64_start: emitter.code().len(),
+                        x64_else: None,
+                    });
+                }
+                WASM_IF => {
+                    if operand_stack_depth == 0 {
+                        return Err(WasmError::Runtime("stack underflow in if".to_string()));
+                    }
+                    operand_stack_depth -= 1;
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rax, Reg::Rax);
+                    pc += 1;
+                    let _block_type = Self::read_uleb(bytecode, &mut pc)?;
+                    let block_id = next_block_id;
+                    next_block_id += 1;
+                    block_stack.push(BlockInfo {
+                        id: block_id,
+                        kind: BlockKind::If,
+                        wasm_pc: pc,
+                        x64_start: emitter.code().len(),
+                        x64_else: None,
+                    });
+                    patch_sites.push(PatchSite {
+                        x64_pos: emitter.code().len(),
+                        target_block_id: block_id,
+                        is_rel8: true,
+                    });
+                    emitter.emit_jcc_rel8(Condition::Equal, 0);
+                }
+                WASM_ELSE => {
+                    if let Some(block) = block_stack.last_mut() {
+                        let block_id = block.id;
+                        block.x64_else = Some(emitter.code().len());
+                        patch_sites.push(PatchSite {
+                            x64_pos: emitter.code().len(),
+                            target_block_id: block_id,
+                            is_rel8: true,
+                        });
+                        emitter.emit_jmp_rel8(0);
+                    }
+                    pc += 1;
+                }
+                WASM_END => {
+                    pc += 1;
+                    if let Some(block) = block_stack.pop() {
+                        let x64_end = emitter.code().len();
+                        for site in patch_sites.iter_mut() {
+                            if site.target_block_id == block.id {
+                                let offset = (x64_end as i32) - (site.x64_pos as i32);
+                                if site.is_rel8 {
+                                    let code = emitter.code_mut();
+                                    code[site.x64_pos + 1] = (offset - 2) as i8 as u8;
+                                } else {
+                                    let code = emitter.code_mut();
+                                    let offset_bytes = (offset - 5).to_le_bytes();
+                                    code[site.x64_pos + 1..site.x64_pos + 5]
+                                        .copy_from_slice(&offset_bytes);
+                                }
+                            }
+                        }
+                    }
+                }
+                WASM_BR => {
+                    pc += 1;
+                    let label_idx = Self::read_uleb(bytecode, &mut pc)? as usize;
+                    if label_idx < block_stack.len() {
+                        let block = &block_stack[block_stack.len() - 1 - label_idx];
+                        match block.kind {
+                            BlockKind::Loop => {
+                                let offset =
+                                    (block.x64_start as i32) - (emitter.code().len() as i32);
+                                emitter.emit_jmp_rel32(offset - 5);
+                            }
+                            BlockKind::Block | BlockKind::If => {
+                                patch_sites.push(PatchSite {
+                                    x64_pos: emitter.code().len(),
+                                    target_block_id: block.id,
+                                    is_rel8: false,
+                                });
+                                emitter.emit_jmp_rel32(0);
+                            }
+                        }
+                    }
+                }
+                WASM_BR_IF => {
+                    pc += 1;
+                    let label_idx = Self::read_uleb(bytecode, &mut pc)? as usize;
+                    emitter.emit_pop(Reg::Rax);
+                    emitter.emit_test_rr(Reg::Rax, Reg::Rax);
+                    if label_idx < block_stack.len() {
+                        let block = &block_stack[block_stack.len() - 1 - label_idx];
+                        match block.kind {
+                            BlockKind::Loop => {
+                                let offset =
+                                    (block.x64_start as i32) - (emitter.code().len() as i32);
+                                emitter.emit_jcc_rel32(Condition::NotEqual, offset - 6);
+                            }
+                            BlockKind::Block | BlockKind::If => {
+                                patch_sites.push(PatchSite {
+                                    x64_pos: emitter.code().len(),
+                                    target_block_id: block.id,
+                                    is_rel8: false,
+                                });
+                                emitter.emit_jcc_rel32(Condition::NotEqual, 0);
+                            }
+                        }
+                    }
                 }
                 _ => {
                     return Err(WasmError::Runtime(format!(
@@ -120,7 +1016,155 @@ impl JitCompiler {
             }
         }
 
-        Ok(ir)
+        Ok(emitter.take_code())
+    }
+
+    fn emit_i32_compare(emitter: &mut Emitter, cond: Condition) {
+        emitter.emit_pop(Reg::Rcx);
+        emitter.emit_pop(Reg::Rax);
+        emitter.emit_cmp_rr(Reg::Rax, Reg::Rcx);
+        emitter.emit_mov_ri32(Reg::Rax, 1);
+        emitter.emit_jcc_rel8(cond, 3);
+        emitter.emit_mov_ri32(Reg::Rax, 0);
+    }
+
+    fn emit_i64_compare(emitter: &mut Emitter, cond: Condition) {
+        emitter.emit_pop(Reg::Rcx);
+        emitter.emit_pop(Reg::Rax);
+        emitter.emit_cmp_rr(Reg::Rax, Reg::Rcx);
+        emitter.emit_mov_ri32(Reg::Rax, 1);
+        emitter.emit_jcc_rel8(cond, 3);
+        emitter.emit_mov_ri32(Reg::Rax, 0);
+    }
+
+    #[allow(dead_code)]
+    fn read_uleb(bytecode: &[u8], cursor: &mut usize) -> Result<u32> {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+
+        loop {
+            let byte = *bytecode
+                .get(*cursor)
+                .ok_or_else(|| WasmError::Runtime("unexpected end of JIT immediate".to_string()))?;
+            *cursor += 1;
+            value |= ((byte & 0x7F) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+            if shift >= 35 {
+                return Err(WasmError::Runtime(
+                    "uleb128 overflow in JIT immediate".to_string(),
+                ));
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn find_else_offset(bytecode: &[u8], start: usize) -> usize {
+        let mut depth = 0;
+        let mut i = start;
+        while i < bytecode.len() {
+            let opcode = bytecode[i];
+            match opcode {
+                WASM_BLOCK | WASM_LOOP | WASM_IF => {
+                    depth += 1;
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_ELSE if depth == 1 => return i,
+                WASM_END if depth == 0 => return 0,
+                WASM_END => {
+                    depth -= 1;
+                    i += 1;
+                }
+                WASM_BR | WASM_BR_IF => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_LOCAL_GET | WASM_LOCAL_SET | WASM_LOCAL_TEE => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_I32_CONST => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_I32_LOAD | WASM_I64_LOAD | WASM_F32_LOAD | WASM_F64_LOAD => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_I32_STORE | WASM_I64_STORE | WASM_F32_STORE | WASM_F64_STORE => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                _ => i += 1,
+            }
+        }
+        0
+    }
+
+    #[allow(dead_code)]
+    fn find_block_end(bytecode: &[u8], start: usize) -> usize {
+        let mut depth = 0;
+        let mut i = start;
+        while i < bytecode.len() {
+            let opcode = bytecode[i];
+            match opcode {
+                WASM_BLOCK | WASM_LOOP | WASM_IF => {
+                    depth += 1;
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_ELSE | WASM_END => {
+                    if depth == 0 {
+                        return i;
+                    }
+                    depth -= 1;
+                    i += 1;
+                }
+                WASM_BR | WASM_BR_IF => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_LOCAL_GET | WASM_LOCAL_SET | WASM_LOCAL_TEE => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_I32_CONST => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_I32_LOAD | WASM_I64_LOAD | WASM_F32_LOAD | WASM_F64_LOAD => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                WASM_I32_STORE | WASM_I64_STORE | WASM_F32_STORE | WASM_F64_STORE => {
+                    i += 1;
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                    let _ = Self::read_uleb(bytecode, &mut i);
+                }
+                _ => i += 1,
+            }
+        }
+        0
+    }
+
+    #[allow(dead_code)]
+    fn uleb_size(bytecode: &[u8], start: usize) -> usize {
+        let mut size = 0;
+        let mut i = start;
+        while i < bytecode.len() {
+            size += 1;
+            if bytecode[i] & 0x80 == 0 {
+                break;
+            }
+            i += 1;
+        }
+        size
     }
 
     fn compute_cache_key(&self, module: &Module, func_idx: u32) -> u64 {
@@ -155,28 +1199,6 @@ impl JitCompiler {
         self.code_cache.get(&cache_key)
     }
 
-    fn read_uleb(bytecode: &[u8], cursor: &mut usize) -> Result<u32> {
-        let mut value = 0u32;
-        let mut shift = 0u32;
-
-        loop {
-            let byte = *bytecode
-                .get(*cursor)
-                .ok_or_else(|| WasmError::Runtime("unexpected end of JIT immediate".to_string()))?;
-            *cursor += 1;
-            value |= ((byte & 0x7F) as u32) << shift;
-            if byte & 0x80 == 0 {
-                return Ok(value);
-            }
-            shift += 7;
-            if shift >= 35 {
-                return Err(WasmError::Runtime(
-                    "uleb128 overflow in JIT immediate".to_string(),
-                ));
-            }
-        }
-    }
-
     fn import_func_count(module: &Module) -> u32 {
         module
             .imports
@@ -203,6 +1225,10 @@ impl JitCompiler {
     pub fn record_call(&mut self, func_idx: u64) {
         let count = self.call_counts.entry(func_idx).or_insert(0);
         *count += 1;
+
+        if self.osr_enabled && *count >= HOT_THRESHOLD && !self.has_osr_candidates() {
+            self.queue_for_osr(func_idx);
+        }
     }
 
     pub fn get_call_count(&self, func_idx: u64) -> u64 {
@@ -211,6 +1237,10 @@ impl JitCompiler {
 
     pub fn is_hot(&self, func_idx: u64) -> bool {
         self.get_call_count(func_idx) >= HOT_THRESHOLD
+    }
+
+    pub fn should_osr(&self, func_idx: u64) -> bool {
+        self.osr_enabled && self.is_hot(func_idx)
     }
 
     pub fn queue_for_osr(&mut self, func_idx: u64) {
@@ -788,7 +1818,8 @@ mod tests {
 
         let mut compiler = JitCompiler::new();
         let result = compiler.compile(&module, 0).unwrap();
-        assert_eq!(result.code, vec![0x01, 129, 0xFF]);
+        assert!(!result.code.is_empty());
+        assert!(result.code.contains(&0xC3));
     }
 
     #[test]
@@ -798,7 +1829,7 @@ mod tests {
         module.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0x41, 0x00, 0x0F],
+            body: vec![0xFC, 0x00],
         });
 
         let mut compiler = JitCompiler::new();
@@ -901,7 +1932,7 @@ mod tests {
         first.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0x20, 0x00, 0x0F],
+            body: vec![0x41, 0x01, 0x0F],
         });
 
         let mut second = Module::new();
@@ -909,7 +1940,7 @@ mod tests {
         second.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0x21, 0x00, 0x0F],
+            body: vec![0x41, 0x02, 0x0F],
         });
 
         let mut compiler = JitCompiler::new();
@@ -1084,6 +2115,23 @@ mod tests {
 
         compiler.record_call(0);
         assert!(compiler.is_hot(0));
+    }
+
+    #[test]
+    fn test_should_osr() {
+        let mut compiler = JitCompiler::new();
+        compiler.enable_osr();
+
+        compiler.record_call(0);
+        assert!(!compiler.should_osr(0));
+
+        for _ in 0..998 {
+            compiler.record_call(0);
+        }
+        assert!(!compiler.should_osr(0));
+
+        compiler.record_call(0);
+        assert!(compiler.should_osr(0));
     }
 
     #[test]
