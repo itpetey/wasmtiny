@@ -24,3 +24,6 @@ pub use runtime::TrapCode;
 pub use runtime::ValType;
 pub use runtime::WasmError;
 pub use runtime::WasmValue;
+
+#[cfg(feature = "llvm-jit")]
+pub use jit::LlvmJit;

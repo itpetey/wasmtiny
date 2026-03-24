@@ -90,6 +90,10 @@ impl AotModule {
         aot_module
     }
 
+    pub fn module(&self) -> &Module {
+        &self.module
+    }
+
     pub fn register_native(&mut self, func: NativeFunc) -> u32 {
         let idx = self.native_functions.len() as u32;
         self.native_functions.push(func);
