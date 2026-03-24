@@ -13,6 +13,123 @@ use llvm_sys::core::*;
 use llvm_sys::prelude::*;
 
 #[cfg(feature = "llvm-jit")]
+#[allow(dead_code)]
+mod opcodes {
+    pub const OP_UNREACHABLE: u8 = 0x00;
+    pub const OP_NOP: u8 = 0x01;
+    pub const OP_BLOCK: u8 = 0x02;
+    pub const OP_LOOP: u8 = 0x03;
+    pub const OP_IF: u8 = 0x04;
+    pub const OP_ELSE: u8 = 0x05;
+    pub const OP_END: u8 = 0x0B;
+    pub const OP_BR: u8 = 0x0C;
+    pub const OP_BR_IF: u8 = 0x0D;
+    pub const OP_RETURN: u8 = 0x0F;
+    pub const OP_CALL: u8 = 0x10;
+    pub const OP_CALL_INDIRECT: u8 = 0x11;
+    pub const OP_DROP: u8 = 0x1A;
+    pub const OP_LOCAL_GET: u8 = 0x20;
+    pub const OP_LOCAL_SET: u8 = 0x21;
+    pub const OP_LOCAL_TEE: u8 = 0x22;
+    pub const OP_I32_LOAD: u8 = 0x28;
+    pub const OP_I64_LOAD: u8 = 0x29;
+    pub const OP_F32_LOAD: u8 = 0x2A;
+    pub const OP_F64_LOAD: u8 = 0x2B;
+    pub const OP_I32_LOAD8_S: u8 = 0x2C;
+    pub const OP_I32_LOAD8_U: u8 = 0x2D;
+    pub const OP_I32_LOAD16_S: u8 = 0x2E;
+    pub const OP_I32_LOAD16_U: u8 = 0x2F;
+    pub const OP_I32_STORE: u8 = 0x36;
+    pub const OP_I64_STORE: u8 = 0x37;
+    pub const OP_F32_STORE: u8 = 0x38;
+    pub const OP_F64_STORE: u8 = 0x39;
+    pub const OP_I32_STORE8: u8 = 0x3A;
+    pub const OP_I32_STORE16: u8 = 0x3B;
+    pub const OP_I32_EQZ: u8 = 0x45;
+    pub const OP_I32_EQ: u8 = 0x46;
+    pub const OP_I32_NE: u8 = 0x47;
+    pub const OP_I32_LT_S: u8 = 0x48;
+    pub const OP_I32_LT_U: u8 = 0x49;
+    pub const OP_I32_GT_S: u8 = 0x4A;
+    pub const OP_I32_GT_U: u8 = 0x4B;
+    pub const OP_I32_LE_S: u8 = 0x4C;
+    pub const OP_I32_LE_U: u8 = 0x4D;
+    pub const OP_I32_GE_S: u8 = 0x4E;
+    pub const OP_I32_GE_U: u8 = 0x4F;
+    pub const OP_I32_CONST: u8 = 0x41;
+    pub const OP_I64_CONST: u8 = 0x42;
+    pub const OP_F32_CONST: u8 = 0x43;
+    pub const OP_F64_CONST: u8 = 0x44;
+    pub const OP_I32_CLZ: u8 = 0x67;
+    pub const OP_I32_CTZ: u8 = 0x68;
+    pub const OP_I32_POPCNT: u8 = 0x69;
+    pub const OP_I32_ADD: u8 = 0x6A;
+    pub const OP_I32_SUB: u8 = 0x6B;
+    pub const OP_I32_MUL: u8 = 0x6C;
+    pub const OP_I32_DIV_S: u8 = 0x6D;
+    pub const OP_I32_DIV_U: u8 = 0x6E;
+    pub const OP_I32_REM_S: u8 = 0x6F;
+    pub const OP_I32_REM_U: u8 = 0x70;
+    pub const OP_I32_AND: u8 = 0x71;
+    pub const OP_I32_OR: u8 = 0x72;
+    pub const OP_I32_XOR: u8 = 0x73;
+    pub const OP_I32_SHL: u8 = 0x74;
+    pub const OP_I32_SHR_S: u8 = 0x75;
+    pub const OP_I32_SHR_U: u8 = 0x76;
+    pub const OP_I32_ROTL: u8 = 0x77;
+    pub const OP_I32_ROTR: u8 = 0x78;
+    pub const OP_I64_CLZ: u8 = 0x79;
+    pub const OP_I64_CTZ: u8 = 0x7A;
+    pub const OP_I64_POPCNT: u8 = 0x7B;
+    pub const OP_I64_ADD: u8 = 0x7C;
+    pub const OP_I64_SUB: u8 = 0x7D;
+    pub const OP_I64_MUL: u8 = 0x7E;
+    pub const OP_I64_DIV_S: u8 = 0x7F;
+    pub const OP_I64_DIV_U: u8 = 0x80;
+    pub const OP_I64_REM_S: u8 = 0x81;
+    pub const OP_I64_REM_U: u8 = 0x82;
+    pub const OP_I64_AND: u8 = 0x83;
+    pub const OP_I64_OR: u8 = 0x84;
+    pub const OP_I64_XOR: u8 = 0x85;
+    pub const OP_I64_SHL: u8 = 0x86;
+    pub const OP_I64_SHR_S: u8 = 0x87;
+    pub const OP_I64_SHR_U: u8 = 0x88;
+    pub const OP_I64_ROTL: u8 = 0x89;
+    pub const OP_I64_ROTR: u8 = 0x8A;
+    pub const OP_F32_ADD: u8 = 0x8C;
+    pub const OP_F32_SUB: u8 = 0x8D;
+    pub const OP_F32_MUL: u8 = 0x8E;
+    pub const OP_F32_DIV: u8 = 0x8F;
+    pub const OP_F32_MIN: u8 = 0x90;
+    pub const OP_F32_NEG: u8 = 0x91;
+    pub const OP_F64_ADD: u8 = 0x92;
+    pub const OP_F64_SUB: u8 = 0x93;
+    pub const OP_F64_MUL: u8 = 0x94;
+    pub const OP_F64_DIV: u8 = 0x95;
+    pub const OP_F64_MIN: u8 = 0x96;
+    pub const OP_F64_NEG: u8 = 0x97;
+    pub const OP_F64_DEMOTE_F32: u8 = 0x98;
+    pub const OP_F32_PROMOTE_F64: u8 = 0x99;
+    pub const OP_I32_TRUNC_F32_S: u8 = 0xA2;
+    pub const OP_I32_TRUNC_F32_U: u8 = 0xA3;
+    pub const OP_I64_TRUNC_F32_S: u8 = 0xA4;
+    pub const OP_I64_TRUNC_F32_U: u8 = 0xA5;
+    pub const OP_I32_TRUNC_F64_S: u8 = 0xA6;
+    pub const OP_F32_CONVERT_I32_S: u8 = 0xC0;
+    pub const OP_F32_CONVERT_I32_U: u8 = 0xC1;
+    pub const OP_F32_CONVERT_I64_S: u8 = 0xC2;
+    pub const OP_F32_CONVERT_I64_U: u8 = 0xC3;
+    pub const OP_F64_CONVERT_I32_S: u8 = 0xC4;
+    pub const OP_F64_CONVERT_I32_U: u8 = 0xC5;
+    pub const OP_F64_CONVERT_I64_S: u8 = 0xC6;
+    pub const OP_F64_CONVERT_I64_U: u8 = 0xC7;
+    pub const OP_I32_REINTERPRET_F32: u8 = 0xBC;
+    pub const OP_I64_REINTERPRET_F64: u8 = 0xBD;
+    pub const OP_F32_REINTERPRET_I32: u8 = 0xBE;
+    pub const OP_F64_REINTERPRET_I64: u8 = 0xBF;
+}
+
+#[cfg(feature = "llvm-jit")]
 #[derive(Clone, Debug)]
 struct BlockInfo {
     kind: BlockKind,
@@ -235,6 +352,18 @@ impl WasmToLlvmTranslator {
                     let val = self.read_uleb64(bytecode, &mut pc)? as i64;
                     let const_val =
                         LLVMConstInt(LLVMInt64TypeInContext(self.context), val as u64, 1);
+                    value_stack.push(const_val);
+                }
+                0x43 => {
+                    pc += 1;
+                    let val = self.read_f32_bytes(bytecode, &mut pc)?;
+                    let const_val = LLVMConstReal(LLVMFloatTypeInContext(self.context), val as f64);
+                    value_stack.push(const_val);
+                }
+                0x44 => {
+                    pc += 1;
+                    let val = self.read_f64_bytes(bytecode, &mut pc)?;
+                    let const_val = LLVMConstReal(LLVMDoubleTypeInContext(self.context), val);
                     value_stack.push(const_val);
                 }
                 0x6A => {
@@ -700,18 +829,6 @@ impl WasmToLlvmTranslator {
                         let result = LLVMBuildLShr(self.builder, a, b_trunc, c"i64_shr_u".as_ptr());
                         value_stack.push(result);
                     }
-                }
-                0x8A => {
-                    pc += 1;
-                    let val = self.read_uleb(bytecode, &mut pc)?;
-                    let const_val = LLVMConstReal(LLVMFloatTypeInContext(self.context), val as f64);
-                    value_stack.push(const_val);
-                }
-                0x8B => {
-                    pc += 1;
-                    let val = self.read_uleb64(bytecode, &mut pc)? as f64;
-                    let const_val = LLVMConstReal(LLVMDoubleTypeInContext(self.context), val);
-                    value_stack.push(const_val);
                 }
                 0x8C => {
                     pc += 1;
@@ -1920,6 +2037,9 @@ impl WasmToLlvmTranslator {
                     pc += 1;
                     let _type_idx = self.read_uleb(bytecode, &mut pc)?;
                     let _table_idx = self.read_uleb(bytecode, &mut pc)?;
+                    return Err(WasmError::Runtime(
+                        "call_indirect not yet supported".to_string(),
+                    ));
                 }
                 0x0F => {
                     if let Some(ret_val) = value_stack.last() {
@@ -1930,7 +2050,10 @@ impl WasmToLlvmTranslator {
                     return Ok(());
                 }
                 _ => {
-                    pc += 1;
+                    return Err(WasmError::Runtime(format!(
+                        "Unsupported WASM opcode: 0x{:02X}",
+                        opcode
+                    )));
                 }
             }
         }
@@ -1984,6 +2107,44 @@ impl WasmToLlvmTranslator {
                 return Err(WasmError::Runtime("uleb128 overflow".to_string()));
             }
         }
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    fn read_f32_bytes(&self, bytecode: &[u8], cursor: &mut usize) -> Result<f32> {
+        if *cursor + 4 > bytecode.len() {
+            return Err(WasmError::Runtime(
+                "unexpected end of bytecode reading f32".to_string(),
+            ));
+        }
+        let bytes: [u8; 4] = [
+            bytecode[*cursor],
+            bytecode[*cursor + 1],
+            bytecode[*cursor + 2],
+            bytecode[*cursor + 3],
+        ];
+        *cursor += 4;
+        Ok(f32::from_le_bytes(bytes))
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    fn read_f64_bytes(&self, bytecode: &[u8], cursor: &mut usize) -> Result<f64> {
+        if *cursor + 8 > bytecode.len() {
+            return Err(WasmError::Runtime(
+                "unexpected end of bytecode reading f64".to_string(),
+            ));
+        }
+        let bytes: [u8; 8] = [
+            bytecode[*cursor],
+            bytecode[*cursor + 1],
+            bytecode[*cursor + 2],
+            bytecode[*cursor + 3],
+            bytecode[*cursor + 4],
+            bytecode[*cursor + 5],
+            bytecode[*cursor + 6],
+            bytecode[*cursor + 7],
+        ];
+        *cursor += 8;
+        Ok(f64::from_le_bytes(bytes))
     }
 }
 

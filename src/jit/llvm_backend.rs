@@ -1,6 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::runtime::{Module, Result, WasmError};
+use crate::runtime::{FunctionType, Module, NumType, Result, ValType, WasmError, WasmValue};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ptr;
@@ -32,6 +32,11 @@ use llvm_sys::target::{
 
 use super::wasm_to_llvm::WasmToLlvmTranslator;
 
+struct CompiledFunction {
+    entry_point: *const u8,
+    func_type: FunctionType,
+}
+
 pub struct LlvmJit {
     #[cfg(feature = "llvm-jit")]
     thread_safe_context: LLVMOrcThreadSafeContextRef,
@@ -39,7 +44,7 @@ pub struct LlvmJit {
     lljit: LLVMOrcLLJITRef,
     #[cfg(feature = "llvm-jit")]
     main_dylib: LLVMOrcJITDylibRef,
-    compiled_functions: HashMap<u32, *const u8>,
+    compiled_functions: HashMap<u32, CompiledFunction>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,9 +57,21 @@ impl LlvmJit {
     #[cfg(feature = "llvm-jit")]
     pub fn new(_module_name: &str) -> Result<Self> {
         unsafe {
-            LLVM_InitializeNativeTarget();
-            LLVM_InitializeNativeAsmPrinter();
-            LLVM_InitializeNativeAsmParser();
+            if LLVM_InitializeNativeTarget() != 0 {
+                return Err(WasmError::Runtime(
+                    "Failed to initialize native target".to_string(),
+                ));
+            }
+            if LLVM_InitializeNativeAsmPrinter() != 0 {
+                return Err(WasmError::Runtime(
+                    "Failed to initialize native ASM printer".to_string(),
+                ));
+            }
+            if LLVM_InitializeNativeAsmParser() != 0 {
+                return Err(WasmError::Runtime(
+                    "Failed to initialize native ASM parser".to_string(),
+                ));
+            }
 
             let thread_safe_context = LLVMOrcCreateNewThreadSafeContext();
             if thread_safe_context.is_null() {
@@ -124,14 +141,43 @@ impl LlvmJit {
             for func_idx in import_func_count..(import_func_count + module.funcs.len() as u32) {
                 let local_idx = func_idx - import_func_count;
                 if let Some(func) = module.defined_func_at(local_idx) {
+                    let func_type = module
+                        .func_type(func_idx)
+                        .ok_or_else(|| {
+                            WasmError::Runtime(format!("Function type not found for {}", func_idx))
+                        })?
+                        .clone();
+
                     let ts_context = LLVMOrcCreateNewThreadSafeContext();
                     let context = LLVMOrcThreadSafeContextGetContext(ts_context);
+
                     let mut translator = WasmToLlvmTranslator::new(context)?;
-                    let (llvm_module, _llvm_func) =
-                        translator.translate_function(func, func_idx, module)?;
-                    let entry_point = self.compile_and_add(llvm_module, ts_context, func_idx)?;
-                    drop(translator);
-                    self.compiled_functions.insert(func_idx, entry_point);
+                    let translate_result = translator.translate_function(func, func_idx, module);
+
+                    let (llvm_module, _llvm_func) = match translate_result {
+                        Ok(result) => result,
+                        Err(e) => {
+                            LLVMOrcDisposeThreadSafeContext(ts_context);
+                            return Err(e);
+                        }
+                    };
+
+                    let compile_result = self.compile_and_add(llvm_module, ts_context, func_idx);
+
+                    let entry_point = match compile_result {
+                        Ok(ep) => ep,
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    };
+
+                    self.compiled_functions.insert(
+                        func_idx,
+                        CompiledFunction {
+                            entry_point,
+                            func_type,
+                        },
+                    );
                     compiled.push(CompiledLlvmFunction {
                         func_idx,
                         entry_point,
@@ -152,7 +198,8 @@ impl LlvmJit {
     ) -> Result<*const u8> {
         unsafe {
             let func_name = format!("wasm_func_{}", func_idx);
-            let func_name_c = CString::new(func_name.clone()).unwrap();
+            let func_name_c = CString::new(func_name.clone())
+                .map_err(|_| WasmError::Runtime("Function name contains NUL byte".to_string()))?;
 
             let mut error_msg: *mut i8 = ptr::null_mut();
             let result = LLVMVerifyModule(
@@ -207,7 +254,9 @@ impl LlvmJit {
     }
 
     pub fn get_function_entry(&self, func_idx: u32) -> Option<*const u8> {
-        self.compiled_functions.get(&func_idx).copied()
+        self.compiled_functions
+            .get(&func_idx)
+            .map(|cf| cf.entry_point)
     }
 
     #[cfg(feature = "llvm-jit")]
@@ -219,7 +268,9 @@ impl LlvmJit {
                 LLVMOrcCSymbolMapPair, LLVMOrcJITDylibDefine,
             };
 
-            let name_c = CString::new(name).unwrap();
+            let name_c = CString::new(name).map_err(|_| {
+                WasmError::Runtime("Host function name contains NUL byte".to_string())
+            })?;
             let symbol_name = LLVMOrcLLJITMangleAndIntern(self.lljit, name_c.as_ptr());
 
             let symbol = LLVMJITEvaluatedSymbol {
@@ -256,20 +307,46 @@ impl LlvmJit {
     }
 
     #[cfg(feature = "llvm-jit")]
-    pub fn invoke_function(
-        &self,
-        func_idx: u32,
-        _args: &[crate::runtime::WasmValue],
-    ) -> Result<Vec<crate::runtime::WasmValue>> {
-        let entry_point = self
+    pub fn invoke_function(&self, func_idx: u32, _args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        let compiled = self
             .compiled_functions
             .get(&func_idx)
             .ok_or_else(|| WasmError::Runtime(format!("Function {} not compiled", func_idx)))?;
 
+        let entry_point = compiled.entry_point;
+        let func_type = &compiled.func_type;
+
         unsafe {
-            let func: extern "C" fn() -> i64 = std::mem::transmute(*entry_point);
-            let result = func();
-            Ok(vec![crate::runtime::WasmValue::I64(result)])
+            match func_type.results.as_slice() {
+                [] => {
+                    let func: extern "C" fn() = std::mem::transmute(entry_point);
+                    func();
+                    Ok(vec![])
+                }
+                [ValType::Num(NumType::I32)] => {
+                    let func: extern "C" fn() -> i32 = std::mem::transmute(entry_point);
+                    let result = func();
+                    Ok(vec![WasmValue::I32(result)])
+                }
+                [ValType::Num(NumType::I64)] => {
+                    let func: extern "C" fn() -> i64 = std::mem::transmute(entry_point);
+                    let result = func();
+                    Ok(vec![WasmValue::I64(result)])
+                }
+                [ValType::Num(NumType::F32)] => {
+                    let func: extern "C" fn() -> f32 = std::mem::transmute(entry_point);
+                    let result = func();
+                    Ok(vec![WasmValue::F32(result)])
+                }
+                [ValType::Num(NumType::F64)] => {
+                    let func: extern "C" fn() -> f64 = std::mem::transmute(entry_point);
+                    let result = func();
+                    Ok(vec![WasmValue::F64(result)])
+                }
+                _ => Err(WasmError::Runtime(
+                    "Multi-value returns not yet supported".to_string(),
+                )),
+            }
         }
     }
 }
@@ -296,9 +373,9 @@ impl Drop for LlvmJit {
 #[cfg(all(test, feature = "llvm-jit"))]
 mod tests {
     use super::*;
-    use crate::runtime::{Func, FunctionType, Module, NumType, ValType};
+    use crate::runtime::{Func, Module, NumType, ValType};
 
-    fn create_simple_add_module() -> Module {
+    fn create_i32_add_module() -> Module {
         let mut module = Module::new();
         module.types.push(FunctionType::new(
             vec![ValType::Num(NumType::I32), ValType::Num(NumType::I32)],
@@ -312,7 +389,7 @@ mod tests {
         module
     }
 
-    fn create_const_return_module() -> Module {
+    fn create_i32_const_module() -> Module {
         let mut module = Module::new();
         module
             .types
@@ -374,9 +451,9 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_simple_add() {
-        let mut jit = LlvmJit::new("test_add").unwrap();
-        let module = create_simple_add_module();
+    fn test_compile_i32_add() {
+        let mut jit = LlvmJit::new("test_i32_add").unwrap();
+        let module = create_i32_add_module();
         let result = jit.compile_module(&module);
         assert!(result.is_ok());
         let compiled = result.unwrap();
@@ -385,13 +462,14 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_const_return() {
-        let mut jit = LlvmJit::new("test_const").unwrap();
-        let module = create_const_return_module();
-        let result = jit.compile_module(&module);
-        assert!(result.is_ok());
-        let compiled = result.unwrap();
-        assert_eq!(compiled.len(), 1);
+    fn test_invoke_i32_const() {
+        let mut jit = LlvmJit::new("test_i32_const").unwrap();
+        let module = create_i32_const_module();
+        jit.compile_module(&module).unwrap();
+
+        let result = jit.invoke_function(0, &[]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], WasmValue::I32(42));
     }
 
     #[test]
@@ -421,7 +499,7 @@ mod tests {
     #[test]
     fn test_get_function_entry() {
         let mut jit = LlvmJit::new("test_get_entry").unwrap();
-        let module = create_simple_add_module();
+        let module = create_i32_add_module();
         jit.compile_module(&module).unwrap();
 
         let entry = jit.get_function_entry(0);
@@ -444,16 +522,6 @@ mod tests {
 
         let mut jit = LlvmJit::new("test_host").unwrap();
         let result = jit.register_host_function("test_func", test_host_func as *const u8);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_invoke_function() {
-        let mut jit = LlvmJit::new("test_invoke").unwrap();
-        let module = create_const_return_module();
-        jit.compile_module(&module).unwrap();
-
-        let result = jit.invoke_function(0, &[]);
         assert!(result.is_ok());
     }
 

@@ -40,6 +40,11 @@ impl WasmApplication {
     }
 
     #[cfg(feature = "llvm-jit")]
+    pub fn execution_mode(&self) -> &ExecutionMode {
+        &self.execution_mode
+    }
+
+    #[cfg(feature = "llvm-jit")]
     pub fn compile_with_llvm(&mut self, module_idx: u32) -> Result<()> {
         let aot_module = self
             .runtime
