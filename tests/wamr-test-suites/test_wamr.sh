@@ -5,6 +5,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
 
+# DEPRECATED: This script is deprecated in favor of the Rust-based integration tests.
+# Please use the new test suite at tests/integration/
+# Run with: cd tests/integration && cargo run -- --suite all
+
 # Run script like DEBUG=1 ./test_wamr.sh ... to enable debug mode
 function DEBUG() {
   env | grep -q "\<DEBUG\>" && "$@"

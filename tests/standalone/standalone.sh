@@ -4,6 +4,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
 
+# DEPRECATED: This script is deprecated in favor of the Rust-based integration tests.
+# Please use the new test suite at tests/integration/
+# Run with: cd tests/integration && cargo run -- --suite standalone
+
 # get every run.sh under standalone sub-direcotry
 #
 #       for f in folders_include_run_sh
