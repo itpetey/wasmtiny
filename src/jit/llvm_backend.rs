@@ -37,6 +37,24 @@ struct CompiledFunction {
     func_type: FunctionType,
 }
 
+/// LLVM-based JIT compiler for WebAssembly modules.
+///
+/// Uses LLVM 17's ORC JIT API to compile WASM functions to native code
+/// with optimisations like loop vectorisation, constant propagation, and inlining.
+///
+/// # Thread Safety
+///
+/// The JIT instance can be shared across threads, but compiled functions must
+/// be invoked with the memory context set for the calling thread using
+/// [`set_memory_context`][crate::jit::set_memory_context].
+///
+/// # Example
+///
+/// ```ignore
+/// let mut jit = LlvmJit::new("my_module")?;
+/// let compiled = jit.compile_module(&module)?;
+/// let result = jit.invoke_function(0, &[WasmValue::I32(42)])?;
+/// ```
 pub struct LlvmJit {
     #[cfg(feature = "llvm-jit")]
     thread_safe_context: LLVMOrcThreadSafeContextRef,
@@ -49,13 +67,24 @@ pub struct LlvmJit {
     helpers_registered: bool,
 }
 
+/// A compiled WASM function ready for execution.
 #[derive(Debug, Clone)]
 pub struct CompiledLlvmFunction {
+    /// The function index in the original WASM module.
     pub func_idx: u32,
+    /// Raw pointer to the compiled function entry point.
     pub entry_point: *const u8,
 }
 
 impl LlvmJit {
+    /// Creates a new LLVM JIT instance.
+    ///
+    /// Initialises the LLVM native target, ASM printer, and ASM parser,
+    /// then creates an ORC LLJIT instance for compilation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if LLVM initialisation fails or the JIT cannot be created.
     #[cfg(feature = "llvm-jit")]
     pub fn new(_module_name: &str) -> Result<Self> {
         unsafe {
@@ -167,6 +196,23 @@ impl LlvmJit {
         Ok(())
     }
 
+    /// Compiles all defined functions in a WASM module to native code.
+    ///
+    /// Each function is translated to LLVM IR, optimised, and compiled to
+    /// machine code. The compiled functions are stored internally for later
+    /// invocation via [`invoke_function`](Self::invoke_function).
+    ///
+    /// # Arguments
+    ///
+    /// * `module` - The WASM module containing functions to compile.
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`CompiledLlvmFunction`] entries, one for each compiled function.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if translation or compilation fails for any function.
     #[cfg(feature = "llvm-jit")]
     pub fn compile_module(&mut self, module: &Module) -> Result<Vec<CompiledLlvmFunction>> {
         if !self.helpers_registered {
@@ -351,6 +397,28 @@ impl LlvmJit {
         }
     }
 
+    /// Invokes a compiled function with the given arguments.
+    ///
+    /// # Arguments
+    ///
+    /// * `func_idx` - The function index (adjusted for imports).
+    /// * `args` - Arguments to pass to the function.
+    ///
+    /// # Returns
+    ///
+    /// The function's return values as a vector of [`WasmValue`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The function was not compiled
+    /// - Argument count or types don't match the function signature
+    /// - The function signature is not supported (e.g., multi-value returns)
+    ///
+    /// # Safety
+    ///
+    /// This function uses `std::mem::transmute` to create function pointers.
+    /// The caller must ensure the memory context is set for the current thread.
     #[cfg(feature = "llvm-jit")]
     pub fn invoke_function(&self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         let compiled = self

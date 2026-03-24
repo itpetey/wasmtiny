@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 #[cfg(feature = "llvm-jit")]
-use crate::jit::LlvmJit;
+use crate::jit::{LlvmJit, set_memory_context};
 
 pub enum ExecutionMode {
     Interpreter,
@@ -156,27 +156,29 @@ impl WasmApplication {
         args: &[WasmValue],
     ) -> Result<Vec<WasmValue>> {
         #[cfg(feature = "llvm-jit")]
-        if matches!(self.execution_mode, ExecutionMode::LlvmJit)
-            && let Some(ref llvm_jit) = self.llvm_jit
-        {
-            let module = self
-                .runtime
-                .get_module(module_idx)
-                .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        if matches!(self.execution_mode, ExecutionMode::LlvmJit) && self.llvm_jit.is_some() {
+            let (func_idx, memory_context) = {
+                let module = self.runtime.get_module_mut(module_idx).ok_or_else(|| {
+                    WasmError::Runtime(format!("module {} not found", module_idx))
+                })?;
 
-            if let Some(AotExport::Function(func_idx)) = module.get_export(func_name).cloned() {
-                let adjusted_idx = func_idx
-                    - module
-                        .imports()
-                        .iter()
-                        .filter(|import| matches!(import.kind, crate::runtime::ImportKind::Func(_)))
-                        .count() as u32;
-                return llvm_jit.invoke_function(adjusted_idx, args);
-            } else {
-                return Err(WasmError::Runtime(format!(
-                    "function {} not found",
-                    func_name
-                )));
+                let Some(AotExport::Function(func_idx)) = module.get_export(func_name).cloned()
+                else {
+                    return Err(WasmError::Runtime(format!(
+                        "function {} not found",
+                        func_name
+                    )));
+                };
+
+                (func_idx, module.memory_context())
+            };
+
+            if let Some((memory_ptr, memory_len)) = memory_context {
+                set_memory_context(memory_ptr, memory_len);
+            }
+
+            if let Some(ref llvm_jit) = self.llvm_jit {
+                return llvm_jit.invoke_function(func_idx, args);
             }
         }
 
@@ -200,6 +202,28 @@ impl WasmApplication {
     }
 
     pub fn execute_start(&mut self, module_idx: u32) -> Result<()> {
+        #[cfg(feature = "llvm-jit")]
+        if matches!(self.execution_mode, ExecutionMode::LlvmJit) && self.llvm_jit.is_some() {
+            let (start_idx, memory_context) = {
+                let module = self.runtime.get_module_mut(module_idx).ok_or_else(|| {
+                    WasmError::Runtime(format!("module {} not found", module_idx))
+                })?;
+                let Some(start_idx) = module.start_function() else {
+                    return Ok(());
+                };
+                (start_idx, module.memory_context())
+            };
+
+            if let Some((memory_ptr, memory_len)) = memory_context {
+                set_memory_context(memory_ptr, memory_len);
+            }
+
+            if let Some(ref llvm_jit) = self.llvm_jit {
+                let _ = llvm_jit.invoke_function(start_idx, &[])?;
+                return Ok(());
+            }
+        }
+
         let module = self
             .runtime
             .get_module_mut(module_idx)

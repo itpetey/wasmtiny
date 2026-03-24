@@ -6,7 +6,7 @@ thread_local! {
 
 struct LlvmRuntimeContext {
     memory_ptr: *mut u8,
-    memory_len: u32,
+    memory_len: usize,
 }
 
 impl LlvmRuntimeContext {
@@ -18,7 +18,24 @@ impl LlvmRuntimeContext {
     }
 }
 
-pub fn set_memory_context(ptr: *mut u8, len: u32) {
+/// Sets the memory context for the current thread.
+///
+/// This must be called before invoking any compiled WASM function that
+/// accesses linear memory. The context is thread-local, so each thread
+/// must set its own context before execution.
+///
+/// # Arguments
+///
+/// * `ptr` - Pointer to the start of the WASM linear memory.
+/// * `len` - Length of the linear memory in bytes.
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `ptr` is valid for `len` bytes
+/// - The memory remains valid for the duration of execution
+/// - This is called on each thread before invoking compiled code
+pub fn set_memory_context(ptr: *mut u8, len: usize) {
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
         ctx.memory_ptr = ptr;
@@ -32,7 +49,7 @@ fn check_bounds(addr: u32, size: u32) -> Result<*mut u8, ()> {
         if ctx.memory_ptr.is_null() {
             return Err(());
         }
-        let end = addr.checked_add(size).ok_or(())?;
+        let end = (addr as usize).checked_add(size as usize).ok_or(())?;
         if end > ctx.memory_len {
             return Err(());
         }
