@@ -128,6 +128,43 @@ impl LlvmJit {
     }
 
     #[cfg(feature = "llvm-jit")]
+    pub fn register_runtime_helpers(&mut self) -> Result<()> {
+        use super::llvm_runtime::*;
+
+        macro_rules! register_helper {
+            ($name:expr, $func:expr) => {
+                self.register_host_function($name, $func as *const u8)?;
+            };
+        }
+
+        register_helper!("llvm_jit_i32_load", llvm_jit_i32_load as *const u8);
+        register_helper!("llvm_jit_i64_load", llvm_jit_i64_load as *const u8);
+        register_helper!("llvm_jit_f32_load", llvm_jit_f32_load as *const u8);
+        register_helper!("llvm_jit_f64_load", llvm_jit_f64_load as *const u8);
+        register_helper!("llvm_jit_i32_load8_s", llvm_jit_i32_load8_s as *const u8);
+        register_helper!("llvm_jit_i32_load8_u", llvm_jit_i32_load8_u as *const u8);
+        register_helper!("llvm_jit_i32_load16_s", llvm_jit_i32_load16_s as *const u8);
+        register_helper!("llvm_jit_i32_load16_u", llvm_jit_i32_load16_u as *const u8);
+        register_helper!("llvm_jit_i64_load8_s", llvm_jit_i64_load8_s as *const u8);
+        register_helper!("llvm_jit_i64_load8_u", llvm_jit_i64_load8_u as *const u8);
+        register_helper!("llvm_jit_i64_load16_s", llvm_jit_i64_load16_s as *const u8);
+        register_helper!("llvm_jit_i64_load16_u", llvm_jit_i64_load16_u as *const u8);
+        register_helper!("llvm_jit_i64_load32_s", llvm_jit_i64_load32_s as *const u8);
+        register_helper!("llvm_jit_i64_load32_u", llvm_jit_i64_load32_u as *const u8);
+        register_helper!("llvm_jit_i32_store", llvm_jit_i32_store as *const u8);
+        register_helper!("llvm_jit_i64_store", llvm_jit_i64_store as *const u8);
+        register_helper!("llvm_jit_f32_store", llvm_jit_f32_store as *const u8);
+        register_helper!("llvm_jit_f64_store", llvm_jit_f64_store as *const u8);
+        register_helper!("llvm_jit_i32_store8", llvm_jit_i32_store8 as *const u8);
+        register_helper!("llvm_jit_i32_store16", llvm_jit_i32_store16 as *const u8);
+        register_helper!("llvm_jit_i64_store8", llvm_jit_i64_store8 as *const u8);
+        register_helper!("llvm_jit_i64_store16", llvm_jit_i64_store16 as *const u8);
+        register_helper!("llvm_jit_i64_store32", llvm_jit_i64_store32 as *const u8);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "llvm-jit")]
     pub fn compile_module(&mut self, module: &Module) -> Result<Vec<CompiledLlvmFunction>> {
         unsafe {
             let mut compiled = Vec::new();

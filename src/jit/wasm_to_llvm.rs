@@ -248,7 +248,7 @@ impl WasmToLlvmTranslator {
                 }
             }
 
-            self.translate_body(&func.body, function)?;
+            self.translate_body(&func.body, function, llvm_module)?;
 
             Ok((llvm_module, function))
         }
@@ -298,7 +298,95 @@ impl WasmToLlvmTranslator {
     }
 
     #[cfg(feature = "llvm-jit")]
-    unsafe fn translate_body(&mut self, bytecode: &[u8], _function: LLVMValueRef) -> Result<()> {
+    unsafe fn get_or_declare_runtime_load(
+        &mut self,
+        module: LLVMModuleRef,
+        name: &str,
+        ret_type: LLVMTypeRef,
+    ) -> LLVMValueRef {
+        let name_c = std::ffi::CString::new(name).unwrap();
+        let existing = LLVMGetNamedFunction(module, name_c.as_ptr());
+        if !existing.is_null() {
+            return existing;
+        }
+
+        let i32_type = LLVMInt32TypeInContext(self.context);
+        let func_type = LLVMFunctionType(ret_type, &i32_type as *const _ as *mut _, 1, 0);
+        LLVMAddFunction(module, name_c.as_ptr(), func_type)
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn get_or_declare_runtime_store(
+        &mut self,
+        module: LLVMModuleRef,
+        name: &str,
+        val_type: LLVMTypeRef,
+    ) -> LLVMValueRef {
+        let name_c = std::ffi::CString::new(name).unwrap();
+        let existing = LLVMGetNamedFunction(module, name_c.as_ptr());
+        if !existing.is_null() {
+            return existing;
+        }
+
+        let i32_type = LLVMInt32TypeInContext(self.context);
+        let param_types = [i32_type, val_type];
+        let func_type = LLVMFunctionType(
+            LLVMVoidTypeInContext(self.context),
+            param_types.as_ptr() as *mut _,
+            2,
+            0,
+        );
+        LLVMAddFunction(module, name_c.as_ptr(), func_type)
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn call_runtime_load(
+        &mut self,
+        module: LLVMModuleRef,
+        helper_name: &str,
+        ret_type: LLVMTypeRef,
+        addr: LLVMValueRef,
+    ) -> LLVMValueRef {
+        let helper = self.get_or_declare_runtime_load(module, helper_name, ret_type);
+        let mut args = [addr];
+        LLVMBuildCall2(
+            self.builder,
+            LLVMGlobalGetValueType(helper),
+            helper,
+            args.as_mut_ptr(),
+            1,
+            c"load_result".as_ptr(),
+        )
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn call_runtime_store(
+        &mut self,
+        module: LLVMModuleRef,
+        helper_name: &str,
+        val_type: LLVMTypeRef,
+        addr: LLVMValueRef,
+        val: LLVMValueRef,
+    ) {
+        let helper = self.get_or_declare_runtime_store(module, helper_name, val_type);
+        let mut args = [addr, val];
+        LLVMBuildCall2(
+            self.builder,
+            LLVMGlobalGetValueType(helper),
+            helper,
+            args.as_mut_ptr(),
+            2,
+            c"store_result".as_ptr(),
+        );
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    unsafe fn translate_body(
+        &mut self,
+        bytecode: &[u8],
+        _function: LLVMValueRef,
+        module: LLVMModuleRef,
+    ) -> Result<()> {
         let mut pc: usize = 0;
         let mut value_stack: Vec<LLVMValueRef> = Vec::new();
 
@@ -1433,17 +1521,11 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMInt32TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_i32_load",
                             LLVMInt32TypeInContext(self.context),
-                            ptr,
-                            c"i32_load".as_ptr(),
+                            eff_addr,
                         );
                         value_stack.push(value);
                     }
@@ -1463,17 +1545,11 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMInt64TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_i64_load",
                             LLVMInt64TypeInContext(self.context),
-                            ptr,
-                            c"i64_load".as_ptr(),
+                            eff_addr,
                         );
                         value_stack.push(value);
                     }
@@ -1493,17 +1569,11 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMFloatTypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_f32_load",
                             LLVMFloatTypeInContext(self.context),
-                            ptr,
-                            c"f32_load".as_ptr(),
+                            eff_addr,
                         );
                         value_stack.push(value);
                     }
@@ -1523,17 +1593,11 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMDoubleTypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_f64_load",
                             LLVMDoubleTypeInContext(self.context),
-                            ptr,
-                            c"f64_load".as_ptr(),
+                            eff_addr,
                         );
                         value_stack.push(value);
                     }
@@ -1553,25 +1617,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMInt8TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
-                            LLVMInt8TypeInContext(self.context),
-                            ptr,
-                            c"i32_load8".as_ptr(),
-                        );
-                        let result = LLVMBuildSExt(
-                            self.builder,
-                            value,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_i32_load8_s",
                             LLVMInt32TypeInContext(self.context),
-                            c"i32_load8_s".as_ptr(),
+                            eff_addr,
                         );
-                        value_stack.push(result);
+                        value_stack.push(value);
                     }
                 }
                 0x2D => {
@@ -1589,25 +1641,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMInt8TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
-                            LLVMInt8TypeInContext(self.context),
-                            ptr,
-                            c"i32_load8".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            value,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_i32_load8_u",
                             LLVMInt32TypeInContext(self.context),
-                            c"i32_load8_u".as_ptr(),
+                            eff_addr,
                         );
-                        value_stack.push(result);
+                        value_stack.push(value);
                     }
                 }
                 0x2E => {
@@ -1625,25 +1665,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMInt16TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
-                            LLVMInt16TypeInContext(self.context),
-                            ptr,
-                            c"i32_load16".as_ptr(),
-                        );
-                        let result = LLVMBuildSExt(
-                            self.builder,
-                            value,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_i32_load16_s",
                             LLVMInt32TypeInContext(self.context),
-                            c"i32_load16_s".as_ptr(),
+                            eff_addr,
                         );
-                        value_stack.push(result);
+                        value_stack.push(value);
                     }
                 }
                 0x2F => {
@@ -1661,25 +1689,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
-                            eff_addr,
-                            LLVMPointerType(LLVMInt16TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let value = LLVMBuildLoad2(
-                            self.builder,
-                            LLVMInt16TypeInContext(self.context),
-                            ptr,
-                            c"i32_load16".as_ptr(),
-                        );
-                        let result = LLVMBuildZExt(
-                            self.builder,
-                            value,
+                        let value = self.call_runtime_load(
+                            module,
+                            "llvm_jit_i32_load16_u",
                             LLVMInt32TypeInContext(self.context),
-                            c"i32_load16_u".as_ptr(),
+                            eff_addr,
                         );
-                        value_stack.push(result);
+                        value_stack.push(value);
                     }
                 }
                 0x36 => {
@@ -1699,13 +1715,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
+                        self.call_runtime_store(
+                            module,
+                            "llvm_jit_i32_store",
+                            LLVMInt32TypeInContext(self.context),
                             eff_addr,
-                            LLVMPointerType(LLVMInt32TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
+                            value,
                         );
-                        LLVMBuildStore(self.builder, value, ptr);
                     }
                 }
                 0x37 => {
@@ -1725,13 +1741,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
+                        self.call_runtime_store(
+                            module,
+                            "llvm_jit_i64_store",
+                            LLVMInt64TypeInContext(self.context),
                             eff_addr,
-                            LLVMPointerType(LLVMInt64TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
+                            value,
                         );
-                        LLVMBuildStore(self.builder, value, ptr);
                     }
                 }
                 0x38 => {
@@ -1751,13 +1767,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
+                        self.call_runtime_store(
+                            module,
+                            "llvm_jit_f32_store",
+                            LLVMFloatTypeInContext(self.context),
                             eff_addr,
-                            LLVMPointerType(LLVMFloatTypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
+                            value,
                         );
-                        LLVMBuildStore(self.builder, value, ptr);
                     }
                 }
                 0x39 => {
@@ -1777,13 +1793,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
+                        self.call_runtime_store(
+                            module,
+                            "llvm_jit_f64_store",
+                            LLVMDoubleTypeInContext(self.context),
                             eff_addr,
-                            LLVMPointerType(LLVMDoubleTypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
+                            value,
                         );
-                        LLVMBuildStore(self.builder, value, ptr);
                     }
                 }
                 0x3A => {
@@ -1803,19 +1819,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
+                        self.call_runtime_store(
+                            module,
+                            "llvm_jit_i32_store8",
+                            LLVMInt32TypeInContext(self.context),
                             eff_addr,
-                            LLVMPointerType(LLVMInt8TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let trunc = LLVMBuildTrunc(
-                            self.builder,
                             value,
-                            LLVMInt8TypeInContext(self.context),
-                            c"i32_trunc8".as_ptr(),
                         );
-                        LLVMBuildStore(self.builder, trunc, ptr);
                     }
                 }
                 0x3B => {
@@ -1835,19 +1845,13 @@ impl WasmToLlvmTranslator {
                         } else {
                             addr
                         };
-                        let ptr = LLVMBuildIntToPtr(
-                            self.builder,
+                        self.call_runtime_store(
+                            module,
+                            "llvm_jit_i32_store16",
+                            LLVMInt32TypeInContext(self.context),
                             eff_addr,
-                            LLVMPointerType(LLVMInt16TypeInContext(self.context), 0),
-                            c"mem_ptr".as_ptr(),
-                        );
-                        let trunc = LLVMBuildTrunc(
-                            self.builder,
                             value,
-                            LLVMInt16TypeInContext(self.context),
-                            c"i32_trunc16".as_ptr(),
                         );
-                        LLVMBuildStore(self.builder, trunc, ptr);
                     }
                 }
                 0x02 => {
