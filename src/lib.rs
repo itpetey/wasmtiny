@@ -15,6 +15,8 @@ pub use runtime::GlobalType;
 pub use runtime::HostCallOutcome;
 pub use runtime::ImportType;
 pub use runtime::Instance;
+pub use runtime::InstanceLimits;
+pub use runtime::InstanceStats;
 pub use runtime::Memory;
 pub use runtime::MemoryType;
 pub use runtime::Module;

@@ -410,6 +410,9 @@ impl LlvmJit {
             llvm_jit_safepoint_entry as *const u8
         );
         register_helper!("llvm_jit_call_import", llvm_jit_call_import as *const u8);
+        register_helper!("llvm_jit_meter_tick", llvm_jit_meter_tick as *const u8);
+        register_helper!("llvm_jit_memory_size", llvm_jit_memory_size as *const u8);
+        register_helper!("llvm_jit_memory_grow", llvm_jit_memory_grow as *const u8);
 
         Ok(())
     }
@@ -822,8 +825,8 @@ mod tests {
     use crate::aot_runtime::runtime::AotModule;
     use crate::jit::set_execution_context;
     use crate::runtime::{
-        Func, FunctionType, HostCallOutcome, HostFunc, Import, ImportKind, Module, NumType,
-        ValType, WasmValue,
+        Func, FunctionType, HostCallOutcome, HostFunc, Import, ImportKind, InstanceLimits, Limits,
+        Module, NumType, ValType, WasmValue,
     };
     use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -917,6 +920,136 @@ mod tests {
         module
     }
 
+    fn create_budget_module() -> Module {
+        let mut module = Module::new();
+        module.types.push(FunctionType::empty());
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x01, 0x1A, 0x41, 0x02, 0x1A, 0x0F],
+        });
+        module
+    }
+
+    fn create_memory_grow_module() -> Module {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module
+            .memories
+            .push(crate::runtime::MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x01, 0x40, 0x00, 0x0F],
+        });
+        module
+    }
+
+    fn create_memory_grow_fail_module() -> Module {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module
+            .memories
+            .push(crate::runtime::MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x7F, 0x40, 0x00, 0x0F],
+        });
+        module
+    }
+
+    #[test]
+    fn test_jit_stats_are_monotonic() {
+        let _guard = llvm_test_guard();
+        let mut jit = LlvmJit::new("test_jit_stats_are_monotonic").unwrap();
+        let module = create_i32_const_module();
+        jit.compile_module(&module).unwrap();
+
+        let aot_module = set_jit_context(&module);
+        let first = jit.invoke_function(0, &[]).unwrap();
+        assert_eq!(first, vec![WasmValue::I32(42)]);
+        let first_stats = aot_module.instance_stats().unwrap();
+
+        let second = jit.invoke_function(0, &[]).unwrap();
+        assert_eq!(second, vec![WasmValue::I32(42)]);
+        let second_stats = aot_module.instance_stats().unwrap();
+
+        assert!(second_stats.executed_instructions > first_stats.executed_instructions);
+    }
+
+    #[test]
+    fn test_jit_execution_budget_is_enforced() {
+        let _guard = llvm_test_guard();
+        let mut jit = LlvmJit::new("test_jit_execution_budget_is_enforced").unwrap();
+        let module = create_budget_module();
+        jit.compile_module(&module).unwrap();
+
+        let mut aot_module = set_jit_context(&module);
+        aot_module
+            .set_instance_limits(InstanceLimits::new(Some(2), None))
+            .unwrap();
+
+        let error = jit.invoke_function(0, &[]).unwrap_err();
+        assert_eq!(
+            error,
+            WasmError::Trap(crate::runtime::TrapCode::ExecutionBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn test_jit_memory_limit_is_enforced() {
+        let _guard = llvm_test_guard();
+        let mut jit = LlvmJit::new("test_jit_memory_limit_is_enforced").unwrap();
+        let module = create_memory_grow_module();
+        jit.compile_module(&module).unwrap();
+
+        let mut aot_module = set_jit_context(&module);
+        aot_module
+            .set_instance_limits(InstanceLimits::new(None, Some(1)))
+            .unwrap();
+
+        let error = jit.invoke_function(0, &[]).unwrap_err();
+        assert_eq!(
+            error,
+            WasmError::Trap(crate::runtime::TrapCode::MemoryLimitExceeded)
+        );
+        assert_eq!(aot_module.instance_stats().unwrap().memory_pages, 1);
+    }
+
+    #[test]
+    fn test_jit_memory_grow_with_negative_delta_returns_minus_one() {
+        let _guard = llvm_test_guard();
+        let mut jit =
+            LlvmJit::new("test_jit_memory_grow_with_negative_delta_returns_minus_one").unwrap();
+        let module = create_memory_grow_fail_module();
+        jit.compile_module(&module).unwrap();
+
+        let aot_module = set_jit_context(&module);
+        let result = jit.invoke_function(0, &[]).unwrap();
+
+        assert_eq!(result, vec![WasmValue::I32(-1)]);
+        assert_eq!(aot_module.instance_stats().unwrap().memory_pages, 1);
+    }
+
+    #[test]
+    fn test_jit_meter_overflow_surfaces_runtime_error() {
+        let _guard = llvm_test_guard();
+        let mut jit = LlvmJit::new("test_jit_meter_overflow_surfaces_runtime_error").unwrap();
+        let module = create_i32_const_module();
+        jit.compile_module(&module).unwrap();
+
+        let aot_module = set_jit_context(&module);
+        aot_module.record_execution(u64::MAX).unwrap();
+
+        let error = jit.invoke_function(0, &[]).unwrap_err();
+        assert!(matches!(error, WasmError::Runtime(message) if message.contains("overflowed")));
+    }
+
     #[test]
     fn test_llvm_jit_creation() {
         let _guard = llvm_test_guard();
@@ -942,6 +1075,7 @@ mod tests {
         let mut jit = LlvmJit::new("test_i32_const").unwrap();
         let module = create_i32_const_module();
         jit.compile_module(&module).unwrap();
+        let _aot_module = set_jit_context(&module);
 
         let result = jit.invoke_function(0, &[]).unwrap();
         assert_eq!(result.len(), 1);

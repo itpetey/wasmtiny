@@ -124,16 +124,24 @@ fn trap_code_to_i32(code: TrapCode) -> i32 {
     match code {
         TrapCode::Unreachable => 1,
         TrapCode::MemoryOutOfBounds => 2,
-        TrapCode::TableOutOfBounds => 3,
-        TrapCode::IndirectCallTypeMismatch => 4,
-        TrapCode::StackOverflow => 5,
-        TrapCode::IntegerOverflow => 6,
-        TrapCode::IntegerDivisionByZero => 7,
-        TrapCode::InvalidConversionToInt => 8,
-        TrapCode::CallIndirectNull => 9,
-        TrapCode::NullReference => 10,
-        TrapCode::HostTrap => 11,
+        TrapCode::MemoryLimitExceeded => 3,
+        TrapCode::TableOutOfBounds => 4,
+        TrapCode::IndirectCallTypeMismatch => 5,
+        TrapCode::StackOverflow => 6,
+        TrapCode::ExecutionBudgetExceeded => 7,
+        TrapCode::IntegerOverflow => 8,
+        TrapCode::IntegerDivisionByZero => 9,
+        TrapCode::InvalidConversionToInt => 10,
+        TrapCode::CallIndirectNull => 11,
+        TrapCode::NullReference => 12,
+        TrapCode::HostTrap => 13,
     }
+}
+
+fn set_runtime_error(message: String) {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        ctx.borrow_mut().runtime_error = Some(message);
+    });
 }
 
 fn check_bounds(addr: u32, size: u32) -> Option<*mut u8> {
@@ -359,6 +367,65 @@ pub extern "C" fn llvm_jit_safepoint_entry(
         ctx.suspend_requested = false;
         1
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_meter_tick(units: u64) {
+    let Some(result) = with_current_module_mut(|module| module.record_execution(units)) else {
+        set_runtime_error("missing JIT execution context for metering".to_string());
+        set_trap(TrapCode::HostTrap);
+        return;
+    };
+
+    match result {
+        Ok(()) => {}
+        Err(WasmError::Trap(code)) => set_trap(code),
+        Err(error) => {
+            set_runtime_error(error.to_string());
+            set_trap(TrapCode::HostTrap);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_size() -> i32 {
+    let Some(result) = with_current_module_mut(|module| module.memory_size(0)) else {
+        set_trap(TrapCode::HostTrap);
+        return 0;
+    };
+
+    match result {
+        Ok(size) => size,
+        Err(error) => {
+            set_runtime_error(error.to_string());
+            set_trap(TrapCode::HostTrap);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_grow(delta: i32) -> i32 {
+    let Some(result) = with_current_module_mut(|module| module.memory_grow_wasm(0, delta)) else {
+        set_trap(TrapCode::HostTrap);
+        return -1;
+    };
+
+    let value = match result {
+        Ok(old_size) => old_size,
+        Err(WasmError::Trap(code)) => {
+            set_trap(code);
+            -1
+        }
+        Err(error) => {
+            set_runtime_error(error.to_string());
+            set_trap(TrapCode::HostTrap);
+            -1
+        }
+    };
+
+    refresh_memory_context_from_module();
+    value
 }
 
 macro_rules! define_load {
@@ -630,5 +697,32 @@ mod tests {
 
         let _ = llvm_jit_i64_load(0);
         assert_eq!(take_trap(), Some(TrapCode::MemoryOutOfBounds));
+    }
+
+    #[test]
+    fn test_meter_tick_without_execution_context_sets_host_trap() {
+        clear_trap();
+        set_memory_context(std::ptr::null_mut(), 0);
+
+        llvm_jit_meter_tick(1);
+
+        assert_eq!(take_trap(), Some(TrapCode::HostTrap));
+        assert_eq!(
+            take_runtime_error(),
+            Some("missing JIT execution context for metering".to_string())
+        );
+    }
+
+    #[test]
+    fn test_memory_grow_internal_error_surfaces_runtime_error() {
+        let mut module = AotModule::from_module(&crate::runtime::Module::new());
+        clear_trap();
+        set_execution_context(&mut module, std::ptr::null_mut(), 0);
+
+        let result = llvm_jit_memory_grow(1);
+
+        assert_eq!(result, -1);
+        assert!(take_runtime_error().unwrap().contains("memory not found"));
+        assert_eq!(take_trap(), Some(TrapCode::HostTrap));
     }
 }

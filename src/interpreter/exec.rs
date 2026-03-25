@@ -457,6 +457,7 @@ impl Interpreter {
             }
 
             let opcode = self.read_u8_immediate()?;
+            self.record_execution(1)?;
             match opcode {
                 0x0B => {
                     if let Some(results) = self.finish_frame()? {
@@ -467,6 +468,17 @@ impl Interpreter {
                 _ => self.execute_opcode(module, opcode)?,
             }
         }
+    }
+
+    fn record_execution(&self, units: u64) -> Result<()> {
+        let Some(instance) = self.instance.as_ref() else {
+            return Ok(());
+        };
+
+        instance
+            .lock()
+            .map_err(poisoned_lock)?
+            .record_execution(units)
     }
 
     fn execute_opcode(&mut self, module: &Module, opcode: u8) -> Result<()> {
@@ -762,18 +774,10 @@ impl Interpreter {
             }
             0x40 => {
                 self.expect_zero_immediate("memory.grow")?;
-                let pages = self.operand_stack.pop_i32()? as u32;
+                let pages = self.operand_stack.pop_i32()?;
                 let instance = self.instance_ref()?;
                 let mut instance = instance.lock().map_err(poisoned_lock)?;
-                let memory = instance
-                    .memory_mut(0)
-                    .ok_or_else(|| WasmError::Runtime("no memory".to_string()))?;
-                let result = memory
-                    .lock()
-                    .map_err(poisoned_lock)?
-                    .grow(pages)
-                    .map(|old_size| WasmValue::I32(old_size as i32))
-                    .unwrap_or(WasmValue::I32(-1));
+                let result = WasmValue::I32(instance.memory_grow_wasm(0, pages)?);
                 drop(instance);
                 self.operand_stack.push(result)
             }

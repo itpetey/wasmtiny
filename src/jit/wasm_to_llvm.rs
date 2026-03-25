@@ -534,6 +534,37 @@ impl WasmToLlvmTranslator {
     }
 
     #[cfg(feature = "llvm-jit")]
+    unsafe fn emit_meter_tick(&mut self, llvm_module: LLVMModuleRef, units: u64) {
+        let helper_name = c"llvm_jit_meter_tick";
+        let helper = match LLVMGetNamedFunction(llvm_module, helper_name.as_ptr()) {
+            existing if !existing.is_null() => existing,
+            _ => {
+                let i64_type = LLVMInt64TypeInContext(self.context);
+                let mut param_types = [i64_type];
+                let func_type = LLVMFunctionType(
+                    LLVMVoidTypeInContext(self.context),
+                    param_types.as_mut_ptr(),
+                    param_types.len() as u32,
+                    0,
+                );
+                LLVMAddFunction(llvm_module, helper_name.as_ptr(), func_type)
+            }
+        };
+
+        let i64_type = LLVMInt64TypeInContext(self.context);
+        let mut args = [LLVMConstInt(i64_type, units, 0)];
+        LLVMBuildCall2(
+            self.builder,
+            LLVMGlobalGetValueType(helper),
+            helper,
+            args.as_mut_ptr(),
+            args.len() as u32,
+            c"".as_ptr(),
+        );
+        self.emit_trap_guard(llvm_module);
+    }
+
+    #[cfg(feature = "llvm-jit")]
     unsafe fn build_entry_wrapper(
         &mut self,
         llvm_module: LLVMModuleRef,
@@ -647,7 +678,11 @@ impl WasmToLlvmTranslator {
             function,
             call_args.as_mut_ptr(),
             call_args.len() as u32,
-            c"entry_call".as_ptr(),
+            if func_type.results.is_empty() {
+                c"".as_ptr()
+            } else {
+                c"entry_call".as_ptr()
+            },
         );
 
         if !func_type.results.is_empty() {
@@ -762,7 +797,7 @@ impl WasmToLlvmTranslator {
             helper,
             args.as_mut_ptr(),
             2,
-            c"store_result".as_ptr(),
+            c"".as_ptr(),
         );
     }
 
@@ -1093,6 +1128,7 @@ impl WasmToLlvmTranslator {
         let mut value_stack: Vec<LLVMValueRef> = Vec::new();
 
         while pc < bytecode.len() {
+            self.emit_meter_tick(module, 1);
             let opcode = bytecode[pc];
             match opcode {
                 0x00 => {
@@ -1119,7 +1155,7 @@ impl WasmToLlvmTranslator {
                         trap_helper,
                         ptr::null_mut(),
                         0,
-                        c"trap_unreachable".as_ptr(),
+                        c"".as_ptr(),
                     );
                     self.build_default_return();
                     return Ok(());
@@ -2046,6 +2082,64 @@ impl WasmToLlvmTranslator {
                         "llvm_jit_i64_store32",
                         LLVMInt64TypeInContext(self.context),
                     )?;
+                }
+                0x3F => {
+                    pc += 1;
+                    let _memory_idx = self.read_uleb(bytecode, &mut pc)?;
+                    let helper_name = c"llvm_jit_memory_size";
+                    let helper = match LLVMGetNamedFunction(module, helper_name.as_ptr()) {
+                        existing if !existing.is_null() => existing,
+                        _ => {
+                            let func_type = LLVMFunctionType(
+                                LLVMInt32TypeInContext(self.context),
+                                ptr::null_mut(),
+                                0,
+                                0,
+                            );
+                            LLVMAddFunction(module, helper_name.as_ptr(), func_type)
+                        }
+                    };
+                    let result = LLVMBuildCall2(
+                        self.builder,
+                        LLVMGlobalGetValueType(helper),
+                        helper,
+                        ptr::null_mut(),
+                        0,
+                        c"memory_size".as_ptr(),
+                    );
+                    self.emit_trap_guard(module);
+                    value_stack.push(result);
+                }
+                0x40 => {
+                    pc += 1;
+                    let _memory_idx = self.read_uleb(bytecode, &mut pc)?;
+                    if let Some(delta) = value_stack.pop() {
+                        let helper_name = c"llvm_jit_memory_grow";
+                        let helper = match LLVMGetNamedFunction(module, helper_name.as_ptr()) {
+                            existing if !existing.is_null() => existing,
+                            _ => {
+                                let mut param_types = [LLVMInt32TypeInContext(self.context)];
+                                let func_type = LLVMFunctionType(
+                                    LLVMInt32TypeInContext(self.context),
+                                    param_types.as_mut_ptr(),
+                                    param_types.len() as u32,
+                                    0,
+                                );
+                                LLVMAddFunction(module, helper_name.as_ptr(), func_type)
+                            }
+                        };
+                        let mut args = [delta];
+                        let result = LLVMBuildCall2(
+                            self.builder,
+                            LLVMGlobalGetValueType(helper),
+                            helper,
+                            args.as_mut_ptr(),
+                            args.len() as u32,
+                            c"memory_grow".as_ptr(),
+                        );
+                        self.emit_trap_guard(module);
+                        value_stack.push(result);
+                    }
                 }
                 0x02 => {
                     pc += 1;
