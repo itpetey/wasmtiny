@@ -216,7 +216,7 @@ impl WasmApplication {
             let (memory_ptr, memory_len) = memory_context.unwrap_or((std::ptr::null_mut(), 0));
             set_execution_context(module_ptr, memory_ptr, memory_len);
 
-            if let Some(llvm_jit) = self.llvm_jits.get(&module_idx) {
+            if let Some(llvm_jit) = self.llvm_jits.get_mut(&module_idx) {
                 return llvm_jit.invoke_function(func_idx, args);
             }
         }
@@ -258,7 +258,7 @@ impl WasmApplication {
             let (memory_ptr, memory_len) = memory_context.unwrap_or((std::ptr::null_mut(), 0));
             set_execution_context(module_ptr, memory_ptr, memory_len);
 
-            if let Some(llvm_jit) = self.llvm_jits.get(&module_idx) {
+            if let Some(llvm_jit) = self.llvm_jits.get_mut(&module_idx) {
                 let _ = llvm_jit.invoke_function(start_idx, &[])?;
                 return Ok(());
             }

@@ -1,11 +1,14 @@
 use super::loader::AotLoader;
 use crate::interpreter::Interpreter;
 use crate::runtime::{
-    Extern, FunctionType, Global, HostFunc, ImportKind, Instance, Memory, Module, Result, Table,
-    WasmError, WasmValue,
+    Extern, FunctionType, Global, HostCallOutcome, HostFunc, ImportKind, Instance, Memory, Module,
+    Result, Table, WasmError, WasmValue,
 };
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+static NEXT_AOT_MODULE_ID: AtomicU64 = AtomicU64::new(1);
 
 struct TypedHostImport {
     inner: Arc<dyn HostFunc>,
@@ -27,12 +30,21 @@ impl HostFunc for TypedHostImport {
         self.inner.call(store, args)
     }
 
+    fn call_with_suspension(
+        &self,
+        store: &mut crate::runtime::Store,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
+        self.inner.call_with_suspension(store, args)
+    }
+
     fn function_type(&self) -> Option<&FunctionType> {
         Some(&self.func_type)
     }
 }
 
 pub struct AotModule {
+    runtime_id: u64,
     module: Module,
     imports: Vec<Option<Extern>>,
     store: Arc<Mutex<crate::runtime::Store>>,
@@ -76,6 +88,7 @@ pub enum AotExport {
 impl AotModule {
     pub fn from_module(module: &Module) -> Self {
         let mut aot_module = Self {
+            runtime_id: NEXT_AOT_MODULE_ID.fetch_add(1, Ordering::SeqCst),
             module: module.clone(),
             imports: vec![None; module.imports.len()],
             store: Arc::new(Mutex::new(crate::runtime::Store::new())),
@@ -92,6 +105,10 @@ impl AotModule {
 
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    pub fn runtime_id(&self) -> u64 {
+        self.runtime_id
     }
 
     pub fn imports(&self) -> &[crate::runtime::Import] {
@@ -199,6 +216,20 @@ impl AotModule {
         }
 
         Ok(results)
+    }
+
+    pub fn invoke_import_with_suspension(
+        &mut self,
+        idx: u32,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
+        let imports = self.ordered_imports();
+        let mut instance = Instance::with_imports_and_store(
+            Arc::new(self.module.clone()),
+            &imports,
+            self.store.clone(),
+        )?;
+        instance.call_with_suspension(idx, args)
     }
 
     pub fn register_import(&mut self, module: &str, name: &str, extern_: Extern) -> Result<()> {

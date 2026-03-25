@@ -1,5 +1,7 @@
 use crate::aot_runtime::runtime::AotModule;
-use crate::runtime::{NumType, TrapCode, ValType, WasmError, WasmValue};
+use crate::runtime::{
+    NumType, RuntimeSuspender, SuspendedHandle, TrapCode, ValType, WasmError, WasmValue,
+};
 use std::cell::RefCell;
 use std::ptr;
 
@@ -12,7 +14,14 @@ struct LlvmRuntimeContext {
     memory_ptr: *mut u8,
     memory_len: usize,
     current_module: *mut AotModule,
+    current_context_id: Option<u64>,
     trap: Option<TrapCode>,
+    safepoints_enabled: bool,
+    suspend_requested: bool,
+    jit_id: u64,
+    execution_epoch: u64,
+    suspended_handle: Option<SuspendedHandle>,
+    runtime_error: Option<String>,
 }
 
 impl LlvmRuntimeContext {
@@ -21,9 +30,20 @@ impl LlvmRuntimeContext {
             memory_ptr: ptr::null_mut(),
             memory_len: 0,
             current_module: ptr::null_mut(),
+            current_context_id: None,
             trap: None,
+            safepoints_enabled: false,
+            suspend_requested: false,
+            jit_id: 0,
+            execution_epoch: 0,
+            suspended_handle: None,
+            runtime_error: None,
         }
     }
+}
+
+fn context_id_for_module(module: *mut AotModule) -> Option<u64> {
+    (!module.is_null()).then(|| unsafe { (&*module).runtime_id() })
 }
 
 /// Sets the execution context for the current thread.
@@ -34,10 +54,21 @@ pub fn set_execution_context(module: *mut AotModule, memory_ptr: *mut u8, memory
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
         ctx.current_module = module;
+        ctx.current_context_id = context_id_for_module(module);
         ctx.memory_ptr = memory_ptr;
         ctx.memory_len = memory_len;
         ctx.trap = None;
+        ctx.suspended_handle = None;
+        ctx.runtime_error = None;
     });
+}
+
+pub fn has_execution_context() -> bool {
+    LLVM_RUNTIME_CTX.with(|ctx| !ctx.borrow().current_module.is_null())
+}
+
+pub fn current_execution_context_id() -> Option<u64> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_context_id)
 }
 
 /// Sets only the memory context for the current thread.
@@ -50,8 +81,30 @@ pub fn set_memory_context(ptr: *mut u8, len: usize) {
 
 pub fn clear_trap() {
     LLVM_RUNTIME_CTX.with(|ctx| {
-        ctx.borrow_mut().trap = None;
+        let mut ctx = ctx.borrow_mut();
+        ctx.trap = None;
+        ctx.runtime_error = None;
     });
+}
+
+pub fn configure_safepoints(enabled: bool, requested: bool, jit_id: u64, execution_epoch: u64) {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        ctx.safepoints_enabled = enabled;
+        ctx.suspend_requested = requested;
+        ctx.jit_id = jit_id;
+        ctx.execution_epoch = execution_epoch;
+        ctx.suspended_handle = None;
+        ctx.runtime_error = None;
+    });
+}
+
+pub fn take_suspended_handle() -> Option<SuspendedHandle> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().suspended_handle.take())
+}
+
+pub fn take_runtime_error() -> Option<String> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().runtime_error.take())
 }
 
 pub fn take_trap() -> Option<TrapCode> {
@@ -215,14 +268,14 @@ pub extern "C" fn llvm_jit_call_import(
             args.push(value);
         }
 
-        module.invoke_function(func_idx, &args)
+        module.invoke_import_with_suspension(func_idx, &args)
     }) else {
         set_trap(TrapCode::HostTrap);
         return;
     };
 
     match result {
-        Ok(results) => {
+        Ok(crate::runtime::HostCallOutcome::Complete(results)) => {
             if results.len() != result_count as usize {
                 set_trap(TrapCode::HostTrap);
                 refresh_memory_context_from_module();
@@ -239,11 +292,73 @@ pub extern "C" fn llvm_jit_call_import(
                 }
             }
         }
+        Ok(crate::runtime::HostCallOutcome::Pending { .. }) => {
+            LLVM_RUNTIME_CTX.with(|ctx| {
+                let mut ctx = ctx.borrow_mut();
+                ctx.runtime_error = Some(
+                    "pending hostcall suspension is unsupported in JIT import path".to_string(),
+                );
+            });
+            set_trap(TrapCode::HostTrap);
+            refresh_memory_context_from_module();
+            return;
+        }
         Err(WasmError::Trap(code)) => set_trap(code),
         Err(_) => set_trap(TrapCode::HostTrap),
     }
 
     refresh_memory_context_from_module();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_safepoint_entry(
+    func_idx: u32,
+    args_ptr: *const u64,
+    arg_count: u32,
+) -> i32 {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if !ctx.safepoints_enabled || !ctx.suspend_requested {
+            return 0;
+        }
+
+        let Some(module_ptr) = (!ctx.current_module.is_null()).then_some(ctx.current_module) else {
+            ctx.trap = Some(TrapCode::HostTrap);
+            return 1;
+        };
+
+        let module = unsafe { &mut *module_ptr };
+        let Some(func_type) = module.get_func_type(func_idx).cloned() else {
+            ctx.trap = Some(TrapCode::HostTrap);
+            return 1;
+        };
+
+        if func_type.params.len() != arg_count as usize {
+            ctx.trap = Some(TrapCode::HostTrap);
+            return 1;
+        }
+
+        let mut args = Vec::with_capacity(func_type.params.len());
+        for (idx, value_type) in func_type.params.iter().enumerate() {
+            let raw = unsafe { *args_ptr.add(idx) };
+            let Some(value) = unpack_raw_value(raw, *value_type) else {
+                ctx.trap = Some(TrapCode::HostTrap);
+                return 1;
+            };
+            args.push(value);
+        }
+
+        let handle = RuntimeSuspender::new().suspend_jit(
+            func_idx,
+            args,
+            ctx.jit_id,
+            ctx.execution_epoch,
+            ctx.current_context_id.unwrap_or(0),
+        );
+        ctx.suspended_handle = Some(handle);
+        ctx.suspend_requested = false;
+        1
+    })
 }
 
 macro_rules! define_load {

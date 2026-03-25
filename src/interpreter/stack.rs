@@ -1,5 +1,6 @@
 use crate::runtime::WasmValue;
 
+#[derive(Debug, Clone)]
 pub struct OperandStack {
     slots: Vec<WasmValue>,
     max_size: usize,
@@ -98,6 +99,7 @@ impl OperandStack {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ControlStack {
     frames: Vec<ControlFrame>,
 }

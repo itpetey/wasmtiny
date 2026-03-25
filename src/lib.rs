@@ -7,10 +7,12 @@ pub mod memory;
 pub mod runtime;
 
 pub use application::WasmApplication;
+pub use interpreter::SafepointConfig;
 pub use runtime::ExportType;
 pub use runtime::FunctionType;
 pub use runtime::Global;
 pub use runtime::GlobalType;
+pub use runtime::HostCallOutcome;
 pub use runtime::ImportType;
 pub use runtime::Instance;
 pub use runtime::Memory;
@@ -18,12 +20,17 @@ pub use runtime::MemoryType;
 pub use runtime::Module;
 pub use runtime::NumType;
 pub use runtime::RefType;
+pub use runtime::RuntimeSuspender;
+pub use runtime::SuspendedHandle;
+pub use runtime::SuspensionError;
+pub use runtime::SuspensionKind;
 pub use runtime::Table;
 pub use runtime::TableType;
 pub use runtime::TrapCode;
 pub use runtime::ValType;
 pub use runtime::WasmError;
 pub use runtime::WasmValue;
+pub use runtime::is_suspension_error;
 
 #[cfg(feature = "llvm-jit")]
 pub use jit::LlvmJit;

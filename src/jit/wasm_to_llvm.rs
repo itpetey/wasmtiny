@@ -563,10 +563,68 @@ impl WasmToLlvmTranslator {
         );
         let wrapper = LLVMAddFunction(llvm_module, wrapper_name_c.as_ptr(), wrapper_type);
         let wrapper_entry = LLVMAppendBasicBlockInContext(self.context, wrapper, c"entry".as_ptr());
+        let wrapper_continue =
+            LLVMAppendBasicBlockInContext(self.context, wrapper, c"continue".as_ptr());
+        let wrapper_suspend =
+            LLVMAppendBasicBlockInContext(self.context, wrapper, c"suspend".as_ptr());
         LLVMPositionBuilderAtEnd(self.builder, wrapper_entry);
 
         let args_ptr = LLVMGetParam(wrapper, 0);
         let results_ptr = LLVMGetParam(wrapper, 1);
+
+        let safepoint_helper_name = c"llvm_jit_safepoint_entry";
+        let safepoint_helper =
+            match LLVMGetNamedFunction(llvm_module, safepoint_helper_name.as_ptr()) {
+                existing if !existing.is_null() => existing,
+                _ => {
+                    let mut param_types = [
+                        LLVMInt32TypeInContext(self.context),
+                        i64_ptr_type,
+                        LLVMInt32TypeInContext(self.context),
+                    ];
+                    let helper_type = LLVMFunctionType(
+                        LLVMInt32TypeInContext(self.context),
+                        param_types.as_mut_ptr(),
+                        param_types.len() as u32,
+                        0,
+                    );
+                    LLVMAddFunction(llvm_module, safepoint_helper_name.as_ptr(), helper_type)
+                }
+            };
+        let func_idx_value = LLVMConstInt(LLVMInt32TypeInContext(self.context), func_idx as u64, 0);
+        let arg_count_value = LLVMConstInt(
+            LLVMInt32TypeInContext(self.context),
+            func_type.params.len() as u64,
+            0,
+        );
+        let mut safepoint_args = [func_idx_value, args_ptr, arg_count_value];
+        let safepoint_result = LLVMBuildCall2(
+            self.builder,
+            LLVMGlobalGetValueType(safepoint_helper),
+            safepoint_helper,
+            safepoint_args.as_mut_ptr(),
+            safepoint_args.len() as u32,
+            c"entry_safepoint".as_ptr(),
+        );
+        let should_suspend = LLVMBuildICmp(
+            self.builder,
+            LLVMIntPredicate::LLVMIntNE,
+            safepoint_result,
+            LLVMConstInt(LLVMInt32TypeInContext(self.context), 0, 0),
+            c"should_suspend".as_ptr(),
+        );
+        LLVMBuildCondBr(
+            self.builder,
+            should_suspend,
+            wrapper_suspend,
+            wrapper_continue,
+        );
+
+        LLVMPositionBuilderAtEnd(self.builder, wrapper_suspend);
+        LLVMBuildRetVoid(self.builder);
+
+        LLVMPositionBuilderAtEnd(self.builder, wrapper_continue);
+
         let mut call_args = Vec::with_capacity(func_type.params.len());
         for (idx, value_type) in func_type.params.iter().copied().enumerate() {
             let index = LLVMConstInt(i64_type, idx as u64, 0);
@@ -884,7 +942,7 @@ impl WasmToLlvmTranslator {
             helper,
             helper_args.as_mut_ptr(),
             helper_args.len() as u32,
-            c"import_call".as_ptr(),
+            c"".as_ptr(),
         );
         self.emit_trap_guard(llvm_module);
 
