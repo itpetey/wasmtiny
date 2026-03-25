@@ -1,11 +1,53 @@
 use crate::interpreter::{ControlFrame, ControlStack, FrameKind, OperandStack};
 use crate::runtime::{
-    FunctionType, Instance, Module, NumType, RefType, Result, TrapCode, ValType, WasmError,
-    WasmValue,
+    FunctionType, HostCallOutcome, Instance, Module, NumType, RefType, Result, RuntimeSuspender,
+    SuspendedHandle, SuspensionKind, TrapCode, ValType, WasmError, WasmValue,
 };
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
 
 const MAX_STACK_SIZE: usize = 16384;
+
+static NEXT_INTERPRETER_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone)]
+pub struct SafepointConfig {
+    check_interval: u32,
+    enabled: Arc<AtomicBool>,
+}
+
+impl SafepointConfig {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            check_interval: 100,
+            enabled: Arc::new(AtomicBool::new(enabled)),
+        }
+    }
+
+    pub fn with_interval(mut self, interval: u32) -> Self {
+        self.check_interval = interval;
+        self
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn enable(&self) {
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn disable(&self) {
+        self.enabled.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Default for SafepointConfig {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
 
 struct ControlSplit {
     then_body: Vec<u8>,
@@ -23,6 +65,17 @@ pub struct Interpreter {
     pub control_stack: ControlStack,
     pub instance: Option<Arc<Mutex<Instance>>>,
     pub locals: Vec<WasmValue>,
+    safepoint_config: SafepointConfig,
+    instruction_count: u32,
+    suspender: Option<RuntimeSuspender>,
+    suspended_handle: Option<SuspendedHandle>,
+    active_suspension_id: Option<u64>,
+    safepoint_armed: bool,
+    resume_skip_pc: Option<usize>,
+    interpreter_id: u64,
+    suspension_epoch: u64,
+    needs_resume: bool,
+    execution_thread: Option<ThreadId>,
 }
 
 impl Interpreter {
@@ -32,6 +85,17 @@ impl Interpreter {
             control_stack: ControlStack::new(),
             instance: None,
             locals: Vec::new(),
+            safepoint_config: SafepointConfig::default(),
+            instruction_count: 0,
+            suspender: None,
+            suspended_handle: None,
+            active_suspension_id: None,
+            safepoint_armed: false,
+            resume_skip_pc: None,
+            interpreter_id: NEXT_INTERPRETER_ID.fetch_add(1, Ordering::SeqCst),
+            suspension_epoch: 0,
+            needs_resume: false,
+            execution_thread: None,
         }
     }
 
@@ -41,7 +105,29 @@ impl Interpreter {
             control_stack: ControlStack::new(),
             instance: Some(instance),
             locals: Vec::new(),
+            safepoint_config: SafepointConfig::default(),
+            instruction_count: 0,
+            suspender: None,
+            suspended_handle: None,
+            active_suspension_id: None,
+            safepoint_armed: false,
+            resume_skip_pc: None,
+            interpreter_id: NEXT_INTERPRETER_ID.fetch_add(1, Ordering::SeqCst),
+            suspension_epoch: 0,
+            needs_resume: false,
+            execution_thread: None,
         }
+    }
+
+    pub fn with_safepoints(mut self, config: SafepointConfig) -> Self {
+        self.safepoint_armed = config.is_enabled();
+        self.safepoint_config = config;
+        self
+    }
+
+    pub fn with_suspender(mut self, suspender: RuntimeSuspender) -> Self {
+        self.suspender = Some(suspender);
+        self
     }
 
     pub fn execute(&mut self, module: &Module, func_idx: u32) -> Result<Vec<WasmValue>> {
@@ -54,9 +140,29 @@ impl Interpreter {
         func_idx: u32,
         args: &[WasmValue],
     ) -> Result<Vec<WasmValue>> {
+        if self.is_suspended() {
+            return Err(WasmError::Runtime(
+                "cannot start a new execution while suspended state is pending".to_string(),
+            ));
+        }
+
+        if self.safepoint_config.is_enabled() && self.suspender.is_none() {
+            return Err(WasmError::Runtime(
+                "safepoints require a configured runtime suspender".to_string(),
+            ));
+        }
+
         self.control_stack.clear();
         self.operand_stack.clear();
         self.locals.clear();
+        self.instruction_count = 0;
+        self.suspended_handle = None;
+        self.active_suspension_id = None;
+        self.safepoint_armed = self.safepoint_config.is_enabled();
+        self.resume_skip_pc = None;
+        self.needs_resume = false;
+        self.suspension_epoch += 1;
+        self.execution_thread = Some(std::thread::current().id());
 
         let mut frame = self.build_frame(module, func_idx, args)?;
         frame.height = self.operand_stack.len();
@@ -66,8 +172,278 @@ impl Interpreter {
         self.run(module)
     }
 
+    pub fn enable_safepoints(&mut self) {
+        self.safepoint_config.enable();
+        self.safepoint_armed = true;
+    }
+
+    pub fn disable_safepoints(&mut self) {
+        self.safepoint_config.disable();
+        self.safepoint_armed = false;
+    }
+
+    pub fn is_safepoint_enabled(&self) -> bool {
+        self.safepoint_config.is_enabled()
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.needs_resume || self.active_suspension_id.is_some()
+    }
+
+    pub fn take_suspended_handle(&mut self) -> Option<SuspendedHandle> {
+        self.suspended_handle.take()
+    }
+
+    pub fn suspended_handle(&self) -> Option<&SuspendedHandle> {
+        self.suspended_handle.as_ref()
+    }
+
+    fn check_safepoint(&mut self) -> Option<SuspendedHandle> {
+        if !self.safepoint_config.is_enabled() {
+            return None;
+        }
+
+        if !self.safepoint_armed {
+            return None;
+        }
+
+        if let Some(skip_pc) = self.resume_skip_pc {
+            let current_pc = self
+                .control_stack
+                .last()
+                .map(|frame| frame.position)
+                .unwrap_or(0);
+            self.resume_skip_pc = None;
+            if current_pc == skip_pc {
+                return None;
+            }
+        }
+
+        self.instruction_count += 1;
+        if self.instruction_count >= self.safepoint_config.check_interval {
+            self.instruction_count = 0;
+            if self.suspender.is_some() {
+                let suspended = self.try_suspend();
+                if suspended.is_some() {
+                    self.safepoint_armed = false;
+                }
+                return suspended;
+            }
+        }
+        None
+    }
+
+    fn try_suspend(&mut self) -> Option<SuspendedHandle> {
+        let suspender = self.suspender.as_ref()?;
+
+        let pc = self.control_stack.last().map(|f| f.position).unwrap_or(0);
+        let locals = self.locals.clone();
+        let epoch = self.suspension_epoch;
+
+        Some(suspender.suspend_interpreter(
+            pc,
+            locals,
+            self.operand_stack.clone(),
+            self.control_stack.clone(),
+            self.interpreter_id,
+            epoch,
+        ))
+    }
+
+    // Capture the current interpreter state at a hostcall boundary and mark the
+    // interpreter as suspended until the hostcall is completed.
+    fn suspend_hostcall_state_at(
+        &mut self,
+        pending_work: Vec<u8>,
+        result_types: Vec<ValType>,
+        resume_pc: usize,
+    ) -> std::result::Result<(), crate::runtime::SuspensionError> {
+        if self.needs_resume {
+            return Err(crate::runtime::SuspensionError::UnsupportedSuspensionState(
+                "interpreter is already suspended".to_string(),
+            ));
+        }
+
+        let suspender = self.suspender.as_ref().ok_or_else(|| {
+            crate::runtime::SuspensionError::UnsupportedSuspensionState(
+                "runtime suspender is not configured".to_string(),
+            )
+        })?;
+
+        let Some(frame) = self.control_stack.last() else {
+            return Err(crate::runtime::SuspensionError::UnsupportedSuspensionState(
+                "interpreter is not currently executing".to_string(),
+            ));
+        };
+
+        if frame.position >= frame.code.len() {
+            return Err(crate::runtime::SuspensionError::UnsupportedSuspensionState(
+                "interpreter is not at a resumable hostcall boundary".to_string(),
+            ));
+        }
+
+        let state = crate::runtime::InterpreterState::capture(
+            resume_pc,
+            self.locals.clone(),
+            self.operand_stack.clone(),
+            self.control_stack.clone(),
+            self.interpreter_id,
+            self.suspension_epoch,
+        );
+
+        let handle = suspender.suspend_with_pending_hostcall(pending_work, result_types, state);
+        self.active_suspension_id = Some(handle.instance_id());
+        self.suspended_handle = Some(handle);
+        self.safepoint_armed = false;
+        self.needs_resume = true;
+        Ok(())
+    }
+
+    fn restore_interpreter_state(&mut self, interpreter_state: crate::runtime::InterpreterState) {
+        let (pc, locals, operand_stack, control_stack) = interpreter_state.restore();
+        self.control_stack = control_stack;
+        self.operand_stack = operand_stack;
+        self.locals = locals;
+        if let Some(frame) = self.control_stack.last_mut() {
+            frame.position = pc;
+        }
+        self.suspended_handle = None;
+        self.active_suspension_id = None;
+        self.safepoint_armed = self.safepoint_config.is_enabled();
+        self.resume_skip_pc = Some(pc);
+        self.instruction_count = 0;
+        self.needs_resume = false;
+    }
+
+    fn validate_suspended_handle(
+        &self,
+        handle: &SuspendedHandle,
+    ) -> std::result::Result<(), crate::runtime::WasmError> {
+        if let Some(thread_id) = self.execution_thread
+            && thread_id != std::thread::current().id()
+        {
+            return Err(crate::runtime::WasmError::Runtime(
+                "cross-thread interpreter resume is unsupported".to_string(),
+            ));
+        }
+
+        if let Some(suspended_interpreter_id) = handle.interpreter_id()
+            && suspended_interpreter_id != self.interpreter_id
+        {
+            return Err(crate::runtime::WasmError::Runtime(
+                "suspended handle is from a different interpreter".to_string(),
+            ));
+        }
+
+        if let Some(suspended_epoch) = handle.suspension_epoch()
+            && suspended_epoch != self.suspension_epoch
+        {
+            return Err(crate::runtime::WasmError::Runtime(
+                "suspended handle is from a previous execution epoch".to_string(),
+            ));
+        }
+
+        if let Some(active_suspension_id) = self.active_suspension_id
+            && handle.instance_id() != active_suspension_id
+        {
+            return Err(crate::runtime::WasmError::Runtime(
+                "suspended handle does not match the active suspension".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn try_resume(
+        &mut self,
+        handle: &SuspendedHandle,
+    ) -> std::result::Result<(), crate::runtime::WasmError> {
+        self.validate_suspended_handle(handle)?;
+
+        if handle.has_pending_hostcall() {
+            return Err(crate::runtime::WasmError::Runtime(
+                "hostcall resume requires completion results".to_string(),
+            ));
+        }
+
+        let state = handle
+            .resume()
+            .map_err(|e| crate::runtime::WasmError::Runtime(format!("resume failed: {}", e)))?;
+
+        match state {
+            crate::runtime::SuspensionState::Interpreter(interpreter_state) => {
+                self.restore_interpreter_state(interpreter_state);
+                Ok(())
+            }
+            _ => Err(crate::runtime::WasmError::Runtime(
+                "invalid resume state".to_string(),
+            )),
+        }
+    }
+
+    /// Complete a pending hostcall with final results and resume execution.
+    ///
+    /// This restores the suspended interpreter state, injects the hostcall
+    /// results onto the operand stack, and resumes at the next instruction.
+    pub fn resume_hostcall(
+        &mut self,
+        handle: &SuspendedHandle,
+        results: &[WasmValue],
+    ) -> std::result::Result<(), crate::runtime::WasmError> {
+        if !handle.has_pending_hostcall() {
+            return Err(crate::runtime::WasmError::Runtime(
+                "handle does not contain a pending hostcall".to_string(),
+            ));
+        }
+
+        self.validate_suspended_handle(handle)?;
+
+        let state = handle
+            .resume_after_hostcall(results)
+            .map_err(|e| crate::runtime::WasmError::Runtime(format!("resume failed: {}", e)))?;
+
+        match state {
+            crate::runtime::SuspensionState::Interpreter(interpreter_state) => {
+                self.restore_interpreter_state(interpreter_state);
+                Ok(())
+            }
+            _ => Err(crate::runtime::WasmError::Runtime(
+                "invalid resume state".to_string(),
+            )),
+        }
+    }
+
+    pub fn continue_execution(&mut self, module: &Module) -> Result<Vec<WasmValue>> {
+        if let Some(thread_id) = self.execution_thread
+            && thread_id != std::thread::current().id()
+        {
+            return Err(WasmError::Runtime(
+                "cross-thread interpreter continue is unsupported".to_string(),
+            ));
+        }
+
+        if self.needs_resume {
+            return Err(WasmError::Runtime(
+                "cannot continue: suspended handle must be resumed first".to_string(),
+            ));
+        }
+        if self.control_stack.is_empty() {
+            return Err(WasmError::Runtime(
+                "no suspended execution is available to continue".to_string(),
+            ));
+        }
+        self.run(module)
+    }
+
     fn run(&mut self, module: &Module) -> Result<Vec<WasmValue>> {
         loop {
+            if let Some(suspended) = self.check_safepoint() {
+                self.active_suspension_id = Some(suspended.instance_id());
+                self.suspended_handle = Some(suspended);
+                self.needs_resume = true;
+                return Err(WasmError::Suspended(SuspensionKind::Safepoint));
+            }
+
             let should_finish = match self.control_stack.last() {
                 Some(frame) => frame.position >= frame.code.len(),
                 None => return Ok(Vec::new()),
@@ -731,10 +1107,31 @@ impl Interpreter {
         if func_idx < import_func_count {
             let instance = self.instance_ref()?;
             let mut instance = instance.lock().map_err(poisoned_lock)?;
-            let results = instance.call(func_idx, &args)?;
+            let outcome = instance.call_with_suspension(func_idx, &args)?;
             drop(instance);
-            for value in results {
-                self.operand_stack.push(value)?;
+
+            match outcome {
+                HostCallOutcome::Complete(results) => {
+                    for value in results {
+                        self.operand_stack.push(value)?;
+                    }
+                }
+                HostCallOutcome::Pending { pending_work } => {
+                    let resume_pc = self
+                        .control_stack
+                        .last()
+                        .map(|frame| frame.position)
+                        .unwrap_or(0);
+                    self.suspend_hostcall_state_at(
+                        pending_work,
+                        func_type.results.clone(),
+                        resume_pc,
+                    )
+                    .map_err(|e| {
+                        WasmError::Runtime(format!("hostcall suspension failed: {}", e))
+                    })?;
+                    return Err(WasmError::Suspended(SuspensionKind::HostcallPending));
+                }
             }
             return Ok(());
         }
@@ -1506,8 +1903,10 @@ fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> 
 mod tests {
     use super::*;
     use crate::runtime::{
-        Func, FunctionType, Instance, Limits, Local, MemoryType, Module, TableType,
+        Extern, Func, FunctionType, HostCallOutcome, HostFunc, Import, ImportKind, Instance,
+        Limits, Local, MemoryType, Module, TableType,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     #[test]
     fn test_interpreter_creation() {
@@ -1709,5 +2108,614 @@ mod tests {
         assert!(
             matches!(error, WasmError::Runtime(message) if message.contains("argument 0 type mismatch"))
         );
+    }
+
+    #[test]
+    fn test_safepoint_suspend_and_resume() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        let func_body = vec![0x41, 0x01, 0x41, 0x02, 0x6A, 0x0B];
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: func_body,
+        });
+
+        let mut interp = Interpreter::new()
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true).with_interval(1));
+
+        let mut suspensions = 0;
+        let mut result = interp.execute_function(&module, 0, &[]);
+        let final_result = loop {
+            match result {
+                Ok(values) => break values,
+                Err(WasmError::Suspended(SuspensionKind::Safepoint)) => {
+                    suspensions += 1;
+                    assert!(interp.is_suspended());
+
+                    let handle = interp
+                        .take_suspended_handle()
+                        .expect("should have suspended handle");
+                    assert!(handle.is_suspended());
+
+                    interp.try_resume(&handle).expect("resume should succeed");
+                    assert!(!interp.is_suspended());
+
+                    result = interp.continue_execution(&module);
+                }
+                Err(error) => panic!("unexpected error: {error:?}"),
+            }
+        };
+
+        assert!(suspensions >= 2);
+        assert_eq!(final_result, vec![WasmValue::I32(3)]);
+    }
+
+    #[test]
+    fn test_safepoints_rearm_when_loop_returns_to_same_pc() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x03, 0x40, 0x0C, 0x00, 0x0B, 0x0B],
+        });
+
+        let mut interp = Interpreter::new()
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true).with_interval(1));
+
+        let mut result = interp.execute_function(&module, 0, &[]);
+        let mut suspensions = 0;
+
+        while suspensions < 3 {
+            match result {
+                Err(WasmError::Suspended(SuspensionKind::Safepoint)) => {
+                    suspensions += 1;
+                    let handle = interp.take_suspended_handle().unwrap();
+                    interp.try_resume(&handle).unwrap();
+                    result = interp.continue_execution(&module);
+                }
+                other => panic!("expected repeated safepoints, got {other:?}"),
+            }
+        }
+
+        assert_eq!(suspensions, 3);
+    }
+
+    #[test]
+    fn test_continue_without_resume_fails() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x05, 0x0B],
+        });
+
+        let mut interp = Interpreter::new()
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true).with_interval(1));
+
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Suspended(SuspensionKind::Safepoint))
+        ));
+
+        let continue_result = interp.continue_execution(&module);
+        assert!(matches!(
+            continue_result,
+            Err(WasmError::Runtime(msg)) if msg.contains("must be resumed first")
+        ));
+    }
+
+    #[test]
+    fn test_continue_without_execution_fails() {
+        let module = Module::new();
+        let mut interp = Interpreter::new();
+
+        let result = interp.continue_execution(&module);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message))
+                if message.contains("no suspended execution is available to continue")
+        ));
+    }
+
+    #[test]
+    fn test_safepoints_require_configured_suspender() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x05, 0x0B],
+        });
+
+        let mut interp = Interpreter::new().with_safepoints(SafepointConfig::new(true));
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message))
+                if message.contains("configured runtime suspender")
+        ));
+    }
+
+    #[test]
+    fn test_wrong_interpreter_resume_fails() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x05, 0x0B],
+        });
+
+        let mut interp1 = Interpreter::new()
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true).with_interval(1));
+
+        let result = interp1.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Suspended(SuspensionKind::Safepoint))
+        ));
+
+        let handle = interp1.take_suspended_handle().unwrap();
+
+        let mut interp2 = Interpreter::new()
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true));
+
+        let resume_result = interp2.try_resume(&handle);
+        assert!(matches!(
+            resume_result,
+            Err(WasmError::Runtime(msg)) if msg.contains("different interpreter")
+        ));
+    }
+
+    #[test]
+    fn test_execute_function_while_suspended_fails() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x05, 0x0B],
+        });
+
+        let mut interp = Interpreter::new()
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true).with_interval(1));
+
+        let first = interp.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            first,
+            Err(WasmError::Suspended(SuspensionKind::Safepoint))
+        ));
+
+        let second = interp.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            second,
+            Err(WasmError::Runtime(message))
+                if message.contains("cannot start a new execution while suspended")
+        ));
+    }
+
+    #[test]
+    fn test_stale_handle_resume_fails() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x05, 0x0B],
+        });
+
+        let mut interp = Interpreter::new()
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true).with_interval(1));
+
+        let first = interp.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            first,
+            Err(WasmError::Suspended(SuspensionKind::Safepoint))
+        ));
+        let stale_handle = interp.take_suspended_handle().unwrap();
+
+        interp.try_resume(&stale_handle).unwrap();
+        let mut resumed = interp.continue_execution(&module);
+        loop {
+            match resumed {
+                Ok(_) => break,
+                Err(WasmError::Suspended(SuspensionKind::Safepoint)) => {
+                    let handle = interp.take_suspended_handle().unwrap();
+                    interp.try_resume(&handle).unwrap();
+                    resumed = interp.continue_execution(&module);
+                }
+                Err(error) => panic!("unexpected error: {error:?}"),
+            }
+        }
+
+        let second = interp.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            second,
+            Err(WasmError::Suspended(SuspensionKind::Safepoint))
+        ));
+
+        let resume_result = interp.try_resume(&stale_handle);
+        assert!(matches!(
+            resume_result,
+            Err(WasmError::Runtime(msg)) if msg.contains("previous execution epoch")
+        ));
+    }
+
+    #[test]
+    fn test_hostcall_pending_resume() {
+        let suspender = RuntimeSuspender::new();
+        let state = crate::runtime::InterpreterState::capture(
+            10,
+            vec![],
+            OperandStack::new(1024),
+            ControlStack::new(),
+            1,
+            0,
+        );
+
+        let handle = suspender.suspend_with_pending_hostcall(
+            vec![1, 2, 3],
+            vec![ValType::Num(NumType::I32)],
+            state,
+        );
+
+        assert!(handle.has_pending_hostcall());
+        assert!(handle.is_suspended());
+
+        let pending = handle.pending_work();
+        assert_eq!(pending, Some(vec![1, 2, 3]));
+
+        let result = handle.resume_after_hostcall(&[WasmValue::I32(7)]);
+        assert!(result.is_ok());
+
+        let state = result.unwrap();
+        if let crate::runtime::SuspensionState::Interpreter(state) = state {
+            assert_eq!(state.pc, 10);
+            assert_eq!(state.locals, vec![]);
+            let mut operand_stack = state.operand_stack;
+            assert_eq!(operand_stack.pop(), Some(WasmValue::I32(7)));
+        } else {
+            panic!("expected interpreter state");
+        }
+    }
+
+    #[test]
+    fn test_try_resume_rejects_pending_hostcall_without_results() {
+        let suspender = RuntimeSuspender::new();
+        let state = crate::runtime::InterpreterState::capture(
+            10,
+            vec![],
+            OperandStack::new(1024),
+            ControlStack::new(),
+            1,
+            0,
+        );
+
+        let handle = suspender.suspend_with_pending_hostcall(
+            vec![1, 2, 3],
+            vec![ValType::Num(NumType::I32)],
+            state,
+        );
+
+        let mut interp = Interpreter::new().with_suspender(RuntimeSuspender::new());
+        interp.interpreter_id = 1;
+        interp.active_suspension_id = Some(handle.instance_id());
+        interp.suspension_epoch = 0;
+        interp.needs_resume = true;
+
+        let result = interp.try_resume(&handle);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message)) if message.contains("requires completion results")
+        ));
+    }
+
+    #[test]
+    fn test_resume_hostcall_rejects_wrong_result_arity() {
+        let suspender = RuntimeSuspender::new();
+        let state = crate::runtime::InterpreterState::capture(
+            10,
+            vec![],
+            OperandStack::new(1024),
+            ControlStack::new(),
+            1,
+            0,
+        );
+
+        let handle = suspender.suspend_with_pending_hostcall(
+            vec![1, 2, 3],
+            vec![ValType::Num(NumType::I32)],
+            state,
+        );
+
+        let mut interp = Interpreter::new().with_suspender(RuntimeSuspender::new());
+        interp.interpreter_id = 1;
+        interp.active_suspension_id = Some(handle.instance_id());
+        interp.suspension_epoch = 0;
+        interp.needs_resume = true;
+        interp.execution_thread = Some(std::thread::current().id());
+
+        let result = interp.resume_hostcall(&handle, &[]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message)) if message.contains("result count mismatch")
+        ));
+    }
+
+    #[test]
+    fn test_resume_hostcall_rejects_wrong_result_type() {
+        let suspender = RuntimeSuspender::new();
+        let state = crate::runtime::InterpreterState::capture(
+            10,
+            vec![],
+            OperandStack::new(1024),
+            ControlStack::new(),
+            1,
+            0,
+        );
+
+        let handle = suspender.suspend_with_pending_hostcall(
+            vec![1, 2, 3],
+            vec![ValType::Num(NumType::I32)],
+            state,
+        );
+
+        let mut interp = Interpreter::new().with_suspender(RuntimeSuspender::new());
+        interp.interpreter_id = 1;
+        interp.active_suspension_id = Some(handle.instance_id());
+        interp.suspension_epoch = 0;
+        interp.needs_resume = true;
+        interp.execution_thread = Some(std::thread::current().id());
+
+        let result = interp.resume_hostcall(&handle, &[WasmValue::I64(7)]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message)) if message.contains("type mismatch")
+        ));
+    }
+
+    #[test]
+    fn test_resume_hostcall_rejects_stale_epoch() {
+        let suspender = RuntimeSuspender::new();
+        let state = crate::runtime::InterpreterState::capture(
+            10,
+            vec![],
+            OperandStack::new(1024),
+            ControlStack::new(),
+            1,
+            0,
+        );
+
+        let handle = suspender.suspend_with_pending_hostcall(
+            vec![1, 2, 3],
+            vec![ValType::Num(NumType::I32)],
+            state,
+        );
+
+        let mut interp = Interpreter::new().with_suspender(RuntimeSuspender::new());
+        interp.interpreter_id = 1;
+        interp.active_suspension_id = Some(handle.instance_id());
+        interp.suspension_epoch = 1;
+        interp.needs_resume = true;
+        interp.execution_thread = Some(std::thread::current().id());
+
+        let result = interp.resume_hostcall(&handle, &[WasmValue::I32(7)]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message)) if message.contains("previous execution epoch")
+        ));
+    }
+
+    #[test]
+    fn test_cross_thread_hostcall_resume_is_rejected() {
+        let suspender = RuntimeSuspender::new();
+        let state = crate::runtime::InterpreterState::capture(
+            10,
+            vec![],
+            OperandStack::new(1024),
+            ControlStack::new(),
+            1,
+            0,
+        );
+
+        let handle = suspender.suspend_with_pending_hostcall(
+            vec![1, 2, 3],
+            vec![ValType::Num(NumType::I32)],
+            state,
+        );
+
+        let mut interp = Interpreter::new().with_suspender(RuntimeSuspender::new());
+        interp.interpreter_id = 1;
+        interp.active_suspension_id = Some(handle.instance_id());
+        interp.suspension_epoch = 0;
+        interp.needs_resume = true;
+        let other_thread_id = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .unwrap();
+        interp.execution_thread = Some(other_thread_id);
+
+        let result = interp.resume_hostcall(&handle, &[WasmValue::I32(7)]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message)) if message.contains("cross-thread interpreter resume")
+        ));
+    }
+
+    #[test]
+    fn test_cross_thread_interpreter_resume_is_rejected() {
+        let suspender = RuntimeSuspender::new();
+        let handle = suspender.suspend_interpreter(
+            10,
+            vec![],
+            OperandStack::new(1024),
+            ControlStack::new(),
+            1,
+            0,
+        );
+
+        let mut interp = Interpreter::new().with_suspender(RuntimeSuspender::new());
+        interp.interpreter_id = 1;
+        interp.active_suspension_id = Some(handle.instance_id());
+        interp.suspension_epoch = 0;
+        interp.needs_resume = true;
+        let other_thread_id = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .unwrap();
+        interp.execution_thread = Some(other_thread_id);
+
+        let result = interp.try_resume(&handle);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(message)) if message.contains("cross-thread interpreter resume")
+        ));
+    }
+
+    #[test]
+    fn test_memory_visible_after_suspend_and_resume() {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![
+                0x41, 0x00, 0x41, 0x2A, 0x36, 0x02, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let instance = Arc::new(Mutex::new(Instance::new(module.clone()).unwrap()));
+        let mut interp = Interpreter::with_instance(instance.clone())
+            .with_suspender(RuntimeSuspender::new())
+            .with_safepoints(SafepointConfig::new(true).with_interval(4));
+
+        let mut result = interp.execute_function(&module, 0, &[]);
+        let final_result = loop {
+            match result {
+                Ok(values) => break values,
+                Err(WasmError::Suspended(SuspensionKind::Safepoint)) => {
+                    let handle = interp
+                        .take_suspended_handle()
+                        .expect("should have suspended handle");
+                    interp.try_resume(&handle).unwrap();
+                    result = interp.continue_execution(&module);
+                }
+                Err(error) => panic!("unexpected error: {error:?}"),
+            }
+        };
+
+        assert_eq!(final_result, vec![WasmValue::I32(42)]);
+
+        let memory = instance.lock().unwrap().memory(0).cloned().unwrap();
+        let value = memory.lock().unwrap().read_u32(0).unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn test_imported_hostcall_pending_suspends_execution() {
+        struct PendingHost {
+            calls: AtomicUsize,
+        }
+
+        impl HostFunc for PendingHost {
+            fn call(
+                &self,
+                _store: &mut crate::runtime::Store,
+                _args: &[WasmValue],
+            ) -> Result<Vec<WasmValue>> {
+                panic!("pending hostcall should not fall back to synchronous completion")
+            }
+
+            fn call_with_suspension(
+                &self,
+                _store: &mut crate::runtime::Store,
+                _args: &[WasmValue],
+            ) -> Result<HostCallOutcome> {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(HostCallOutcome::Pending {
+                    pending_work: vec![9, 9, 9],
+                })
+            }
+
+            fn function_type(&self) -> Option<&FunctionType> {
+                static FUNC_TYPE: std::sync::OnceLock<FunctionType> = std::sync::OnceLock::new();
+                Some(
+                    FUNC_TYPE.get_or_init(|| {
+                        FunctionType::new(vec![], vec![ValType::Num(NumType::I32)])
+                    }),
+                )
+            }
+        }
+
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.imports.push(Import {
+            module: "env".to_string(),
+            name: "host".to_string(),
+            kind: ImportKind::Func(0),
+        });
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x10, 0x00, 0x0B],
+        });
+
+        let module = Arc::new(module);
+        let host = std::sync::Arc::new(PendingHost {
+            calls: AtomicUsize::new(0),
+        });
+        let instance = Instance::with_imports(
+            module.clone(),
+            &[("env", "host", Extern::HostFunc(host.clone()))],
+        )
+        .unwrap();
+        let instance = Arc::new(Mutex::new(instance));
+
+        let mut interp =
+            Interpreter::with_instance(instance).with_suspender(RuntimeSuspender::new());
+        let first = interp.execute_function(&module, 1, &[]);
+        assert!(matches!(
+            first,
+            Err(WasmError::Suspended(SuspensionKind::HostcallPending))
+        ));
+
+        let handle = interp
+            .take_suspended_handle()
+            .expect("pending hostcall should store suspended handle");
+        assert_eq!(handle.pending_work(), Some(vec![9, 9, 9]));
+
+        interp
+            .resume_hostcall(&handle, &[WasmValue::I32(7)])
+            .unwrap();
+        let result = interp.continue_execution(&module).unwrap();
+        assert_eq!(result, vec![WasmValue::I32(7)]);
+        assert_eq!(host.calls.load(AtomicOrdering::SeqCst), 1);
     }
 }

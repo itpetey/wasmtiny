@@ -44,7 +44,22 @@ impl std::fmt::Debug for Extern {
 
 pub trait HostFunc: Send + Sync + 'static {
     fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>>;
+
+    fn call_with_suspension(
+        &self,
+        store: &mut Store,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
+        self.call(store, args).map(HostCallOutcome::Complete)
+    }
+
     fn function_type(&self) -> Option<&FunctionType>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostCallOutcome {
+    Complete(Vec<WasmValue>),
+    Pending { pending_work: Vec<u8> },
 }
 
 impl<F> HostFunc for F
@@ -82,6 +97,14 @@ impl HostFunc for TypedHostFunc {
         self.inner.call(store, args)
     }
 
+    fn call_with_suspension(
+        &self,
+        store: &mut Store,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
+        self.inner.call_with_suspension(store, args)
+    }
+
     fn function_type(&self) -> Option<&FunctionType> {
         Some(&self.func_type)
     }
@@ -103,6 +126,14 @@ impl NativeFuncRef {
 
     pub fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.func.call(store, args)
+    }
+
+    pub fn call_with_suspension(
+        &self,
+        store: &mut Store,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
+        self.func.call_with_suspension(store, args)
     }
 }
 
@@ -446,15 +477,34 @@ impl Instance {
     }
 
     pub fn call(&mut self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        match self.call_with_suspension(func_idx, args)? {
+            HostCallOutcome::Complete(results) => Ok(results),
+            HostCallOutcome::Pending { .. } => Err(WasmError::Runtime(
+                "pending hostcall is not supported in synchronous call context".to_string(),
+            )),
+        }
+    }
+
+    pub fn call_with_suspension(
+        &mut self,
+        func_idx: u32,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
         if let Some(func) = self.get_func(func_idx) {
             let func_type = func.function_type().ok_or_else(|| {
                 WasmError::Runtime(format!("function {} type not found", func_idx))
             })?;
             validate_values(args, &func_type.params, "argument")?;
             let mut store = self.store.lock().map_err(poisoned_lock)?;
-            let results = func.call(&mut store, args)?;
-            validate_values(&results, &func_type.results, "result")?;
-            Ok(results)
+            match func.call_with_suspension(&mut store, args)? {
+                HostCallOutcome::Complete(results) => {
+                    validate_values(&results, &func_type.results, "result")?;
+                    Ok(HostCallOutcome::Complete(results))
+                }
+                HostCallOutcome::Pending { pending_work } => {
+                    Ok(HostCallOutcome::Pending { pending_work })
+                }
+            }
         } else {
             Err(WasmError::Runtime(format!(
                 "function {} not found",

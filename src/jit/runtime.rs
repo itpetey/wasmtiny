@@ -1,17 +1,30 @@
+use crate::runtime::SuspendedHandle;
 use std::collections::HashMap;
 
+/// JIT code cache with support for safepoints and OSR.
+///
+/// Note: executable JIT safepoints are implemented in the LLVM JIT entry wrappers.
+/// This cache stores the resulting suspended handles and OSR metadata.
 pub struct JitCodeCache {
     trampolines: HashMap<u32, Trampoline>,
     compiled_code: HashMap<u64, Vec<u8>>,
     osr_enabled: bool,
     osr_threshold: u64,
     osr_entry_points: HashMap<u64, Vec<OsrEntryPoint>>,
+    suspended_instances: HashMap<u64, SuspendedHandle>,
 }
 
 #[derive(Clone, Debug)]
 pub struct OsrEntryPoint {
     pub pc_offset: u32,
     pub target_address: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct SafepointEntry {
+    pub pc_offset: u32,
+    pub handler_offset: u32,
 }
 
 pub(crate) struct Trampoline {
@@ -29,7 +42,24 @@ impl JitCodeCache {
             osr_enabled: false,
             osr_threshold: 1000,
             osr_entry_points: HashMap::new(),
+            suspended_instances: HashMap::new(),
         }
+    }
+
+    /// Register a suspended instance for later resumption.
+    /// Uses the handle's instance_id as the key for consistency.
+    pub fn register_suspended_instance(&mut self, handle: SuspendedHandle) -> u64 {
+        let id = handle.instance_id();
+        self.suspended_instances.insert(id, handle);
+        id
+    }
+
+    pub fn get_suspended_instance(&self, id: u64) -> Option<&SuspendedHandle> {
+        self.suspended_instances.get(&id)
+    }
+
+    pub fn remove_suspended_instance(&mut self, id: u64) -> Option<SuspendedHandle> {
+        self.suspended_instances.remove(&id)
     }
 
     pub fn enable_osr(&mut self) {
