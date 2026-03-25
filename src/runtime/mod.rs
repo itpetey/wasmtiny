@@ -2,6 +2,7 @@ mod error;
 mod export;
 mod import;
 mod instance;
+mod metering;
 mod module;
 mod suspend;
 mod types;
@@ -14,6 +15,8 @@ pub use import::{Import, ImportKind, ImportType};
 pub use instance::{
     Extern, HostCallOutcome, HostFunc, Instance, SharedGlobal, SharedMemory, SharedTable, Store,
 };
+pub(crate) use metering::InstanceMeter;
+pub use metering::{InstanceLimits, InstanceStats};
 pub use module::{DataKind, DataSegment, ElemKind, ElemSegment, Func, Local, Module};
 #[cfg(feature = "llvm-jit")]
 pub(crate) use suspend::JitState;

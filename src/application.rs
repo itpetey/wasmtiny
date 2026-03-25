@@ -1,6 +1,8 @@
 use crate::aot_runtime::loader::AotLoader;
 use crate::aot_runtime::runtime::{AotExport, AotRuntime};
-use crate::runtime::{FunctionType, HostFunc, Result, WasmError, WasmValue};
+use crate::runtime::{
+    FunctionType, HostFunc, InstanceLimits, InstanceStats, Result, WasmError, WasmValue,
+};
 use std::fs;
 use std::path::Path;
 
@@ -128,6 +130,18 @@ impl WasmApplication {
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
         module.instantiate()
+    }
+
+    pub fn instance_stats(&self, module_idx: u32) -> Result<InstanceStats> {
+        self.runtime.instance_stats(module_idx)
+    }
+
+    pub fn instance_limits(&self, module_idx: u32) -> Result<InstanceLimits> {
+        self.runtime.instance_limits(module_idx)
+    }
+
+    pub fn set_instance_limits(&mut self, module_idx: u32, limits: InstanceLimits) -> Result<()> {
+        self.runtime.set_instance_limits(module_idx, limits)
     }
 
     pub fn register_host_function(

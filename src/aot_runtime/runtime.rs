@@ -1,8 +1,8 @@
 use super::loader::AotLoader;
 use crate::interpreter::Interpreter;
 use crate::runtime::{
-    Extern, FunctionType, Global, HostCallOutcome, HostFunc, ImportKind, Instance, Memory, Module,
-    Result, Table, WasmError, WasmValue,
+    Extern, FunctionType, Global, HostCallOutcome, HostFunc, ImportKind, Instance, InstanceLimits,
+    InstanceMeter, InstanceStats, Memory, Module, Result, Table, WasmError, WasmValue,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,6 +48,7 @@ pub struct AotModule {
     module: Module,
     imports: Vec<Option<Extern>>,
     store: Arc<Mutex<crate::runtime::Store>>,
+    meter: Arc<InstanceMeter>,
     pub native_functions: Vec<NativeFunc>,
     pub memories: Vec<Memory>,
     pub tables: Vec<Table>,
@@ -92,6 +93,7 @@ impl AotModule {
             module: module.clone(),
             imports: vec![None; module.imports.len()],
             store: Arc::new(Mutex::new(crate::runtime::Store::new())),
+            meter: Arc::new(InstanceMeter::default()),
             native_functions: Vec::new(),
             memories: Vec::new(),
             tables: Vec::new(),
@@ -145,6 +147,7 @@ impl AotModule {
         )?));
         {
             let mut instance_guard = instance.lock().map_err(poisoned_lock)?;
+            instance_guard.set_meter(self.meter.clone())?;
             for (offset, memory) in self.memories.iter().cloned().enumerate() {
                 let target = imported_memories + offset;
                 if target >= instance_guard.memories.len() {
@@ -171,51 +174,25 @@ impl AotModule {
             }
         }
 
-        let results = if idx < imported_funcs {
-            instance.lock().map_err(poisoned_lock)?.call(idx, args)?
+        let result = if idx < imported_funcs {
+            instance.lock().map_err(poisoned_lock)?.call(idx, args)
         } else {
             let mut interpreter = Interpreter::with_instance(instance.clone());
-            interpreter.execute_function(&self.module, idx, args)?
+            interpreter.execute_function(&self.module, idx, args)
         };
 
-        {
-            let instance_guard = instance.lock().map_err(poisoned_lock)?;
-            self.memories = instance_guard
-                .memories
-                .iter()
-                .skip(imported_memories)
-                .map(|memory| {
-                    memory
-                        .lock()
-                        .map_err(poisoned_lock)
-                        .map(|memory| memory.clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
-            self.tables = instance_guard
-                .tables
-                .iter()
-                .skip(imported_tables)
-                .map(|table| {
-                    table
-                        .lock()
-                        .map_err(poisoned_lock)
-                        .map(|table| table.clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
-            self.globals = instance_guard
-                .globals
-                .iter()
-                .skip(imported_globals)
-                .map(|global| {
-                    global
-                        .lock()
-                        .map_err(poisoned_lock)
-                        .map(|global| global.clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
-        }
+        let sync_result = self.sync_defined_state_from_instance(
+            &instance,
+            imported_memories,
+            imported_tables,
+            imported_globals,
+        );
 
-        Ok(results)
+        match (result, sync_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(results), Ok(())) => Ok(results),
+        }
     }
 
     pub fn invoke_import_with_suspension(
@@ -229,7 +206,29 @@ impl AotModule {
             &imports,
             self.store.clone(),
         )?;
+        instance.set_meter(self.meter.clone())?;
         instance.call_with_suspension(idx, args)
+    }
+
+    pub fn instance_stats(&self) -> Result<InstanceStats> {
+        Ok(self.meter.snapshot(self.total_memory_pages()?))
+    }
+
+    pub fn instance_limits(&self) -> InstanceLimits {
+        self.meter.limits()
+    }
+
+    pub fn set_instance_limits(&mut self, limits: InstanceLimits) -> Result<()> {
+        let current_memory_pages = if limits.max_memory_pages.is_some() {
+            self.total_memory_pages()?
+        } else {
+            0
+        };
+        self.meter.set_limits(limits, current_memory_pages)
+    }
+
+    pub fn record_execution(&self, units: u64) -> Result<()> {
+        self.meter.charge_execution(units)
     }
 
     pub fn register_import(&mut self, module: &str, name: &str, extern_: Extern) -> Result<()> {
@@ -337,7 +336,8 @@ impl AotModule {
         self.module.start
     }
 
-    pub fn set_memory(&mut self, memory: Memory) {
+    pub fn set_memory(&mut self, mut memory: Memory) {
+        memory.attach_meter(&self.meter);
         if self.memories.is_empty() {
             self.memories.push(memory);
         } else {
@@ -414,8 +414,109 @@ impl AotModule {
         self.module.func_count()
     }
 
+    pub fn grow_memory(&mut self, memory_idx: u32, delta: u32) -> Result<u32> {
+        self.resolve_memory_growth_target(memory_idx)?;
+        let new_total_pages = self
+            .total_memory_pages()?
+            .checked_add(delta)
+            .ok_or_else(|| WasmError::Runtime("memory size exceeds maximum allowed".to_string()))?;
+        self.meter.ensure_memory_pages(new_total_pages)?;
+
+        if let Some(memory) = self.imported_memory(memory_idx) {
+            return memory.lock().map_err(poisoned_lock)?.grow(delta);
+        }
+
+        let imported_memories = self.import_counts().0 as u32;
+        self.memories
+            .get_mut((memory_idx - imported_memories) as usize)
+            .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?
+            .grow(delta)
+    }
+
+    pub fn memory_grow_wasm(&mut self, memory_idx: u32, delta: i32) -> Result<i32> {
+        self.resolve_memory_growth_target(memory_idx)?;
+
+        let Ok(delta) = u32::try_from(delta) else {
+            return Ok(-1);
+        };
+
+        let Some(new_total_pages) = self.total_memory_pages()?.checked_add(delta) else {
+            return Ok(-1);
+        };
+        self.meter.ensure_memory_pages(new_total_pages)?;
+
+        let imported_memories = self.import_counts().0 as u32;
+        if memory_idx < imported_memories {
+            let memory = self
+                .imported_memory(memory_idx)
+                .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?;
+            return match memory.lock().map_err(poisoned_lock)?.grow(delta) {
+                Ok(old_size) => Ok(old_size as i32),
+                Err(WasmError::Runtime(_)) => Ok(-1),
+                Err(error) => Err(error),
+            };
+        }
+
+        let local_idx = (memory_idx - imported_memories) as usize;
+        match self
+            .memories
+            .get_mut(local_idx)
+            .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?
+            .grow(delta)
+        {
+            Ok(old_size) => Ok(old_size as i32),
+            Err(WasmError::Runtime(_)) => Ok(-1),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn memory_size(&self, memory_idx: u32) -> Result<i32> {
+        let imported_memories = self.import_counts().0 as u32;
+        if memory_idx < imported_memories {
+            let memory = self
+                .imported_memory(memory_idx)
+                .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?;
+            return Ok(memory.lock().map_err(poisoned_lock)?.size() as i32);
+        }
+
+        self.memories
+            .get((memory_idx - imported_memories) as usize)
+            .map(|memory| memory.size() as i32)
+            .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))
+    }
+
     pub fn get_func_type(&self, func_idx: u32) -> Option<&crate::runtime::FunctionType> {
         self.module.func_type(func_idx)
+    }
+
+    fn resolve_memory_growth_target(&self, memory_idx: u32) -> Result<()> {
+        let imported_memories = self.import_counts().0 as u32;
+        if memory_idx < imported_memories {
+            self.imported_memory(memory_idx)
+                .map(|_| ())
+                .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))
+        } else {
+            self.memories
+                .get((memory_idx - imported_memories) as usize)
+                .map(|_| ())
+                .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))
+        }
+    }
+
+    fn total_memory_pages(&self) -> Result<u32> {
+        let imported = (0..self.import_counts().0 as u32).try_fold(0u32, |acc, idx| {
+            let memory = self
+                .imported_memory(idx)
+                .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?;
+            let pages = memory.lock().map_err(poisoned_lock)?.size();
+            acc.checked_add(pages)
+                .ok_or_else(|| WasmError::Runtime("memory page count overflowed".to_string()))
+        })?;
+
+        self.memories.iter().try_fold(imported, |acc, memory| {
+            acc.checked_add(memory.size())
+                .ok_or_else(|| WasmError::Runtime("memory page count overflowed".to_string()))
+        })
     }
 
     fn import_counts(&self) -> (usize, usize, usize) {
@@ -483,6 +584,8 @@ impl AotModule {
             &imports,
             self.store.clone(),
         )?;
+        let mut instance = instance;
+        instance.set_meter(self.meter.clone())?;
 
         self.memories = instance
             .memories
@@ -507,6 +610,51 @@ impl AotModule {
             })
             .collect::<Result<Vec<_>>>()?;
         self.globals = instance
+            .globals
+            .iter()
+            .skip(imported_globals)
+            .map(|global| {
+                global
+                    .lock()
+                    .map_err(poisoned_lock)
+                    .map(|global| global.clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(())
+    }
+
+    fn sync_defined_state_from_instance(
+        &mut self,
+        instance: &Arc<Mutex<Instance>>,
+        imported_memories: usize,
+        imported_tables: usize,
+        imported_globals: usize,
+    ) -> Result<()> {
+        let instance_guard = instance.lock().map_err(poisoned_lock)?;
+        self.memories = instance_guard
+            .memories
+            .iter()
+            .skip(imported_memories)
+            .map(|memory| {
+                memory
+                    .lock()
+                    .map_err(poisoned_lock)
+                    .map(|memory| memory.clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.tables = instance_guard
+            .tables
+            .iter()
+            .skip(imported_tables)
+            .map(|table| {
+                table
+                    .lock()
+                    .map_err(poisoned_lock)
+                    .map(|table| table.clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.globals = instance_guard
             .globals
             .iter()
             .skip(imported_globals)
@@ -640,17 +788,15 @@ impl AotModule {
                 Ok(Extern::Table(table))
             }
             (ImportKind::Memory(expected), Extern::Memory(memory)) => {
-                if !memory
-                    .lock()
-                    .map_err(poisoned_lock)?
-                    .type_()
-                    .matches_required(expected)
-                {
+                let mut memory_guard = memory.lock().map_err(poisoned_lock)?;
+                if !memory_guard.type_().matches_required(expected) {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} memory type mismatch",
                         module, name
                     )));
                 }
+                memory_guard.attach_meter(&self.meter);
+                drop(memory_guard);
                 Ok(Extern::Memory(memory))
             }
             (ImportKind::Global(expected), Extern::Global(global)) => {
@@ -708,49 +854,39 @@ impl AotRuntime {
         module.invoke_function(func_idx, args)
     }
 
+    pub fn instance_stats(&self, module_idx: u32) -> Result<InstanceStats> {
+        let module = self
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        module.instance_stats()
+    }
+
+    pub fn instance_limits(&self, module_idx: u32) -> Result<InstanceLimits> {
+        let module = self
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        Ok(module.instance_limits())
+    }
+
+    pub fn set_instance_limits(&mut self, module_idx: u32, limits: InstanceLimits) -> Result<()> {
+        let module = self
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        module.set_instance_limits(limits)
+    }
+
     pub fn memory_grow(&mut self, module_idx: u32, delta: u32) -> Result<i32> {
         let module = self
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        let imported_memories = module.import_counts().0 as u32;
-
-        if imported_memories > 0 {
-            if let Some(memory) = module.imported_memory(0) {
-                let mut memory = memory.lock().map_err(poisoned_lock)?;
-                let old_size = memory.size();
-                memory.grow(delta)?;
-                return Ok(old_size as i32);
-            }
-            return Err(WasmError::Runtime("memory not found".into()));
-        }
-
-        if let Some(memory) = module.memories.get_mut(0) {
-            let old_size = memory.size();
-            memory.grow(delta)?;
-            Ok(old_size as i32)
-        } else {
-            Err(WasmError::Runtime("no memory".into()))
-        }
+        module.grow_memory(0, delta).map(|old_size| old_size as i32)
     }
 
     pub fn memory_size(&self, module_idx: u32) -> Result<i32> {
         let module = self
             .get_module(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        let imported_memories = module.import_counts().0 as u32;
-
-        if imported_memories > 0 {
-            if let Some(memory) = module.imported_memory(0) {
-                return Ok(memory.lock().map_err(poisoned_lock)?.size() as i32);
-            }
-            return Err(WasmError::Runtime("memory not found".into()));
-        }
-
-        if let Some(memory) = module.memories.first() {
-            Ok(memory.size() as i32)
-        } else {
-            Err(WasmError::Runtime("no memory".into()))
-        }
+        module.memory_size(0)
     }
 
     pub fn table_grow(&mut self, module_idx: u32, table_idx: u32, delta: u32) -> Result<i32> {
@@ -973,6 +1109,243 @@ mod tests {
         fn function_type(&self) -> Option<&FunctionType> {
             None
         }
+    }
+
+    fn memory_size_module() -> Module {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module
+            .memories
+            .push(crate::runtime::MemoryType::new(Limits::Min(1)));
+        module.funcs.push(crate::runtime::Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x3F, 0x00, 0x0B],
+        });
+        module
+    }
+
+    fn memory_grow_module() -> Module {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module
+            .memories
+            .push(crate::runtime::MemoryType::new(Limits::Min(1)));
+        module.funcs.push(crate::runtime::Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x01, 0x40, 0x00, 0x0B],
+        });
+        module
+    }
+
+    fn imported_memory_module() -> Module {
+        let mut module = Module::new();
+        module.imports.push(crate::runtime::Import {
+            module: "env".to_string(),
+            name: "memory".to_string(),
+            kind: crate::runtime::ImportKind::Memory(crate::runtime::MemoryType::new(Limits::Min(
+                1,
+            ))),
+        });
+        module
+    }
+
+    fn execution_budget_module() -> Module {
+        let mut module = Module::new();
+        module.types.push(FunctionType::empty());
+        module.funcs.push(crate::runtime::Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x01, 0x1A, 0x41, 0x02, 0x1A, 0x0B],
+        });
+        module
+    }
+
+    fn execution_budget_state_module() -> Module {
+        let mut module = Module::new();
+        module.types.push(FunctionType::empty());
+        module
+            .globals
+            .push(GlobalType::new(ValType::Num(NumType::I32), true));
+        module.global_inits.push(vec![0x41, 0x00, 0x0B]);
+        module.funcs.push(crate::runtime::Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x07, 0x24, 0x00, 0x41, 0x01, 0x1A, 0x0B],
+        });
+        module
+    }
+
+    fn memory_grow_fail_module() -> Module {
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module
+            .memories
+            .push(crate::runtime::MemoryType::new(Limits::Min(1)));
+        module.funcs.push(crate::runtime::Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x7F, 0x40, 0x00, 0x0B],
+        });
+        module
+    }
+
+    #[test]
+    fn test_instance_stats_report_execution_and_memory_usage() {
+        let mut module = AotModule::from_module(&memory_size_module());
+
+        let before = module.instance_stats().unwrap();
+        assert_eq!(before.executed_instructions, 0);
+        assert_eq!(before.memory_pages, 1);
+        assert_eq!(before.memory_bytes, 65_536);
+
+        let results = module.invoke_function(0, &[]).unwrap();
+        assert_eq!(results, vec![WasmValue::I32(1)]);
+
+        let after = module.instance_stats().unwrap();
+        assert!(after.executed_instructions > before.executed_instructions);
+        assert_eq!(after.memory_pages, 1);
+        assert_eq!(after.memory_bytes, 65_536);
+    }
+
+    #[test]
+    fn test_instance_stats_are_monotonic_across_calls() {
+        let mut module = AotModule::from_module(&memory_size_module());
+
+        let first = module.invoke_function(0, &[]).unwrap();
+        assert_eq!(first, vec![WasmValue::I32(1)]);
+        let first_stats = module.instance_stats().unwrap();
+
+        let second = module.invoke_function(0, &[]).unwrap();
+        assert_eq!(second, vec![WasmValue::I32(1)]);
+        let second_stats = module.instance_stats().unwrap();
+
+        assert!(second_stats.executed_instructions >= first_stats.executed_instructions);
+        assert_eq!(second_stats.memory_pages, first_stats.memory_pages);
+    }
+
+    #[test]
+    fn test_instance_stats_report_memory_growth() {
+        let mut module = AotModule::from_module(&memory_grow_module());
+
+        let results = module.invoke_function(0, &[]).unwrap();
+        assert_eq!(results, vec![WasmValue::I32(1)]);
+
+        let stats = module.instance_stats().unwrap();
+        assert_eq!(stats.memory_pages, 2);
+        assert_eq!(stats.memory_bytes, 131_072);
+    }
+
+    #[test]
+    fn test_memory_limit_exceeded_traps_in_interpreter() {
+        let mut module = AotModule::from_module(&memory_grow_module());
+        module
+            .set_instance_limits(InstanceLimits::new(None, Some(1)))
+            .unwrap();
+
+        let error = module.invoke_function(0, &[]).unwrap_err();
+        assert_eq!(
+            error,
+            WasmError::Trap(crate::runtime::TrapCode::MemoryLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn test_execution_budget_exceeded_traps_in_interpreter() {
+        let mut module = AotModule::from_module(&execution_budget_module());
+        module
+            .set_instance_limits(InstanceLimits::new(Some(2), None))
+            .unwrap();
+
+        let error = module.invoke_function(0, &[]).unwrap_err();
+        assert_eq!(
+            error,
+            WasmError::Trap(crate::runtime::TrapCode::ExecutionBudgetExceeded)
+        );
+        assert!(module.instance_stats().unwrap().executed_instructions > 2);
+    }
+
+    #[test]
+    fn test_execution_budget_trap_preserves_prior_state_changes() {
+        let mut module = AotModule::from_module(&execution_budget_state_module());
+        module
+            .set_instance_limits(InstanceLimits::new(Some(2), None))
+            .unwrap();
+
+        let error = module.invoke_function(0, &[]).unwrap_err();
+        assert_eq!(
+            error,
+            WasmError::Trap(crate::runtime::TrapCode::ExecutionBudgetExceeded)
+        );
+        assert_eq!(module.get_global(0).unwrap().get(), WasmValue::I32(7));
+    }
+
+    #[test]
+    fn test_memory_grow_with_negative_delta_returns_minus_one() {
+        let mut module = AotModule::from_module(&memory_grow_fail_module());
+
+        let result = module.invoke_function(0, &[]).unwrap();
+        assert_eq!(result, vec![WasmValue::I32(-1)]);
+
+        let stats = module.instance_stats().unwrap();
+        assert_eq!(stats.memory_pages, 1);
+    }
+
+    #[test]
+    fn test_memory_grow_invalid_index_beats_limit_check() {
+        let mut module = AotModule::from_module(&memory_grow_module());
+        module
+            .set_instance_limits(InstanceLimits::new(None, Some(1)))
+            .unwrap();
+
+        let error = module.memory_grow_wasm(1, 1).unwrap_err();
+
+        assert!(
+            matches!(error, WasmError::Runtime(message) if message.contains("memory not found"))
+        );
+    }
+
+    #[test]
+    fn test_instruction_limit_can_be_set_before_memory_imports_resolve() {
+        let mut module = AotModule::from_module(&imported_memory_module());
+
+        module
+            .set_instance_limits(InstanceLimits::new(Some(10), None))
+            .unwrap();
+
+        assert_eq!(
+            module.instance_limits(),
+            InstanceLimits::new(Some(10), None)
+        );
+    }
+
+    #[test]
+    fn test_imported_memory_handle_growth_respects_memory_limit() {
+        let mut module = AotModule::from_module(&imported_memory_module());
+        let memory = Arc::new(Mutex::new(Memory::new(crate::runtime::MemoryType::new(
+            Limits::Min(1),
+        ))));
+
+        module
+            .register_import("env", "memory", Extern::Memory(memory.clone()))
+            .unwrap();
+        module
+            .set_instance_limits(InstanceLimits::new(None, Some(1)))
+            .unwrap();
+
+        let error = memory.lock().unwrap().grow(1).unwrap_err();
+
+        assert_eq!(
+            error,
+            WasmError::Trap(crate::runtime::TrapCode::MemoryLimitExceeded)
+        );
     }
 
     #[test]

@@ -2,9 +2,11 @@
 pub enum TrapCode {
     Unreachable,
     MemoryOutOfBounds,
+    MemoryLimitExceeded,
     TableOutOfBounds,
     IndirectCallTypeMismatch,
     StackOverflow,
+    ExecutionBudgetExceeded,
     IntegerOverflow,
     IntegerDivisionByZero,
     InvalidConversionToInt,

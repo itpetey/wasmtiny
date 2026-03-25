@@ -1,26 +1,29 @@
-use crate::runtime::{MemoryType, Result, TrapCode, WasmError};
+use crate::runtime::{InstanceMeter, MemoryType, Result, TrapCode, WasmError};
+use std::sync::{Arc, Weak};
 
-const PAGE_SIZE: u32 = 65536;
+pub const PAGE_SIZE_BYTES: u32 = 65536;
 const MAX_PAGES: u32 = 65536;
 
 #[derive(Debug, Clone)]
 pub struct Memory {
     mem_type: MemoryType,
     data: Vec<u8>,
+    meters: Vec<Weak<InstanceMeter>>,
 }
 
 impl Memory {
     pub fn new(mem_type: MemoryType) -> Self {
         let min_pages = mem_type.limits.min();
-        let byte_len = (min_pages * PAGE_SIZE) as usize;
+        let byte_len = (min_pages * PAGE_SIZE_BYTES) as usize;
         Self {
             mem_type,
             data: vec![0; byte_len],
+            meters: Vec::new(),
         }
     }
 
     pub fn size(&self) -> u32 {
-        (self.data.len() / PAGE_SIZE as usize) as u32
+        (self.data.len() / PAGE_SIZE_BYTES as usize) as u32
     }
 
     pub fn type_(&self) -> &MemoryType {
@@ -30,6 +33,11 @@ impl Memory {
     pub fn grow(&mut self, delta: u32) -> Result<u32> {
         let old_size = self.size();
         let new_size = old_size.saturating_add(delta);
+
+        self.prune_meters();
+        for meter in self.meters.iter().filter_map(Weak::upgrade) {
+            meter.ensure_memory_pages(new_size)?;
+        }
 
         if let Some(max) = self.mem_type.limits.max()
             && new_size > max
@@ -45,7 +53,7 @@ impl Memory {
             ));
         }
 
-        let new_byte_len = (new_size * PAGE_SIZE) as usize;
+        let new_byte_len = (new_size * PAGE_SIZE_BYTES) as usize;
         self.data.resize(new_byte_len, 0);
         Ok(old_size)
     }
@@ -142,6 +150,24 @@ impl Memory {
 
     pub fn len_bytes(&self) -> usize {
         self.data.len()
+    }
+
+    pub(crate) fn attach_meter(&mut self, meter: &Arc<InstanceMeter>) {
+        self.prune_meters();
+        if self
+            .meters
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|existing| Arc::ptr_eq(&existing, meter))
+        {
+            return;
+        }
+
+        self.meters.push(Arc::downgrade(meter));
+    }
+
+    fn prune_meters(&mut self) {
+        self.meters.retain(|meter| meter.strong_count() > 0);
     }
 }
 

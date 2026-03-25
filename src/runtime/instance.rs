@@ -1,6 +1,6 @@
 use super::{
-    ExportKind, FunctionType, Global, ImportKind, Memory, Module, RefType, Result, Table, ValType,
-    WasmError, WasmValue,
+    ExportKind, FunctionType, Global, ImportKind, InstanceLimits, InstanceMeter, InstanceStats,
+    Memory, Module, RefType, Result, Table, ValType, WasmError, WasmValue,
 };
 use crate::loader::BinaryReader;
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ pub type SharedGlobal = Arc<Mutex<Global>>;
 pub struct Instance {
     module: Arc<Module>,
     store: Arc<Mutex<Store>>,
+    meter: Arc<InstanceMeter>,
     pub memories: Vec<SharedMemory>,
     pub tables: Vec<SharedTable>,
     pub globals: Vec<SharedGlobal>,
@@ -238,6 +239,7 @@ impl Instance {
         Self {
             module,
             store,
+            meter: Arc::new(InstanceMeter::default()),
             memories: Vec::new(),
             tables: Vec::new(),
             globals: Vec::new(),
@@ -270,8 +272,9 @@ impl Instance {
         let const_globals = self.const_expr_globals();
 
         for memory_type in &self.module.memories {
-            self.memories
-                .push(Arc::new(Mutex::new(Memory::new(memory_type.clone()))));
+            let mut memory = Memory::new(memory_type.clone());
+            memory.attach_meter(&self.meter);
+            self.memories.push(Arc::new(Mutex::new(memory)));
         }
 
         for table_type in &self.module.tables {
@@ -456,6 +459,58 @@ impl Instance {
         self.memories.get(idx as usize)
     }
 
+    pub fn stats(&self) -> Result<InstanceStats> {
+        Ok(self.meter.snapshot(self.total_memory_pages()?))
+    }
+
+    pub fn limits(&self) -> InstanceLimits {
+        self.meter.limits()
+    }
+
+    pub fn set_limits(&mut self, limits: InstanceLimits) -> Result<()> {
+        self.meter.set_limits(limits, self.total_memory_pages()?)
+    }
+
+    pub fn record_execution(&self, units: u64) -> Result<()> {
+        self.meter.charge_execution(units)
+    }
+
+    pub fn grow_memory(&mut self, idx: u32, delta: u32) -> Result<u32> {
+        let memory = self
+            .memory(idx)
+            .cloned()
+            .ok_or_else(|| WasmError::Runtime(format!("memory {} out of bounds", idx)))?;
+        let current_pages = self.total_memory_pages()?;
+        let new_total_pages = current_pages
+            .checked_add(delta)
+            .ok_or_else(|| WasmError::Runtime("memory size exceeds maximum allowed".to_string()))?;
+        self.meter.ensure_memory_pages(new_total_pages)?;
+
+        memory.lock().map_err(poisoned_lock)?.grow(delta)
+    }
+
+    pub fn memory_grow_wasm(&mut self, idx: u32, delta: i32) -> Result<i32> {
+        let memory = self
+            .memory(idx)
+            .cloned()
+            .ok_or_else(|| WasmError::Runtime(format!("memory {} out of bounds", idx)))?;
+        let Ok(delta) = u32::try_from(delta) else {
+            return Ok(-1);
+        };
+
+        let current_pages = self.total_memory_pages()?;
+        let Some(new_total_pages) = current_pages.checked_add(delta) else {
+            return Ok(-1);
+        };
+        self.meter.ensure_memory_pages(new_total_pages)?;
+
+        match memory.lock().map_err(poisoned_lock)?.grow(delta) {
+            Ok(old_size) => Ok(old_size as i32),
+            Err(WasmError::Runtime(_)) => Ok(-1),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn memory_mut(&mut self, idx: u32) -> Option<&mut SharedMemory> {
         self.memories.get_mut(idx as usize)
     }
@@ -521,6 +576,16 @@ impl Instance {
         self.exports.insert(name, extern_);
     }
 
+    pub(crate) fn set_meter(&mut self, meter: Arc<InstanceMeter>) -> Result<()> {
+        self.meter = meter;
+        for memory in &self.memories {
+            let mut memory = memory.lock().map_err(poisoned_lock)?;
+            memory.attach_meter(&self.meter);
+        }
+
+        Ok(())
+    }
+
     fn add_import_at(&mut self, import_idx: usize, extern_: &Extern) -> Result<()> {
         let import = self.module.imports.get(import_idx).ok_or_else(|| {
             WasmError::Instantiate(format!("import index {} out of bounds", import_idx))
@@ -554,17 +619,14 @@ impl Instance {
                 }
             }
             (ImportKind::Memory(expected), Extern::Memory(memory)) => {
-                if !memory
-                    .lock()
-                    .map_err(poisoned_lock)?
-                    .type_()
-                    .matches_required(expected)
-                {
+                let mut memory = memory.lock().map_err(poisoned_lock)?;
+                if !memory.type_().matches_required(expected) {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} memory type mismatch",
                         import.module, import.name
                     )));
                 }
+                memory.attach_meter(&self.meter);
             }
             (ImportKind::Global(expected), Extern::Global(global)) => {
                 if global.lock().map_err(poisoned_lock)?.type_ != *expected {
@@ -633,6 +695,14 @@ impl Instance {
             .iter()
             .filter(|import| matches!(import.kind, ImportKind::Func(_)))
             .count()
+    }
+
+    fn total_memory_pages(&self) -> Result<u32> {
+        self.memories.iter().try_fold(0u32, |acc, memory| {
+            let pages = memory.lock().map_err(poisoned_lock)?.size();
+            acc.checked_add(pages)
+                .ok_or_else(|| WasmError::Runtime("memory page count overflowed".to_string()))
+        })
     }
 }
 
@@ -1078,6 +1148,42 @@ mod tests {
         assert_eq!(
             instance.global(1).unwrap().lock().unwrap().get(),
             WasmValue::I32(2)
+        );
+    }
+
+    #[test]
+    fn test_grow_memory_invalid_index_beats_limit_check() {
+        let mut module = Module::new();
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+
+        let mut instance = Instance::new(Arc::new(module)).unwrap();
+        instance
+            .set_limits(InstanceLimits::new(None, Some(1)))
+            .unwrap();
+
+        let error = instance.grow_memory(1, 1).unwrap_err();
+
+        assert!(
+            matches!(error, WasmError::Runtime(message) if message.contains("memory 1 out of bounds"))
+        );
+    }
+
+    #[test]
+    fn test_direct_memory_handle_growth_respects_memory_limit() {
+        let mut module = Module::new();
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+
+        let mut instance = Instance::new(Arc::new(module)).unwrap();
+        instance
+            .set_limits(InstanceLimits::new(None, Some(1)))
+            .unwrap();
+
+        let memory = instance.memory(0).cloned().unwrap();
+        let error = memory.lock().unwrap().grow(1).unwrap_err();
+
+        assert_eq!(
+            error,
+            WasmError::Trap(crate::runtime::TrapCode::MemoryLimitExceeded)
         );
     }
 }
