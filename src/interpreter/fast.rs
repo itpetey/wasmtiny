@@ -2,136 +2,78 @@ use crate::runtime::{Module, Result, WasmError, WasmValue};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
+/// Ir opcode.
 pub enum IrOpcode {
-    LoadConst {
-        dst: u8,
-        value: i64,
-    },
-    LoadGlobal {
-        dst: u8,
-        idx: u32,
-    },
-    StoreGlobal {
-        src: u8,
-        idx: u32,
-    },
-    LoadLocal {
-        dst: u8,
-        idx: u8,
-    },
-    StoreLocal {
-        src: u8,
-        idx: u8,
-    },
-    Add {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Sub {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Mul {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Div {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    And {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Or {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Xor {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Shl {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Shr {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Lt {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Le {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Eq {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Ne {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Ge {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Gt {
-        dst: u8,
-        lhs: u8,
-        rhs: u8,
-    },
-    Branch {
-        target: u32,
-    },
-    BranchIf {
-        cond: u8,
-        target: u32,
-    },
+    /// Variant `LoadConst`.
+    LoadConst { dst: u8, value: i64 },
+    /// Variant `LoadGlobal`.
+    LoadGlobal { dst: u8, idx: u32 },
+    /// Variant `StoreGlobal`.
+    StoreGlobal { src: u8, idx: u32 },
+    /// Variant `LoadLocal`.
+    LoadLocal { dst: u8, idx: u8 },
+    /// Variant `StoreLocal`.
+    StoreLocal { src: u8, idx: u8 },
+    /// Variant `Add`.
+    Add { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Sub`.
+    Sub { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Mul`.
+    Mul { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Div`.
+    Div { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `And`.
+    And { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Or`.
+    Or { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Xor`.
+    Xor { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Shl`.
+    Shl { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Shr`.
+    Shr { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Lt`.
+    Lt { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Le`.
+    Le { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Eq`.
+    Eq { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Ne`.
+    Ne { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Ge`.
+    Ge { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Gt`.
+    Gt { dst: u8, lhs: u8, rhs: u8 },
+    /// Variant `Branch`.
+    Branch { target: u32 },
+    /// Variant `BranchIf`.
+    BranchIf { cond: u8, target: u32 },
+    /// Variant `Call`.
     Call {
         func_idx: u32,
         args: Vec<u8>,
         result: Option<u8>,
     },
-    Return {
-        values: Vec<u8>,
-    },
-    LoadMem {
-        dst: u8,
-        base: u8,
-        offset: i32,
-    },
-    StoreMem {
-        src: u8,
-        base: u8,
-        offset: i32,
-    },
+    /// Variant `Return`.
+    Return { values: Vec<u8> },
+    /// Variant `LoadMem`.
+    LoadMem { dst: u8, base: u8, offset: i32 },
+    /// Variant `StoreMem`.
+    StoreMem { src: u8, base: u8, offset: i32 },
+    /// Variant `Nop`.
     Nop,
 }
 
+/// Ir block.
 pub struct IrBlock {
+    /// The `instructions` value.
     pub instructions: Vec<IrOpcode>,
+    /// The `successors` value.
     pub successors: Vec<u32>,
 }
 
 impl IrBlock {
+    /// Creates a new `IrBlock`.
     pub fn new() -> Self {
         Self {
             instructions: Vec::new(),
@@ -146,6 +88,7 @@ impl Default for IrBlock {
     }
 }
 
+/// Fast interpreter.
 pub struct FastInterpreter {
     registers: Vec<WasmValue>,
     blocks: HashMap<u32, IrBlock>,
@@ -155,6 +98,7 @@ pub struct FastInterpreter {
 }
 
 impl FastInterpreter {
+    /// Creates a new `FastInterpreter`.
     pub fn new() -> Self {
         Self {
             registers: Vec::with_capacity(256),
@@ -164,6 +108,7 @@ impl FastInterpreter {
         }
     }
 
+    /// Compiles all supported functions in the module.
     pub fn compile_module(&mut self, module: &Module) -> Result<()> {
         for (func_idx, _func) in module.funcs.iter().enumerate() {
             self.compile_function(module, func_idx as u32)?;
@@ -336,6 +281,7 @@ impl FastInterpreter {
         Ok(())
     }
 
+    /// Executes the requested function.
     pub fn execute(&mut self, func_idx: u32) -> Result<Vec<WasmValue>> {
         let block = self.blocks.get(&func_idx).ok_or_else(|| {
             WasmError::Runtime(format!("compiled function {} not found", func_idx))

@@ -1,3 +1,20 @@
+//! WasmApplication - High-level API for Wasm module execution.
+//!
+//! This module provides the main entry point for interacting with the WebAssembly
+//! runtime. [`WasmApplication`] manages module loading, instantiation, host function
+//! registration, and function invocation.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use wasmtiny::{WasmApplication, WasmValue};
+//!
+//! let mut app = WasmApplication::new();
+//! let idx = app.load_module_from_file("hello.wasm")?;
+//! app.instantiate(idx)?;
+//! let result = app.call_function(idx, "main", &[])?;
+//! ```
+
 use crate::aot_runtime::runtime::{AotExport, AotRuntime};
 use crate::runtime::{
     FunctionType, HostFunc, InstanceLimits, InstanceStats, Result, SharedMemoryMappingId,
@@ -11,12 +28,34 @@ use crate::jit::{LlvmJit, set_execution_context};
 #[cfg(feature = "llvm-jit")]
 use std::collections::HashMap;
 
+/// Execution mode for WebAssembly modules.
+///
+/// Specifies whether to use the interpreter or LLVM JIT compiler.
 pub enum ExecutionMode {
+    /// Execute using the interpreter.
     Interpreter,
+    /// Execute using LLVM JIT compilation.
     #[cfg(feature = "llvm-jit")]
+    /// Execute using the LLVM JIT backend.
     LlvmJit,
 }
 
+/// A WebAssembly application instance.
+///
+/// This is the main entry point for interacting with the WebAssembly runtime.
+/// It manages module loading, instantiation, host function registration, and
+/// function invocation.
+///
+/// # Example
+///
+/// ```ignore
+/// use wasmtiny::{WasmApplication, WasmValue};
+///
+/// let mut app = WasmApplication::new();
+/// let idx = app.load_module_from_file("module.wasm")?;
+/// app.instantiate(idx)?;
+/// let result = app.call_function(idx, "add", &[WasmValue::I32(1), WasmValue::I32(2)])?;
+/// ```
 pub struct WasmApplication {
     runtime: AotRuntime,
     #[cfg(feature = "llvm-jit")]
@@ -70,6 +109,7 @@ impl WasmApplication {
         Ok(())
     }
 
+    /// Creates a new `WasmApplication`.
     pub fn new() -> Self {
         Self {
             runtime: AotRuntime::new(),
@@ -81,16 +121,19 @@ impl WasmApplication {
     }
 
     #[cfg(feature = "llvm-jit")]
+    /// Sets execution mode.
     pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
         self.execution_mode = mode;
     }
 
     #[cfg(feature = "llvm-jit")]
+    /// Returns the current execution mode.
     pub fn execution_mode(&self) -> &ExecutionMode {
         &self.execution_mode
     }
 
     #[cfg(feature = "llvm-jit")]
+    /// Compiles the selected module with the LLVM JIT backend.
     pub fn compile_with_llvm(&mut self, module_idx: u32) -> Result<()> {
         let aot_module = self
             .runtime
@@ -116,19 +159,23 @@ impl WasmApplication {
     }
 
     #[cfg(feature = "llvm-jit")]
+    /// Attempts LLVM compilation and falls back if it is unavailable.
     pub fn compile_with_llvm_fallback(&mut self, module_idx: u32) {
         let _ = self.compile_with_llvm(module_idx);
     }
 
+    /// Loads module from file.
     pub fn load_module_from_file<P: AsRef<Path>>(&mut self, path: P) -> Result<u32> {
         let data = fs::read(path)?;
         self.load_module_from_memory(&data)
     }
 
+    /// Loads module from memory.
     pub fn load_module_from_memory(&mut self, data: &[u8]) -> Result<u32> {
         self.runtime.load_module(data)
     }
 
+    /// Instantiates the module and resolves its imports.
     pub fn instantiate(&mut self, module_idx: u32) -> Result<()> {
         let module = self
             .runtime
@@ -137,18 +184,22 @@ impl WasmApplication {
         module.instantiate()
     }
 
+    /// Returns runtime statistics for the selected instance.
     pub fn instance_stats(&self, module_idx: u32) -> Result<InstanceStats> {
         self.runtime.instance_stats(module_idx)
     }
 
+    /// Returns the configured limits for the selected instance.
     pub fn instance_limits(&self, module_idx: u32) -> Result<InstanceLimits> {
         self.runtime.instance_limits(module_idx)
     }
 
+    /// Sets instance limits.
     pub fn set_instance_limits(&mut self, module_idx: u32, limits: InstanceLimits) -> Result<()> {
         self.runtime.set_instance_limits(module_idx, limits)
     }
 
+    /// Registers host function.
     pub fn register_host_function(
         &mut self,
         module_idx: u32,
@@ -164,6 +215,7 @@ impl WasmApplication {
         module.register_host_import(import_module, name, func, func_type)
     }
 
+    /// Registers memory import.
     pub fn register_memory_import(
         &mut self,
         module_idx: u32,
@@ -178,6 +230,7 @@ impl WasmApplication {
         module.register_memory_import(import_module, name, memory)
     }
 
+    /// Registers table import.
     pub fn register_table_import(
         &mut self,
         module_idx: u32,
@@ -192,6 +245,7 @@ impl WasmApplication {
         module.register_table_import(import_module, name, table)
     }
 
+    /// Registers global import.
     pub fn register_global_import(
         &mut self,
         module_idx: u32,
@@ -206,6 +260,7 @@ impl WasmApplication {
         module.register_global_import(import_module, name, global)
     }
 
+    /// Allocates shared region.
     pub fn allocate_shared_region(
         &mut self,
         module_idx: u32,
@@ -219,6 +274,7 @@ impl WasmApplication {
         module.allocate_shared_region(size, alignment)
     }
 
+    /// Destroys shared region.
     pub fn destroy_shared_region(
         &mut self,
         module_idx: u32,
@@ -231,6 +287,7 @@ impl WasmApplication {
         module.destroy_shared_region(region_id)
     }
 
+    /// Returns the length of the shared region in bytes.
     pub fn shared_region_len(&self, module_idx: u32, region_id: SharedRegionId) -> Result<u32> {
         let module = self
             .runtime
@@ -239,6 +296,7 @@ impl WasmApplication {
         module.shared_region_len(region_id)
     }
 
+    /// Attaches shared region.
     pub fn attach_shared_region(
         &mut self,
         module_idx: u32,
@@ -253,6 +311,7 @@ impl WasmApplication {
         module.attach_shared_region(region_id, region_offset, len)
     }
 
+    /// Attaches shared region whole.
     pub fn attach_shared_region_whole(
         &mut self,
         module_idx: u32,
@@ -265,6 +324,7 @@ impl WasmApplication {
         module.attach_shared_region_whole(region_id)
     }
 
+    /// Detaches shared region.
     pub fn detach_shared_region(
         &mut self,
         module_idx: u32,
@@ -277,6 +337,7 @@ impl WasmApplication {
         module.detach_shared_region(mapping_id)
     }
 
+    /// Reads shared region.
     pub fn read_shared_region(
         &self,
         module_idx: u32,
@@ -291,6 +352,7 @@ impl WasmApplication {
         module.read_shared_region(mapping_id, offset, buf)
     }
 
+    /// Writes shared region.
     pub fn write_shared_region(
         &self,
         module_idx: u32,
@@ -305,6 +367,7 @@ impl WasmApplication {
         module.write_shared_region(mapping_id, offset, buf)
     }
 
+    /// Reads shared region u8.
     pub fn read_shared_region_u8(
         &self,
         module_idx: u32,
@@ -318,6 +381,7 @@ impl WasmApplication {
         module.read_shared_region_u8(mapping_id, offset)
     }
 
+    /// Writes shared region u8.
     pub fn write_shared_region_u8(
         &self,
         module_idx: u32,
@@ -332,6 +396,7 @@ impl WasmApplication {
         module.write_shared_region_u8(mapping_id, offset, value)
     }
 
+    /// Reads shared region i32.
     pub fn read_shared_region_i32(
         &self,
         module_idx: u32,
@@ -345,6 +410,7 @@ impl WasmApplication {
         module.read_shared_region_i32(mapping_id, offset)
     }
 
+    /// Writes shared region i32.
     pub fn write_shared_region_i32(
         &self,
         module_idx: u32,
@@ -359,6 +425,7 @@ impl WasmApplication {
         module.write_shared_region_i32(mapping_id, offset, value)
     }
 
+    /// Reads shared region i64.
     pub fn read_shared_region_i64(
         &self,
         module_idx: u32,
@@ -372,6 +439,7 @@ impl WasmApplication {
         module.read_shared_region_i64(mapping_id, offset)
     }
 
+    /// Writes shared region i64.
     pub fn write_shared_region_i64(
         &self,
         module_idx: u32,
@@ -386,6 +454,7 @@ impl WasmApplication {
         module.write_shared_region_i64(mapping_id, offset, value)
     }
 
+    /// Reads shared region f32.
     pub fn read_shared_region_f32(
         &self,
         module_idx: u32,
@@ -399,6 +468,7 @@ impl WasmApplication {
         module.read_shared_region_f32(mapping_id, offset)
     }
 
+    /// Writes shared region f32.
     pub fn write_shared_region_f32(
         &self,
         module_idx: u32,
@@ -413,6 +483,7 @@ impl WasmApplication {
         module.write_shared_region_f32(mapping_id, offset, value)
     }
 
+    /// Reads shared region f64.
     pub fn read_shared_region_f64(
         &self,
         module_idx: u32,
@@ -426,6 +497,7 @@ impl WasmApplication {
         module.read_shared_region_f64(mapping_id, offset)
     }
 
+    /// Writes shared region f64.
     pub fn write_shared_region_f64(
         &self,
         module_idx: u32,
@@ -440,6 +512,7 @@ impl WasmApplication {
         module.write_shared_region_f64(mapping_id, offset, value)
     }
 
+    /// Calls function.
     pub fn call_function(
         &mut self,
         module_idx: u32,
@@ -496,10 +569,12 @@ impl WasmApplication {
         }
     }
 
+    /// Executes main.
     pub fn execute_main(&mut self, module_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.call_function(module_idx, "main", args)
     }
 
+    /// Executes start.
     pub fn execute_start(&mut self, module_idx: u32) -> Result<()> {
         #[cfg(feature = "llvm-jit")]
         if matches!(self.execution_mode, ExecutionMode::LlvmJit)

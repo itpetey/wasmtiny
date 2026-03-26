@@ -14,32 +14,39 @@ fn shared_memory_alignment_error(kind: &str, alignment: u32, offset: u32) -> Was
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Shared region id.
 pub struct SharedRegionId(u64);
 
 impl SharedRegionId {
+    /// Constant `fn`.
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
+    /// Constant `fn`.
     pub const fn raw(self) -> u64 {
         self.0
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Shared memory mapping id.
 pub struct SharedMemoryMappingId(u64);
 
 impl SharedMemoryMappingId {
+    /// Constant `fn`.
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
+    /// Constant `fn`.
     pub const fn raw(self) -> u64 {
         self.0
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Shared memory mapping.
 pub struct SharedMemoryMapping {
     mapping_id: SharedMemoryMappingId,
     region_id: SharedRegionId,
@@ -49,30 +56,37 @@ pub struct SharedMemoryMapping {
 }
 
 impl SharedMemoryMapping {
+    /// Constant `fn`.
     pub const fn mapping_id(self) -> SharedMemoryMappingId {
         self.mapping_id
     }
 
+    /// Constant `fn`.
     pub const fn region_id(self) -> SharedRegionId {
         self.region_id
     }
 
+    /// Constant `fn`.
     pub const fn region_offset(self) -> u32 {
         self.region_offset
     }
 
+    /// Constant `fn`.
     pub const fn len(self) -> u32 {
         self.len
     }
 
+    /// Constant `fn`.
     pub const fn is_empty(self) -> bool {
         self.len == 0
     }
 
+    /// Constant `fn`.
     pub const fn alignment(self) -> u32 {
         self.alignment
     }
 
+    /// Returns whether this mapping overlaps the given region range.
     pub fn overlaps_region_range(
         &self,
         region_id: SharedRegionId,
@@ -273,6 +287,7 @@ impl ResolvedSharedMemoryMapping {
 }
 
 #[derive(Debug)]
+/// Shared memory registry.
 pub struct SharedMemoryRegistry {
     next_region_id: u64,
     next_mapping_id: u64,
@@ -292,6 +307,7 @@ impl Default for SharedMemoryRegistry {
 }
 
 impl SharedMemoryRegistry {
+    /// Allocates region.
     pub fn allocate_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
         if size == 0 {
             return Err(WasmError::Runtime(
@@ -311,11 +327,13 @@ impl SharedMemoryRegistry {
         Ok(region_id)
     }
 
+    /// Returns the length of the shared region in bytes.
     pub fn region_len(&self, region_id: SharedRegionId) -> Result<u32> {
         let region = self.region(region_id)?;
         Ok(region.len() as u32)
     }
 
+    /// Destroys region.
     pub fn destroy_region(&mut self, region_id: SharedRegionId) -> Result<()> {
         let region = self.region(region_id)?;
         if region.attachment_count.load(Ordering::SeqCst) != 0 {
@@ -329,6 +347,7 @@ impl SharedMemoryRegistry {
         Ok(())
     }
 
+    /// Attaches region.
     pub fn attach_region(
         &mut self,
         region_id: SharedRegionId,
@@ -374,6 +393,7 @@ impl SharedMemoryRegistry {
         Ok(mapping)
     }
 
+    /// Detaches region.
     pub fn detach_region(&mut self, mapping: SharedMemoryMapping) -> Result<()> {
         let stored_mapping = self
             .live_mappings

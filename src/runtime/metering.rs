@@ -3,19 +3,27 @@ use crate::memory::PAGE_SIZE_BYTES;
 use parking_lot::RwLock;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Resource usage statistics for a running instance.
 pub struct InstanceStats {
+    /// Number of instructions charged to the instance.
     pub executed_instructions: u64,
+    /// Current memory size in WebAssembly pages.
     pub memory_pages: u32,
+    /// Current memory size in bytes.
     pub memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Configurable resource limits for a running instance.
 pub struct InstanceLimits {
+    /// Maximum charged instructions allowed before trapping.
     pub max_execution_instructions: Option<u64>,
+    /// Maximum linear-memory size allowed in pages.
     pub max_memory_pages: Option<u32>,
 }
 
 impl InstanceLimits {
+    /// Constant `fn`.
     pub const fn new(
         max_execution_instructions: Option<u64>,
         max_memory_pages: Option<u32>,

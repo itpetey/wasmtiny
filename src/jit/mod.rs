@@ -1,3 +1,16 @@
+//! Just-In-Time (JIT) compilation for WebAssembly.
+//!
+//! This module provides JIT compilation capabilities to accelerate WebAssembly
+//! execution. It includes both a custom JIT compiler and optional LLVM integration.
+//!
+//! # Components
+//!
+//! - [`JitCompiler`] - Custom JIT compiler for WebAssembly to native code
+//! - [`Emitter`] - x86-64 instruction emitter
+//! - [`LinearScanAllocator`] - Register allocator for JIT code
+//! - [`JitCodeCache`] - Cache for generated JIT code
+//! - [`LlvmJit`] - LLVM-based JIT compiler (requires `llvm-jit` feature)
+
 mod compiler;
 mod emitter;
 mod regalloc;

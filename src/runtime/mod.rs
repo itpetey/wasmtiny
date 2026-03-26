@@ -1,3 +1,19 @@
+//! Core runtime types and utilities for WebAssembly execution.
+//!
+//! This module contains the fundamental types used throughout the runtime,
+//! including value types, function types, memory/table types, error handling,
+//! and instance management.
+//!
+//! # Key Types
+//!
+//! - [`WasmValue`] - Represents WebAssembly runtime values (i32, i64, f32, f64, refs)
+//! - [`FunctionType`] - Function signature with parameters and results
+//! - [`MemoryType`], [`TableType`], [`GlobalType`] - WebAssembly type definitions
+//! - [`Module`] - A parsed WebAssembly module
+//! - [`Instance`] - An instantiated module with runtime state
+//! - [`WasmError`] - Error types for validation, loading, instantiation, and runtime
+//! - [`Memory`], [`Table`], [`Global`] - Runtime objects
+
 mod error;
 mod export;
 mod import;

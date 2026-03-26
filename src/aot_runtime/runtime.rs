@@ -48,6 +48,7 @@ impl HostFunc for TypedHostImport {
     }
 }
 
+/// Ahead-of-time module state.
 pub struct AotModule {
     runtime_id: u64,
     module: Module,
@@ -61,11 +62,16 @@ pub struct AotModule {
     custom_globals: bool,
     #[cfg(feature = "llvm-jit")]
     jit_execution_active: Arc<AtomicBool>,
+    /// Registered native helper functions callable by the module.
     pub native_functions: Vec<NativeFunc>,
+    /// Defined memories owned by the module.
     pub memories: Vec<Memory>,
+    /// Defined tables owned by the module.
     pub tables: Vec<Table>,
+    /// Defined globals owned by the module.
     pub globals: Vec<Global>,
     shared_memory_mappings: HashMap<SharedMemoryMappingId, SharedMemoryMapping>,
+    /// Export map keyed by export name.
     pub exports: HashMap<String, AotExport>,
 }
 
@@ -89,17 +95,24 @@ impl std::fmt::Debug for AotModule {
     }
 }
 
+/// Type alias for `NativeFunc`.
 pub type NativeFunc = Box<dyn Fn(&[WasmValue]) -> Result<Vec<WasmValue>> + Send + Sync>;
 
 #[derive(Debug, Clone)]
+/// Export exposed by an ahead-of-time module.
 pub enum AotExport {
+    /// A function export identified by function index.
     Function(u32),
+    /// A table export identified by table index.
     Table(u32),
+    /// A memory export identified by memory index.
     Memory(u32),
+    /// A global export identified by global index.
     Global(u32),
 }
 
 impl AotModule {
+    /// Creates an ahead-of-time module from a parsed module.
     pub fn from_module(module: &Module) -> Self {
         let store_state = crate::runtime::Store::new();
         let shared_memory = store_state.shared_memory_registry();
@@ -107,6 +120,7 @@ impl AotModule {
         Self::from_module_parts(module, store, shared_memory)
     }
 
+    /// Creates an ahead-of-time module backed by the provided store.
     pub fn from_module_with_store(
         module: &Module,
         store: Arc<Mutex<crate::runtime::Store>>,
@@ -148,10 +162,12 @@ impl AotModule {
         aot_module
     }
 
+    /// Returns the underlying module.
     pub fn module(&self) -> &Module {
         &self.module
     }
 
+    /// Returns the runtime identifier for this module instance.
     pub fn runtime_id(&self) -> u64 {
         self.runtime_id
     }
@@ -171,16 +187,19 @@ impl AotModule {
         Ok(self.jit_execution_active.clone())
     }
 
+    /// Returns the declared imports.
     pub fn imports(&self) -> &[crate::runtime::Import] {
         &self.module.imports
     }
 
+    /// Registers native.
     pub fn register_native(&mut self, func: NativeFunc) -> u32 {
         let idx = self.native_functions.len() as u32;
         self.native_functions.push(func);
         idx
     }
 
+    /// Calls native.
     pub fn call_native(&self, idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.ensure_initialised()?;
         let func = self
@@ -190,6 +209,7 @@ impl AotModule {
         func(args)
     }
 
+    /// Invokes function.
     pub fn invoke_function(&mut self, idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.ensure_initialised()?;
         let (imported_memories, imported_tables, imported_globals) = self.import_counts();
@@ -255,6 +275,7 @@ impl AotModule {
         }
     }
 
+    /// Invokes import with suspension.
     pub fn invoke_import_with_suspension(
         &mut self,
         idx: u32,
@@ -271,15 +292,18 @@ impl AotModule {
         instance.call_with_suspension(idx, args)
     }
 
+    /// Returns runtime statistics for the selected instance.
     pub fn instance_stats(&self) -> Result<InstanceStats> {
         self.ensure_initialised()?;
         Ok(self.meter.snapshot(self.total_memory_pages()?))
     }
 
+    /// Returns the configured limits for the selected instance.
     pub fn instance_limits(&self) -> InstanceLimits {
         self.meter.limits()
     }
 
+    /// Sets instance limits.
     pub fn set_instance_limits(&mut self, limits: InstanceLimits) -> Result<()> {
         self.ensure_initialised()?;
         self.ensure_jit_inactive_for_external_mutation()?;
@@ -291,11 +315,13 @@ impl AotModule {
         self.meter.set_limits(limits, current_memory_pages)
     }
 
+    /// Records executed instruction units for metering.
     pub fn record_execution(&self, units: u64) -> Result<()> {
         self.ensure_initialised()?;
         self.meter.charge_execution(units)
     }
 
+    /// Registers import.
     pub fn register_import(&mut self, module: &str, name: &str, extern_: Extern) -> Result<()> {
         self.ensure_initialised()?;
         self.ensure_jit_inactive_for_external_mutation()?;
@@ -344,6 +370,7 @@ impl AotModule {
         }))
     }
 
+    /// Registers host import.
     pub fn register_host_import(
         &mut self,
         module: &str,
@@ -368,6 +395,7 @@ impl AotModule {
         )
     }
 
+    /// Registers memory import.
     pub fn register_memory_import(
         &mut self,
         module: &str,
@@ -377,10 +405,12 @@ impl AotModule {
         self.register_import(module, name, Extern::Memory(Arc::new(Mutex::new(memory))))
     }
 
+    /// Registers table import.
     pub fn register_table_import(&mut self, module: &str, name: &str, table: Table) -> Result<()> {
         self.register_import(module, name, Extern::Table(Arc::new(Mutex::new(table))))
     }
 
+    /// Registers global import.
     pub fn register_global_import(
         &mut self,
         module: &str,
@@ -390,6 +420,7 @@ impl AotModule {
         self.register_import(module, name, Extern::Global(Arc::new(Mutex::new(global))))
     }
 
+    /// Instantiates the module and resolves its imports.
     pub fn instantiate(&mut self) -> Result<()> {
         self.ensure_initialised()?;
         self.ensure_jit_inactive_for_external_mutation()?;
@@ -397,14 +428,17 @@ impl AotModule {
         Ok(())
     }
 
+    /// Returns export.
     pub fn get_export(&self, name: &str) -> Option<&AotExport> {
         self.exports.get(name)
     }
 
+    /// Returns the start function index, if one is defined.
     pub fn start_function(&self) -> Option<u32> {
         self.module.start
     }
 
+    /// Sets memory.
     pub fn set_memory(&mut self, mut memory: Memory) {
         self.ensure_jit_inactive_for_external_mutation()
             .expect("active JIT execution blocks replacing module memory");
@@ -417,6 +451,7 @@ impl AotModule {
         }
     }
 
+    /// Returns memory.
     pub fn get_memory(&self) -> Option<Memory> {
         if self.ensure_initialised().is_err() {
             return None;
@@ -429,20 +464,24 @@ impl AotModule {
         }
     }
 
+    /// Allocates shared region.
     pub fn allocate_shared_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
         self.ensure_jit_inactive_for_external_mutation()?;
         self.shared_memory.lock().allocate_region(size, alignment)
     }
 
+    /// Destroys shared region.
     pub fn destroy_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
         self.ensure_jit_inactive_for_external_mutation()?;
         self.shared_memory.lock().destroy_region(region_id)
     }
 
+    /// Returns the length of the shared region in bytes.
     pub fn shared_region_len(&self, region_id: SharedRegionId) -> Result<u32> {
         self.shared_memory.lock().region_len(region_id)
     }
 
+    /// Attaches shared region.
     pub fn attach_shared_region(
         &mut self,
         region_id: SharedRegionId,
@@ -466,6 +505,7 @@ impl AotModule {
         Ok(mapping_id)
     }
 
+    /// Attaches shared region whole.
     pub fn attach_shared_region_whole(
         &mut self,
         region_id: SharedRegionId,
@@ -474,6 +514,7 @@ impl AotModule {
         self.attach_shared_region(region_id, 0, len)
     }
 
+    /// Detaches shared region.
     pub fn detach_shared_region(&mut self, mapping_id: SharedMemoryMappingId) -> Result<()> {
         self.ensure_jit_inactive_for_external_mutation()?;
         let mapping = *self
@@ -490,6 +531,7 @@ impl AotModule {
         Ok(())
     }
 
+    /// Reads shared region.
     pub fn read_shared_region(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -500,6 +542,7 @@ impl AotModule {
         resolved.read(offset, buf)
     }
 
+    /// Writes shared region.
     pub fn write_shared_region(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -510,6 +553,7 @@ impl AotModule {
         resolved.write(offset, buf)
     }
 
+    /// Reads shared region u8.
     pub fn read_shared_region_u8(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -519,6 +563,7 @@ impl AotModule {
         resolved.read_u8(offset)
     }
 
+    /// Writes shared region u8.
     pub fn write_shared_region_u8(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -529,6 +574,7 @@ impl AotModule {
         resolved.write_u8(offset, value)
     }
 
+    /// Reads shared region i32.
     pub fn read_shared_region_i32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -538,6 +584,7 @@ impl AotModule {
         resolved.read_i32(offset)
     }
 
+    /// Writes shared region i32.
     pub fn write_shared_region_i32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -548,6 +595,7 @@ impl AotModule {
         resolved.write_i32(offset, value)
     }
 
+    /// Reads shared region i64.
     pub fn read_shared_region_i64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -557,6 +605,7 @@ impl AotModule {
         resolved.read_i64(offset)
     }
 
+    /// Writes shared region i64.
     pub fn write_shared_region_i64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -567,6 +616,7 @@ impl AotModule {
         resolved.write_i64(offset, value)
     }
 
+    /// Reads shared region f32.
     pub fn read_shared_region_f32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -576,6 +626,7 @@ impl AotModule {
         resolved.read_f32(offset)
     }
 
+    /// Writes shared region f32.
     pub fn write_shared_region_f32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -586,6 +637,7 @@ impl AotModule {
         resolved.write_f32(offset, value)
     }
 
+    /// Reads shared region f64.
     pub fn read_shared_region_f64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -595,6 +647,7 @@ impl AotModule {
         resolved.read_f64(offset)
     }
 
+    /// Writes shared region f64.
     pub fn write_shared_region_f64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -605,6 +658,7 @@ impl AotModule {
         resolved.write_f64(offset, value)
     }
 
+    /// Returns or updates memory context.
     pub fn memory_context(&mut self) -> Option<(*mut u8, usize)> {
         if self.import_counts().0 > 0 {
             None
@@ -615,6 +669,7 @@ impl AotModule {
         }
     }
 
+    /// Adds table.
     pub fn add_table(&mut self, table: Table) -> u32 {
         self.ensure_jit_inactive_for_external_mutation()
             .expect("active JIT execution blocks table mutation");
@@ -624,6 +679,7 @@ impl AotModule {
         idx
     }
 
+    /// Returns table.
     pub fn get_table(&self, idx: u32) -> Option<Table> {
         if self.ensure_initialised().is_err() {
             return None;
@@ -637,6 +693,7 @@ impl AotModule {
         }
     }
 
+    /// Adds global.
     pub fn add_global(&mut self, global: Global) -> u32 {
         self.ensure_jit_inactive_for_external_mutation()
             .expect("active JIT execution blocks global mutation");
@@ -646,6 +703,7 @@ impl AotModule {
         idx
     }
 
+    /// Returns global.
     pub fn get_global(&self, idx: u32) -> Option<Global> {
         if self.ensure_initialised().is_err() {
             return None;
@@ -659,6 +717,7 @@ impl AotModule {
         }
     }
 
+    /// Returns global mut.
     pub fn get_global_mut(&mut self, idx: u32) -> Option<&mut Global> {
         self.ensure_jit_inactive_for_external_mutation()
             .expect("active JIT execution blocks mutable global access");
@@ -671,6 +730,7 @@ impl AotModule {
         }
     }
 
+    /// Returns func count.
     pub fn get_func_count(&self) -> u32 {
         if self.ensure_initialised().is_err() {
             return 0;
@@ -678,6 +738,7 @@ impl AotModule {
         self.module.func_count()
     }
 
+    /// Grows the selected memory by the requested number of pages.
     pub fn grow_memory(&mut self, memory_idx: u32, delta: u32) -> Result<u32> {
         self.ensure_initialised()?;
         self.ensure_jit_inactive_for_external_mutation()?;
@@ -699,6 +760,7 @@ impl AotModule {
             .grow(delta)
     }
 
+    /// Returns or updates memory grow wasm.
     pub fn memory_grow_wasm(&mut self, memory_idx: u32, delta: i32) -> Result<i32> {
         self.ensure_initialised()?;
         self.resolve_memory_growth_target(memory_idx)?;
@@ -737,6 +799,7 @@ impl AotModule {
         }
     }
 
+    /// Returns or updates memory size.
     pub fn memory_size(&self, memory_idx: u32) -> Result<i32> {
         self.ensure_initialised()?;
         let imported_memories = self.import_counts().0 as u32;
@@ -753,6 +816,7 @@ impl AotModule {
             .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))
     }
 
+    /// Returns func type.
     pub fn get_func_type(&self, func_idx: u32) -> Option<&crate::runtime::FunctionType> {
         self.module.func_type(func_idx)
     }
@@ -1151,12 +1215,15 @@ impl Drop for AotModule {
     }
 }
 
+/// Ahead-of-time runtime manager.
 pub struct AotRuntime {
     loader: AotLoader,
+    /// Modules currently loaded into the runtime.
     pub modules: Vec<Box<AotModule>>,
 }
 
 impl AotRuntime {
+    /// Creates a new `AotRuntime`.
     pub fn new() -> Self {
         let shared_store = Arc::new(Mutex::new(crate::runtime::Store::new()));
         Self {
@@ -1165,6 +1232,7 @@ impl AotRuntime {
         }
     }
 
+    /// Loads module.
     pub fn load_module(&mut self, data: &[u8]) -> Result<u32> {
         let module = self.loader.load(data)?;
         let module_idx = self.modules.len() as u32;
@@ -1172,14 +1240,17 @@ impl AotRuntime {
         Ok(module_idx)
     }
 
+    /// Returns module.
     pub fn get_module(&self, idx: u32) -> Option<&AotModule> {
         self.modules.get(idx as usize).map(Box::as_ref)
     }
 
+    /// Returns module mut.
     pub fn get_module_mut(&mut self, idx: u32) -> Option<&mut AotModule> {
         self.modules.get_mut(idx as usize).map(Box::as_mut)
     }
 
+    /// Invokes the target function.
     pub fn call(
         &mut self,
         module_idx: u32,
@@ -1192,6 +1263,7 @@ impl AotRuntime {
         module.invoke_function(func_idx, args)
     }
 
+    /// Returns runtime statistics for the selected instance.
     pub fn instance_stats(&self, module_idx: u32) -> Result<InstanceStats> {
         let module = self
             .get_module(module_idx)
@@ -1199,6 +1271,7 @@ impl AotRuntime {
         module.instance_stats()
     }
 
+    /// Returns the configured limits for the selected instance.
     pub fn instance_limits(&self, module_idx: u32) -> Result<InstanceLimits> {
         let module = self
             .get_module(module_idx)
@@ -1206,6 +1279,7 @@ impl AotRuntime {
         Ok(module.instance_limits())
     }
 
+    /// Sets instance limits.
     pub fn set_instance_limits(&mut self, module_idx: u32, limits: InstanceLimits) -> Result<()> {
         let module = self
             .get_module_mut(module_idx)
@@ -1213,6 +1287,7 @@ impl AotRuntime {
         module.set_instance_limits(limits)
     }
 
+    /// Returns or updates memory grow.
     pub fn memory_grow(&mut self, module_idx: u32, delta: u32) -> Result<i32> {
         let module = self
             .get_module_mut(module_idx)
@@ -1220,6 +1295,7 @@ impl AotRuntime {
         module.grow_memory(0, delta).map(|old_size| old_size as i32)
     }
 
+    /// Returns or updates memory size.
     pub fn memory_size(&self, module_idx: u32) -> Result<i32> {
         let module = self
             .get_module(module_idx)
@@ -1227,6 +1303,7 @@ impl AotRuntime {
         module.memory_size(0)
     }
 
+    /// Returns or updates table grow.
     pub fn table_grow(&mut self, module_idx: u32, table_idx: u32, delta: u32) -> Result<i32> {
         let module = self
             .get_module_mut(module_idx)
@@ -1255,6 +1332,7 @@ impl AotRuntime {
         }
     }
 
+    /// Returns or updates table size.
     pub fn table_size(&self, module_idx: u32, table_idx: u32) -> Result<i32> {
         let module = self
             .get_module(module_idx)
@@ -1275,6 +1353,7 @@ impl AotRuntime {
         }
     }
 
+    /// Returns global value.
     pub fn get_global_value(&self, module_idx: u32, global_idx: u32) -> Result<WasmValue> {
         let module = self
             .get_module(module_idx)
@@ -1295,6 +1374,7 @@ impl AotRuntime {
         }
     }
 
+    /// Sets global value.
     pub fn set_global_value(
         &mut self,
         module_idx: u32,
@@ -1396,10 +1476,12 @@ fn validate_shared_memory_attachment<'a>(
     Ok(())
 }
 
+/// Creates aot module from wasm.
 pub fn create_aot_module_from_wasm(module: &Module) -> AotModule {
     AotModule::from_module(module)
 }
 
+/// Validates aot data.
 pub fn validate_aot_data(data: &[u8]) -> Result<()> {
     let loader = AotLoader::new();
     loader.validate(data)

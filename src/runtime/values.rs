@@ -1,17 +1,30 @@
 use crate::runtime::{RefType, Result, ValType, WasmError};
 
+/// A WebAssembly runtime value.
+///
+/// Represents values that can be stored in locals, on the stack, or in globals.
+/// Includes numeric types (i32, i64, f32, f64) and reference types (func_ref, extern_ref).
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Wasm value.
 pub enum WasmValue {
+    /// 32-bit integer.
     I32(i32),
+    /// 64-bit integer.
     I64(i64),
+    /// 32-bit floating-point.
     F32(f32),
+    /// 64-bit floating-point.
     F64(f64),
+    /// Null reference (with type).
     NullRef(RefType),
+    /// Function reference (table index).
     FuncRef(u32),
+    /// External reference (host object index).
     ExternRef(u32),
 }
 
 impl WasmValue {
+    /// Returns the WebAssembly type of this value.
     pub fn val_type(&self) -> ValType {
         match self {
             WasmValue::I32(_) => ValType::Num(crate::runtime::NumType::I32),
@@ -24,6 +37,7 @@ impl WasmValue {
         }
     }
 
+    /// Returns this value as an `i32`.
     pub fn i32(&self) -> Result<i32> {
         match self {
             WasmValue::I32(v) => Ok(*v),
@@ -31,6 +45,7 @@ impl WasmValue {
         }
     }
 
+    /// Returns this value as an `i64`.
     pub fn i64(&self) -> Result<i64> {
         match self {
             WasmValue::I64(v) => Ok(*v),
@@ -38,6 +53,7 @@ impl WasmValue {
         }
     }
 
+    /// Returns this value as an `f32`.
     pub fn f32(&self) -> Result<f32> {
         match self {
             WasmValue::F32(v) => Ok(*v),
@@ -45,6 +61,7 @@ impl WasmValue {
         }
     }
 
+    /// Returns this value as an `f64`.
     pub fn f64(&self) -> Result<f64> {
         match self {
             WasmValue::F64(v) => Ok(*v),
@@ -52,6 +69,7 @@ impl WasmValue {
         }
     }
 
+    /// Serialises this value into bytes.
     pub fn to_bytes(&self, out: &mut Vec<u8>) {
         match self {
             WasmValue::I32(v) => {
@@ -85,6 +103,7 @@ impl WasmValue {
         }
     }
 
+    /// Deserialises this value from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
         if bytes.is_empty() {
             return None;

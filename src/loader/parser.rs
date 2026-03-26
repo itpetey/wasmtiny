@@ -10,14 +10,32 @@ const MAGIC: u32 = 0x6D736100;
 const CURRENT_VERSION: u32 = 1;
 const FUNC_TYPE_FORM: u8 = 0x60;
 
+/// WebAssembly module parser.
+///
+/// Parses a binary WebAssembly module (`.wasm` file) into a [`Module`].
+///
+/// # Example
+///
+/// ```
+/// use wasmtiny::loader::Parser;
+/// use wasmtiny::runtime::Module;
+///
+/// let wasm_bytes = [0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+/// let parser = Parser::new();
+/// let module: Module = parser.parse(&wasm_bytes).unwrap();
+/// assert_eq!(module.funcs.len(), 0);
+/// ```
 #[derive(Debug)]
+/// Parser.
 pub struct Parser;
 
 impl Parser {
+    /// Creates a new `Parser`.
     pub fn new() -> Self {
         Self
     }
 
+    /// Parses a binary WebAssembly module.
     pub fn parse(&self, data: &[u8]) -> Result<Module> {
         let mut reader = BinaryReader::from_slice(data);
         self.parse_module(&mut reader)

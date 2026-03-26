@@ -5,13 +5,34 @@ use crate::runtime::{
 };
 use std::collections::HashSet;
 
+/// WebAssembly module validator.
+///
+/// Validates a WebAssembly module's structure, types, and code to ensure
+/// it conforms to the WebAssembly specification.
+///
+/// # Example
+///
+/// ```
+/// use wasmtiny::loader::{Parser, Validator};
+///
+/// let wasm_bytes = [0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+/// let parser = Parser::new();
+/// let module = parser.parse(&wasm_bytes).unwrap();
+///
+/// let validator = Validator::new();
+/// validator.validate(&module).unwrap();
+/// ```
 pub struct Validator;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FrameKind {
+    /// Variant `Function`.
     Function,
+    /// Variant `Block`.
     Block,
+    /// Variant `Loop`.
     Loop,
+    /// Variant `If`.
     If,
 }
 
@@ -27,10 +48,12 @@ struct ValidationFrame {
 }
 
 impl Validator {
+    /// Creates a new `Validator`.
     pub fn new() -> Self {
         Self
     }
 
+    /// Validates the provided WebAssembly module or binary input.
     pub fn validate(&self, module: &Module) -> Result<()> {
         self.validate_types(module)?;
         self.validate_imports(module)?;

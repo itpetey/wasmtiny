@@ -1,34 +1,70 @@
+/// WebAssembly trap codes.
+///
+/// These codes indicate the specific reason for a WebAssembly trap, which
+/// typically terminates execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Trap code.
 pub enum TrapCode {
+    /// Execution reached an unreachable instruction.
     Unreachable,
+    /// Memory access outside bounds.
     MemoryOutOfBounds,
+    /// Memory growth exceeded maximum.
     MemoryLimitExceeded,
+    /// Table access outside bounds.
     TableOutOfBounds,
+    /// Indirect call type mismatch.
     IndirectCallTypeMismatch,
+    /// Stack overflow.
     StackOverflow,
+    /// Execution budget exceeded (metering).
     ExecutionBudgetExceeded,
+    /// Integer overflow in arithmetic operation.
     IntegerOverflow,
+    /// Integer division by zero.
     IntegerDivisionByZero,
+    /// Invalid conversion to integer (e.g., NaN).
     InvalidConversionToInt,
+    /// Call indirect on null table entry.
     CallIndirectNull,
+    /// Null reference used where non-null required.
     NullReference,
+    /// Trap triggered by host.
     HostTrap,
 }
 
+/// Suspension kinds for async execution.
+///
+/// Indicates why execution was suspended (e.g., for safepoints or host calls).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Suspension kind.
 pub enum SuspensionKind {
+    /// Execution paused at a safepoint.
     Safepoint,
+    /// Execution paused for pending host call.
     HostcallPending,
 }
 
+/// WebAssembly errors.
+///
+/// Represents errors that can occur during validation, loading, instantiation,
+/// or execution of WebAssembly modules.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Wasm error.
 pub enum WasmError {
+    /// Module validation failed.
     Validation(String),
+    /// Module loading failed.
     Load(String),
+    /// Module instantiation failed.
     Instantiate(String),
+    /// Runtime error during execution.
     Runtime(String),
+    /// Execution suspended (async support).
     Suspended(SuspensionKind),
+    /// Execution trapped.
     Trap(TrapCode),
+    /// Other error.
     Other(String),
 }
 
@@ -53,6 +89,7 @@ impl std::fmt::Display for WasmError {
 
 impl std::error::Error for WasmError {}
 
+/// Result type alias for WebAssembly operations.
 pub type Result<T> = std::result::Result<T, WasmError>;
 
 impl From<std::io::Error> for WasmError {

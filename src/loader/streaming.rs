@@ -1,6 +1,10 @@
 use super::Parser;
 use crate::runtime::{Module, Result, WasmError};
 
+/// Streaming parser for incremental WebAssembly module parsing.
+///
+/// Allows parsing WebAssembly modules in chunks, useful for handling
+/// large modules or reading from streams.
 pub struct StreamingParser {
     buffer: Vec<u8>,
     module: Option<Module>,
@@ -8,6 +12,7 @@ pub struct StreamingParser {
 }
 
 impl StreamingParser {
+    /// Creates a new `StreamingParser`.
     pub fn new() -> Self {
         Self {
             buffer: Vec::new(),
@@ -16,6 +21,7 @@ impl StreamingParser {
         }
     }
 
+    /// Parses an additional chunk of WebAssembly bytes.
     pub fn parse_chunk(&mut self, data: &[u8]) -> Result<ParseState> {
         self.buffer.extend_from_slice(data);
 
@@ -35,10 +41,12 @@ impl StreamingParser {
         }
     }
 
+    /// Returns the underlying module.
     pub fn module(&self) -> Option<&Module> {
         self.module.as_ref()
     }
 
+    /// Returns the parsed module once parsing has completed.
     pub fn into_module(self) -> Option<Module> {
         self.module
     }
@@ -51,8 +59,11 @@ impl Default for StreamingParser {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The state of a streaming parse operation.
 pub enum ParseState {
+    /// Parsing completed successfully.
     Complete,
+    /// More data is needed to complete parsing.
     NeedMoreData,
 }
 

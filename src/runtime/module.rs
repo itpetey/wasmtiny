@@ -2,72 +2,120 @@ use super::{ExportType, FunctionType, GlobalType, Import, ImportKind, MemoryType
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
+/// Parsed WebAssembly module.
 pub struct Module {
+    /// Function signatures declared in the type section.
     pub types: Vec<FunctionType>,
+    /// Functions defined by the module.
     pub funcs: Vec<Func>,
+    /// Table types declared by the module.
     pub tables: Vec<TableType>,
+    /// Memory types declared by the module.
     pub memories: Vec<MemoryType>,
+    /// Global types declared by the module.
     pub globals: Vec<GlobalType>,
+    /// Initialiser expressions for defined globals.
     pub global_inits: Vec<Vec<u8>>,
+    /// Exports declared by the module.
     pub exports: Vec<ExportType>,
+    /// Imports required by the module.
     pub imports: Vec<Import>,
+    /// The optional start function index.
     pub start: Option<u32>,
+    /// Data segments declared by the module.
     pub data: Vec<DataSegment>,
+    /// Element segments declared by the module.
     pub elems: Vec<ElemSegment>,
     #[allow(dead_code)]
     names: HashMap<String, NameSection>,
 }
 
 #[derive(Debug, Clone)]
+/// A function defined in the module.
 pub struct Func {
+    /// Index into the module type section.
     pub type_idx: u32,
+    /// Locals declared by the function body.
     pub locals: Vec<Local>,
+    /// Raw function body bytes.
     pub body: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
+/// A local declaration in a function body.
 pub struct Local {
+    /// Number of locals with this type.
     pub count: u32,
+    /// Value type of the declared locals.
     pub type_: super::ValType,
 }
 
 #[derive(Debug, Clone)]
+/// A data segment declared by the module.
 pub struct DataSegment {
+    /// Whether the segment is active or passive.
     pub kind: DataKind,
+    /// Initial bytes stored in the segment.
     pub init: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
+/// The placement mode for a data segment.
 pub enum DataKind {
-    Active { memory_idx: u32, offset: Vec<u8> },
+    /// An active data segment initialised into a target memory.
+    Active {
+        /// The target memory index.
+        memory_idx: u32,
+        /// The encoded constant-expression offset.
+        offset: Vec<u8>,
+    },
+    /// A passive data segment applied by bulk-memory instructions.
     Passive,
 }
 
 #[derive(Debug, Clone)]
+/// An element segment declared by the module.
 pub struct ElemSegment {
+    /// Whether the segment is active, passive, or declarative.
     pub kind: ElemKind,
+    /// Reference type stored by the segment.
     pub type_: super::RefType,
+    /// Encoded initialiser expressions for each element.
     pub init: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
+/// The placement mode for an element segment.
 pub enum ElemKind {
-    Active { table_idx: u32, offset: Vec<u8> },
+    /// An active element segment initialised into a target table.
+    Active {
+        /// The target table index.
+        table_idx: u32,
+        /// The encoded constant-expression offset.
+        offset: Vec<u8>,
+    },
+    /// A passive element segment applied by bulk-memory instructions.
     Passive,
+    /// A declarative element segment used only for validation.
     Declarative,
 }
 
 #[derive(Debug, Clone)]
+/// Optional symbolic names captured from the custom name section.
 pub struct NameSection {
     #[allow(dead_code)]
+    /// Optional symbolic name for the module.
     pub module_name: Option<String>,
     #[allow(dead_code)]
+    /// Symbolic names keyed by function index.
     pub func_names: HashMap<u32, String>,
     #[allow(dead_code)]
+    /// Symbolic local names keyed by function index and local index.
     pub local_names: HashMap<u32, HashMap<u32, String>>,
 }
 
 impl Module {
+    /// Creates a new `Module`.
     pub fn new() -> Self {
         Self {
             types: Vec::new(),
@@ -85,10 +133,12 @@ impl Module {
         }
     }
 
+    /// Returns the function type at the given index.
     pub fn type_at(&self, idx: u32) -> Option<&FunctionType> {
         self.types.get(idx as usize)
     }
 
+    /// Returns the function at the given index.
     pub fn func_at(&self, idx: u32) -> Option<&Func> {
         let import_func_count = self
             .imports
@@ -99,6 +149,7 @@ impl Module {
         self.defined_func_at(local_idx)
     }
 
+    /// Returns or updates table at.
     pub fn table_at(&self, idx: u32) -> Option<&TableType> {
         let mut import_table_count = 0u32;
         for import in &self.imports {
@@ -114,6 +165,7 @@ impl Module {
         self.tables.get(local_idx as usize)
     }
 
+    /// Returns or updates memory at.
     pub fn memory_at(&self, idx: u32) -> Option<&MemoryType> {
         let mut import_memory_count = 0u32;
         for import in &self.imports {
@@ -129,6 +181,7 @@ impl Module {
         self.memories.get(local_idx as usize)
     }
 
+    /// Returns the global type at the given index.
     pub fn global_at(&self, idx: u32) -> Option<&GlobalType> {
         let mut import_global_count = 0u32;
         for import in &self.imports {
@@ -144,6 +197,7 @@ impl Module {
         self.globals.get(local_idx as usize)
     }
 
+    /// Returns the function signature for the given function index.
     pub fn func_type(&self, func_idx: u32) -> Option<&FunctionType> {
         let mut import_func_count = 0u32;
         for import in &self.imports {
@@ -160,10 +214,12 @@ impl Module {
         self.type_at(func.type_idx)
     }
 
+    /// Returns the export with the given name, if present.
     pub fn export(&self, name: &str) -> Option<&ExportType> {
         self.exports.iter().find(|e| e.name == name)
     }
 
+    /// Returns the total number of functions, including imports.
     pub fn func_count(&self) -> u32 {
         let import_count = self
             .imports
@@ -173,10 +229,12 @@ impl Module {
         import_count + self.funcs.len() as u32
     }
 
+    /// Returns the number of imports.
     pub fn import_count(&self) -> usize {
         self.imports.len()
     }
 
+    /// Returns func imports.
     pub fn get_func_imports(&self) -> Vec<&Import> {
         self.imports
             .iter()

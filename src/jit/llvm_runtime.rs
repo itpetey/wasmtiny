@@ -155,18 +155,22 @@ pub unsafe fn set_execution_context(
     Ok(())
 }
 
+/// Returns whether this value has execution context.
 pub fn has_execution_context() -> bool {
     LLVM_RUNTIME_CTX.with(|ctx| !ctx.borrow().current_module.is_null())
 }
 
+/// Returns the active execution context identifier, if any.
 pub fn current_execution_context_id() -> Option<u64> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_context_id)
 }
 
+/// Returns the active module fingerprint, if any.
 pub fn current_execution_module_fingerprint() -> Option<u64> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_module_fingerprint)
 }
 
+/// Returns the owning JIT identifier for the active execution context.
 pub fn current_execution_owner_jit_id() -> Option<u64> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_owner_jit_id)
 }
@@ -180,6 +184,7 @@ pub fn set_memory_context(ptr: *mut u8, len: usize) {
         .expect("null module context cannot fail");
 }
 
+/// Clears execution context.
 pub fn clear_execution_context() {
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
@@ -201,6 +206,7 @@ pub fn clear_execution_context() {
     });
 }
 
+/// Clears execution context for owner.
 pub fn clear_execution_context_for_owner(owner_jit_id: u64, force: bool) -> bool {
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
@@ -226,6 +232,7 @@ pub fn clear_execution_context_for_owner(owner_jit_id: u64, force: bool) -> bool
     })
 }
 
+/// Sets execution context pinned for owner.
 pub fn set_execution_context_pinned_for_owner(owner_jit_id: u64, pinned: bool) {
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
@@ -236,6 +243,7 @@ pub fn set_execution_context_pinned_for_owner(owner_jit_id: u64, pinned: bool) {
     })
 }
 
+/// Clears trap.
 pub fn clear_trap() {
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
@@ -244,6 +252,7 @@ pub fn clear_trap() {
     });
 }
 
+/// Configures safepoint handling for the current execution context.
 pub fn configure_safepoints(enabled: bool, requested: bool, jit_id: u64, execution_epoch: u64) {
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
@@ -257,14 +266,17 @@ pub fn configure_safepoints(enabled: bool, requested: bool, jit_id: u64, executi
     });
 }
 
+/// Takes suspended handle.
 pub fn take_suspended_handle() -> Option<SuspendedHandle> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().suspended_handle.take())
 }
 
+/// Takes runtime error.
 pub fn take_runtime_error() -> Option<String> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().runtime_error.take())
 }
 
+/// Takes trap.
 pub fn take_trap() -> Option<TrapCode> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().trap.take())
 }
@@ -391,6 +403,7 @@ fn wasm_f64_min(a: f64, b: f64) -> f64 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_has_trap() -> i32 {
     LLVM_RUNTIME_CTX.with(|ctx| {
         ctx.borrow()
@@ -402,11 +415,13 @@ pub extern "C" fn llvm_jit_has_trap() -> i32 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_trap_unreachable() {
     set_trap(TrapCode::Unreachable);
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_call_import(
     func_idx: u32,
     args_ptr: *const u64,
@@ -477,6 +492,7 @@ pub extern "C" fn llvm_jit_call_import(
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_safepoint_entry(
     func_idx: u32,
     args_ptr: *const u64,
@@ -528,6 +544,7 @@ pub extern "C" fn llvm_jit_safepoint_entry(
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_meter_tick(units: u64) {
     let Some(result) = with_current_module_mut(|module| module.record_execution(units)) else {
         set_runtime_error("missing JIT execution context for metering".to_string());
@@ -546,6 +563,7 @@ pub extern "C" fn llvm_jit_meter_tick(units: u64) {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_memory_size() -> i32 {
     let Some(result) = with_current_module_mut(|module| module.memory_size(0)) else {
         set_trap(TrapCode::HostTrap);
@@ -563,6 +581,7 @@ pub extern "C" fn llvm_jit_memory_size() -> i32 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_memory_grow(delta: i32) -> i32 {
     let Some(result) = with_current_module_mut(|module| module.memory_grow_wasm(0, delta)) else {
         set_trap(TrapCode::HostTrap);
@@ -975,6 +994,7 @@ define_store!(llvm_jit_i64_store32, 4, i64, |ptr, val| {
 });
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i32_div_s(a: i32, b: i32) -> i32 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -988,6 +1008,7 @@ pub extern "C" fn llvm_jit_i32_div_s(a: i32, b: i32) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i32_div_u(a: u32, b: u32) -> u32 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -997,6 +1018,7 @@ pub extern "C" fn llvm_jit_i32_div_u(a: u32, b: u32) -> u32 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i32_rem_s(a: i32, b: i32) -> i32 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -1006,6 +1028,7 @@ pub extern "C" fn llvm_jit_i32_rem_s(a: i32, b: i32) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i32_rem_u(a: u32, b: u32) -> u32 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -1015,6 +1038,7 @@ pub extern "C" fn llvm_jit_i32_rem_u(a: u32, b: u32) -> u32 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i64_div_s(a: i64, b: i64) -> i64 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -1028,6 +1052,7 @@ pub extern "C" fn llvm_jit_i64_div_s(a: i64, b: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i64_div_u(a: u64, b: u64) -> u64 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -1037,6 +1062,7 @@ pub extern "C" fn llvm_jit_i64_div_u(a: u64, b: u64) -> u64 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i64_rem_s(a: i64, b: i64) -> i64 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -1046,6 +1072,7 @@ pub extern "C" fn llvm_jit_i64_rem_s(a: i64, b: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i64_rem_u(a: u64, b: u64) -> u64 {
     if b == 0 {
         set_trap(TrapCode::IntegerDivisionByZero);
@@ -1055,11 +1082,13 @@ pub extern "C" fn llvm_jit_i64_rem_u(a: u64, b: u64) -> u64 {
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_f32_min(a: f32, b: f32) -> f32 {
     wasm_f32_min(a, b)
 }
 
 #[unsafe(no_mangle)]
+#[allow(missing_docs)]
 pub extern "C" fn llvm_jit_f64_min(a: f64, b: f64) -> f64 {
     wasm_f64_min(a, b)
 }
