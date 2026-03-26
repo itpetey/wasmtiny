@@ -1,9 +1,16 @@
 use crate::aot_runtime::runtime::AotModule;
 use crate::runtime::{
-    NumType, RuntimeSuspender, SuspendedHandle, TrapCode, ValType, WasmError, WasmValue,
+    NumType, RuntimeSuspender, SharedMemoryMappingId, SuspendedHandle, TrapCode, ValType,
+    WasmError, WasmValue,
 };
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ptr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 thread_local! {
     static LLVM_RUNTIME_CTX: RefCell<LlvmRuntimeContext> =
@@ -15,6 +22,9 @@ struct LlvmRuntimeContext {
     memory_len: usize,
     current_module: *mut AotModule,
     current_context_id: Option<u64>,
+    current_module_fingerprint: Option<u64>,
+    current_owner_jit_id: Option<u64>,
+    executing: bool,
     trap: Option<TrapCode>,
     safepoints_enabled: bool,
     suspend_requested: bool,
@@ -22,6 +32,8 @@ struct LlvmRuntimeContext {
     execution_epoch: u64,
     suspended_handle: Option<SuspendedHandle>,
     runtime_error: Option<String>,
+    execution_flag: Option<Arc<AtomicBool>>,
+    execution_pinned: bool,
 }
 
 impl LlvmRuntimeContext {
@@ -31,6 +43,9 @@ impl LlvmRuntimeContext {
             memory_len: 0,
             current_module: ptr::null_mut(),
             current_context_id: None,
+            current_module_fingerprint: None,
+            current_owner_jit_id: None,
+            executing: false,
             trap: None,
             safepoints_enabled: false,
             suspend_requested: false,
@@ -38,6 +53,8 @@ impl LlvmRuntimeContext {
             execution_epoch: 0,
             suspended_handle: None,
             runtime_error: None,
+            execution_flag: None,
+            execution_pinned: false,
         }
     }
 }
@@ -46,21 +63,96 @@ fn context_id_for_module(module: *mut AotModule) -> Option<u64> {
     (!module.is_null()).then(|| unsafe { (&*module).runtime_id() })
 }
 
+fn fingerprint_for_module(module: *mut AotModule) -> Option<u64> {
+    if module.is_null() {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    format!("{:?}", unsafe { (&*module).module() }).hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 /// Sets the execution context for the current thread.
 ///
 /// This must be called before invoking compiled WASM code so runtime helpers can
 /// reach the active module, linear memory, and trap state.
-pub fn set_execution_context(module: *mut AotModule, memory_ptr: *mut u8, memory_len: usize) {
+///
+/// # Safety
+///
+/// `module` must either be null or point to a live, stable `AotModule` for the
+/// full duration of any compiled code that may access the current thread-local
+/// execution context.
+pub unsafe fn set_execution_context(
+    module: *mut AotModule,
+    memory_ptr: *mut u8,
+    memory_len: usize,
+    owner_jit_id: Option<u64>,
+) -> Result<()> {
+    let refresh_pinned_context = LLVM_RUNTIME_CTX.with(|ctx| {
+        let ctx = ctx.borrow();
+        let same_owner = ctx.current_owner_jit_id == owner_jit_id;
+        let same_module = ctx.current_module == module;
+
+        if ctx.execution_pinned {
+            if same_owner && same_module {
+                return Ok(true);
+            }
+            return Err(WasmError::Runtime(
+                "cannot replace execution context while JIT execution is suspended".to_string(),
+            ));
+        }
+        if ctx.executing {
+            return Err(WasmError::Runtime(
+                "cannot replace execution context while JIT execution is active".to_string(),
+            ));
+        }
+        if ctx.current_owner_jit_id.is_some() && ctx.current_owner_jit_id != owner_jit_id {
+            return Err(WasmError::Runtime(
+                "cannot replace execution context owned by a different JIT".to_string(),
+            ));
+        }
+        Ok(false)
+    })?;
+
+    if refresh_pinned_context {
+        LLVM_RUNTIME_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            ctx.current_context_id = context_id_for_module(module);
+            ctx.current_module_fingerprint = fingerprint_for_module(module);
+            ctx.memory_ptr = memory_ptr;
+            ctx.memory_len = memory_len;
+            ctx.trap = None;
+            ctx.suspended_handle = None;
+            ctx.runtime_error = None;
+        });
+        return Ok(());
+    }
+
+    clear_execution_context();
+    let execution_flag = if module.is_null() {
+        None
+    } else {
+        Some(unsafe { (&*module).try_begin_jit_execution()? })
+    };
+
     LLVM_RUNTIME_CTX.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
         ctx.current_module = module;
         ctx.current_context_id = context_id_for_module(module);
+        ctx.current_module_fingerprint = fingerprint_for_module(module);
+        ctx.current_owner_jit_id = owner_jit_id;
+        ctx.executing = false;
         ctx.memory_ptr = memory_ptr;
         ctx.memory_len = memory_len;
         ctx.trap = None;
         ctx.suspended_handle = None;
         ctx.runtime_error = None;
+        ctx.execution_flag = execution_flag;
+        ctx.execution_pinned = false;
     });
+
+    Ok(())
 }
 
 pub fn has_execution_context() -> bool {
@@ -71,12 +163,77 @@ pub fn current_execution_context_id() -> Option<u64> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_context_id)
 }
 
+pub fn current_execution_module_fingerprint() -> Option<u64> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_module_fingerprint)
+}
+
+pub fn current_execution_owner_jit_id() -> Option<u64> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_owner_jit_id)
+}
+
 /// Sets only the memory context for the current thread.
 ///
 /// This is kept for compatibility with existing tests and callers that do not
 /// need module-backed import dispatch.
 pub fn set_memory_context(ptr: *mut u8, len: usize) {
-    set_execution_context(ptr::null_mut(), ptr, len);
+    unsafe { set_execution_context(ptr::null_mut(), ptr, len, None) }
+        .expect("null module context cannot fail");
+}
+
+pub fn clear_execution_context() {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if ctx.execution_pinned {
+            return;
+        }
+        if let Some(flag) = ctx.execution_flag.take() {
+            flag.store(false, Ordering::SeqCst);
+        }
+        ctx.current_module = ptr::null_mut();
+        ctx.current_context_id = None;
+        ctx.current_module_fingerprint = None;
+        ctx.current_owner_jit_id = None;
+        ctx.executing = false;
+        ctx.memory_ptr = ptr::null_mut();
+        ctx.memory_len = 0;
+        ctx.suspended_handle = None;
+        ctx.execution_pinned = false;
+    });
+}
+
+pub fn clear_execution_context_for_owner(owner_jit_id: u64, force: bool) -> bool {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if ctx.current_owner_jit_id != Some(owner_jit_id) {
+            return false;
+        }
+        if ctx.execution_pinned && !force {
+            return false;
+        }
+        if let Some(flag) = ctx.execution_flag.take() {
+            flag.store(false, Ordering::SeqCst);
+        }
+        ctx.current_module = ptr::null_mut();
+        ctx.current_context_id = None;
+        ctx.current_module_fingerprint = None;
+        ctx.current_owner_jit_id = None;
+        ctx.executing = false;
+        ctx.memory_ptr = ptr::null_mut();
+        ctx.memory_len = 0;
+        ctx.suspended_handle = None;
+        ctx.execution_pinned = false;
+        true
+    })
+}
+
+pub fn set_execution_context_pinned_for_owner(owner_jit_id: u64, pinned: bool) {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if ctx.current_owner_jit_id != Some(owner_jit_id) {
+            return;
+        }
+        ctx.execution_pinned = pinned;
+    })
 }
 
 pub fn clear_trap() {
@@ -94,6 +251,7 @@ pub fn configure_safepoints(enabled: bool, requested: bool, jit_id: u64, executi
         ctx.suspend_requested = requested;
         ctx.jit_id = jit_id;
         ctx.execution_epoch = execution_epoch;
+        ctx.executing = true;
         ctx.suspended_handle = None;
         ctx.runtime_error = None;
     });
@@ -428,6 +586,248 @@ pub extern "C" fn llvm_jit_memory_grow(delta: i32) -> i32 {
     value
 }
 
+macro_rules! define_shared_load {
+    ($name:ident, $ty:ty, $default:expr, $call:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(mapping_id: u64, offset: u32) -> $ty {
+            let mapping_id = SharedMemoryMappingId::from_raw(mapping_id);
+            let Some(result) = with_current_module_mut(|module| $call(module, mapping_id, offset))
+            else {
+                set_runtime_error("missing JIT execution context for shared memory".to_string());
+                set_trap(TrapCode::HostTrap);
+                return $default;
+            };
+
+            match result {
+                Ok(value) => value,
+                Err(WasmError::Trap(code)) => {
+                    set_trap(code);
+                    $default
+                }
+                Err(error) => {
+                    set_runtime_error(error.to_string());
+                    set_trap(TrapCode::HostTrap);
+                    $default
+                }
+            }
+        }
+    };
+}
+
+macro_rules! define_shared_store {
+    ($name:ident, $ty:ty, $call:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(mapping_id: u64, offset: u32, value: $ty) {
+            let mapping_id = SharedMemoryMappingId::from_raw(mapping_id);
+            let Some(result) =
+                with_current_module_mut(|module| $call(module, mapping_id, offset, value))
+            else {
+                set_runtime_error("missing JIT execution context for shared memory".to_string());
+                set_trap(TrapCode::HostTrap);
+                return;
+            };
+
+            match result {
+                Ok(()) => {}
+                Err(WasmError::Trap(code)) => set_trap(code),
+                Err(error) => {
+                    set_runtime_error(error.to_string());
+                    set_trap(TrapCode::HostTrap);
+                }
+            }
+        }
+    };
+}
+
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load,
+    i32,
+    0i32,
+    |module, mapping_id, offset| { module.read_shared_region_i32(mapping_id, offset) }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load,
+    i64,
+    0i64,
+    |module, mapping_id, offset| { module.read_shared_region_i64(mapping_id, offset) }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_f32_load,
+    f32,
+    0.0f32,
+    |module, mapping_id, offset| { module.read_shared_region_f32(mapping_id, offset) }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_f64_load,
+    f64,
+    0.0f64,
+    |module, mapping_id, offset| { module.read_shared_region_f64(mapping_id, offset) }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load8_s,
+    i32,
+    0i32,
+    |module, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i8 as i32)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load8_u,
+    i32,
+    0i32,
+    |module, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i32)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load16_s,
+    i32,
+    0i32,
+    |module, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(i16::from_le_bytes(bytes) as i32)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load16_u,
+    i32,
+    0i32,
+    |module, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(u16::from_le_bytes(bytes) as i32)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load8_s,
+    i64,
+    0i64,
+    |module, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i8 as i64)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load8_u,
+    i64,
+    0i64,
+    |module, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i64)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load16_s,
+    i64,
+    0i64,
+    |module, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(i16::from_le_bytes(bytes) as i64)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load16_u,
+    i64,
+    0i64,
+    |module, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(u16::from_le_bytes(bytes) as i64)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load32_s,
+    i64,
+    0i64,
+    |module, mapping_id, offset| {
+        let mut bytes = [0u8; 4];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(i32::from_le_bytes(bytes) as i64)
+    }
+);
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load32_u,
+    i64,
+    0i64,
+    |module, mapping_id, offset| {
+        let mut bytes = [0u8; 4];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(u32::from_le_bytes(bytes) as i64)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i32_store,
+    i32,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region_i32(mapping_id, offset, value)
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store,
+    i64,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region_i64(mapping_id, offset, value)
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_f32_store,
+    f32,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region_f32(mapping_id, offset, value)
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_f64_store,
+    f64,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region_f64(mapping_id, offset, value)
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_i32_store8,
+    i32,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region_u8(mapping_id, offset, value as u8)
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_i32_store16,
+    i32,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store8,
+    i64,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region_u8(mapping_id, offset, value as u8)
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store16,
+    i64,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
+    }
+);
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store32,
+    i64,
+    |module, mapping_id, offset, value| {
+        module.write_shared_region(mapping_id, offset, &(value as u32).to_le_bytes())
+    }
+);
+
 macro_rules! define_load {
     ($name:ident, $size:expr, $ty:ty, $default:expr, $body:expr) => {
         #[unsafe(no_mangle)]
@@ -717,12 +1117,54 @@ mod tests {
     fn test_memory_grow_internal_error_surfaces_runtime_error() {
         let mut module = AotModule::from_module(&crate::runtime::Module::new());
         clear_trap();
-        set_execution_context(&mut module, std::ptr::null_mut(), 0);
+        unsafe { set_execution_context(&mut module, std::ptr::null_mut(), 0, Some(1)) }.unwrap();
 
         let result = llvm_jit_memory_grow(1);
 
         assert_eq!(result, -1);
         assert!(take_runtime_error().unwrap().contains("memory not found"));
         assert_eq!(take_trap(), Some(TrapCode::HostTrap));
+        assert!(clear_execution_context_for_owner(1, true));
+    }
+
+    #[test]
+    fn test_shared_memory_helpers_access_attached_region() {
+        let mut module = AotModule::from_module(&crate::runtime::Module::new());
+        let region_id = module.allocate_shared_region(16, 4).unwrap();
+        let mapping_id = module.attach_shared_region_whole(region_id).unwrap();
+
+        clear_trap();
+        unsafe { set_execution_context(&mut module, std::ptr::null_mut(), 0, Some(1)) }.unwrap();
+
+        llvm_jit_shared_memory_i32_store(mapping_id.raw(), 4, 123);
+        assert_eq!(take_trap(), None);
+        assert_eq!(module.read_shared_region_i32(mapping_id, 4).unwrap(), 123);
+
+        let value = llvm_jit_shared_memory_i32_load(mapping_id.raw(), 4);
+        assert_eq!(value, 123);
+        assert_eq!(take_trap(), None);
+        assert!(clear_execution_context_for_owner(1, true));
+    }
+
+    #[test]
+    fn test_shared_memory_helper_reports_detached_mapping() {
+        let mut module = AotModule::from_module(&crate::runtime::Module::new());
+        let region_id = module.allocate_shared_region(16, 4).unwrap();
+        let mapping_id = module.attach_shared_region_whole(region_id).unwrap();
+        module.detach_shared_region(mapping_id).unwrap();
+
+        clear_trap();
+        unsafe { set_execution_context(&mut module, std::ptr::null_mut(), 0, Some(1)) }.unwrap();
+
+        let value = llvm_jit_shared_memory_i32_load(mapping_id.raw(), 0);
+
+        assert_eq!(value, 0);
+        assert_eq!(take_trap(), Some(TrapCode::HostTrap));
+        assert!(
+            take_runtime_error()
+                .unwrap()
+                .contains("detached or not attached")
+        );
+        assert!(clear_execution_context_for_owner(1, true));
     }
 }

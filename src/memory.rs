@@ -60,6 +60,12 @@ impl Memory {
 
     pub fn read(&self, offset: u32, buf: &mut [u8]) -> Result<()> {
         let offset = offset as usize;
+        if buf.is_empty() {
+            if offset > self.data.len() {
+                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+            }
+            return Ok(());
+        }
         if offset >= self.data.len() {
             return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
         }
@@ -72,6 +78,12 @@ impl Memory {
 
     pub fn write(&mut self, offset: u32, buf: &[u8]) -> Result<()> {
         let offset = offset as usize;
+        if buf.is_empty() {
+            if offset > self.data.len() {
+                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+            }
+            return Ok(());
+        }
         if offset >= self.data.len() {
             return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
         }
@@ -204,5 +216,14 @@ mod tests {
     fn test_memory_out_of_bounds() {
         let mem = Memory::new(MemoryType::new(Limits::Min(1)));
         assert!(mem.read(65536, &mut [0]).is_err());
+    }
+
+    #[test]
+    fn test_memory_zero_length_access_at_end_is_allowed() {
+        let mut mem = Memory::new(MemoryType::new(Limits::Min(1)));
+        let mut empty = [];
+
+        mem.read(65536, &mut empty).unwrap();
+        mem.write(65536, &[]).unwrap();
     }
 }

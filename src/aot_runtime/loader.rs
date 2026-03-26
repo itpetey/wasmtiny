@@ -1,25 +1,39 @@
 use crate::loader::{Parser, Validator};
 use crate::runtime::{Instance, Module, Result, WasmError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::runtime::{AotExport, AotModule};
 
 pub struct AotLoader {
     parser: Parser,
     validator: Validator,
+    store: Arc<Mutex<crate::runtime::Store>>,
 }
 
 impl AotLoader {
     pub fn new() -> Self {
+        Self::with_store(Arc::new(Mutex::new(crate::runtime::Store::new())))
+    }
+
+    pub fn with_store(store: Arc<Mutex<crate::runtime::Store>>) -> Self {
         Self {
             parser: Parser::new(),
             validator: Validator::new(),
+            store,
         }
     }
 
     pub fn load(&self, data: &[u8]) -> Result<AotModule> {
+        self.load_with_store(data, self.store.clone())
+    }
+
+    fn load_with_store(
+        &self,
+        data: &[u8],
+        store: Arc<Mutex<crate::runtime::Store>>,
+    ) -> Result<AotModule> {
         let module = self.parse_validated_module(data)?;
-        self.convert_to_aot_module(&module)
+        self.convert_to_aot_module(&module, store)
     }
 
     pub fn load_wasm(&self, data: &[u8]) -> Result<AotModule> {
@@ -36,10 +50,14 @@ impl AotLoader {
         Ok(module)
     }
 
-    fn convert_to_aot_module(&self, module: &Module) -> Result<AotModule> {
-        let mut aot_module = AotModule::from_module(module);
+    fn convert_to_aot_module(
+        &self,
+        module: &Module,
+        store: Arc<Mutex<crate::runtime::Store>>,
+    ) -> Result<AotModule> {
+        let mut aot_module = AotModule::from_module_with_store(module, store.clone())?;
         if module.imports.is_empty() {
-            let instance = Instance::new(Arc::new(module.clone()))?;
+            let instance = Instance::new_with_store(Arc::new(module.clone()), store)?;
             aot_module.memories = instance
                 .memories
                 .iter()

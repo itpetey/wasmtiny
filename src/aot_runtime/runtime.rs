@@ -2,9 +2,14 @@ use super::loader::AotLoader;
 use crate::interpreter::Interpreter;
 use crate::runtime::{
     Extern, FunctionType, Global, HostCallOutcome, HostFunc, ImportKind, Instance, InstanceLimits,
-    InstanceMeter, InstanceStats, Memory, Module, Result, Table, WasmError, WasmValue,
+    InstanceMeter, InstanceStats, Memory, Module, ResolvedSharedMemoryMapping, Result,
+    SharedMemoryMapping, SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId, Table,
+    WasmError, WasmValue,
 };
+use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
+#[cfg(feature = "llvm-jit")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -48,11 +53,19 @@ pub struct AotModule {
     module: Module,
     imports: Vec<Option<Extern>>,
     store: Arc<Mutex<crate::runtime::Store>>,
+    shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
     meter: Arc<InstanceMeter>,
+    initialisation_error: Option<WasmError>,
+    custom_memories: bool,
+    custom_tables: bool,
+    custom_globals: bool,
+    #[cfg(feature = "llvm-jit")]
+    jit_execution_active: Arc<AtomicBool>,
     pub native_functions: Vec<NativeFunc>,
     pub memories: Vec<Memory>,
     pub tables: Vec<Table>,
     pub globals: Vec<Global>,
+    shared_memory_mappings: HashMap<SharedMemoryMappingId, SharedMemoryMapping>,
     pub exports: HashMap<String, AotExport>,
 }
 
@@ -88,20 +101,50 @@ pub enum AotExport {
 
 impl AotModule {
     pub fn from_module(module: &Module) -> Self {
+        let store_state = crate::runtime::Store::new();
+        let shared_memory = store_state.shared_memory_registry();
+        let store = Arc::new(Mutex::new(store_state));
+        Self::from_module_parts(module, store, shared_memory)
+    }
+
+    pub fn from_module_with_store(
+        module: &Module,
+        store: Arc<Mutex<crate::runtime::Store>>,
+    ) -> Result<Self> {
+        let shared_memory = store
+            .lock()
+            .map_err(poisoned_lock)?
+            .shared_memory_registry();
+        Ok(Self::from_module_parts(module, store, shared_memory))
+    }
+
+    fn from_module_parts(
+        module: &Module,
+        store: Arc<Mutex<crate::runtime::Store>>,
+        shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
+    ) -> Self {
         let mut aot_module = Self {
             runtime_id: NEXT_AOT_MODULE_ID.fetch_add(1, Ordering::SeqCst),
             module: module.clone(),
             imports: vec![None; module.imports.len()],
-            store: Arc::new(Mutex::new(crate::runtime::Store::new())),
+            store,
+            shared_memory,
             meter: Arc::new(InstanceMeter::default()),
+            initialisation_error: None,
+            custom_memories: false,
+            custom_tables: false,
+            custom_globals: false,
+            #[cfg(feature = "llvm-jit")]
+            jit_execution_active: Arc::new(AtomicBool::new(false)),
             native_functions: Vec::new(),
             memories: Vec::new(),
             tables: Vec::new(),
             globals: Vec::new(),
+            shared_memory_mappings: HashMap::new(),
             exports: HashMap::new(),
         };
         aot_module.initialise_defined_allocations();
-        let _ = aot_module.initialise_globals_without_imports();
+        aot_module.initialisation_error = aot_module.initialise_globals_without_imports().err();
         aot_module
     }
 
@@ -111,6 +154,21 @@ impl AotModule {
 
     pub fn runtime_id(&self) -> u64 {
         self.runtime_id
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    pub(crate) fn try_begin_jit_execution(&self) -> Result<Arc<AtomicBool>> {
+        if self
+            .jit_execution_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(WasmError::Runtime(
+                "concurrent JIT execution for the same module is unsupported".to_string(),
+            ));
+        }
+
+        Ok(self.jit_execution_active.clone())
     }
 
     pub fn imports(&self) -> &[crate::runtime::Import] {
@@ -124,6 +182,7 @@ impl AotModule {
     }
 
     pub fn call_native(&self, idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.ensure_initialised()?;
         let func = self
             .native_functions
             .get(idx as usize)
@@ -132,6 +191,7 @@ impl AotModule {
     }
 
     pub fn invoke_function(&mut self, idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.ensure_initialised()?;
         let (imported_memories, imported_tables, imported_globals) = self.import_counts();
         let imported_funcs = self
             .module
@@ -200,6 +260,7 @@ impl AotModule {
         idx: u32,
         args: &[WasmValue],
     ) -> Result<HostCallOutcome> {
+        self.ensure_initialised()?;
         let imports = self.ordered_imports();
         let mut instance = Instance::with_imports_and_store(
             Arc::new(self.module.clone()),
@@ -211,6 +272,7 @@ impl AotModule {
     }
 
     pub fn instance_stats(&self) -> Result<InstanceStats> {
+        self.ensure_initialised()?;
         Ok(self.meter.snapshot(self.total_memory_pages()?))
     }
 
@@ -219,6 +281,8 @@ impl AotModule {
     }
 
     pub fn set_instance_limits(&mut self, limits: InstanceLimits) -> Result<()> {
+        self.ensure_initialised()?;
+        self.ensure_jit_inactive_for_external_mutation()?;
         let current_memory_pages = if limits.max_memory_pages.is_some() {
             self.total_memory_pages()?
         } else {
@@ -228,10 +292,13 @@ impl AotModule {
     }
 
     pub fn record_execution(&self, units: u64) -> Result<()> {
+        self.ensure_initialised()?;
         self.meter.charge_execution(units)
     }
 
     pub fn register_import(&mut self, module: &str, name: &str, extern_: Extern) -> Result<()> {
+        self.ensure_initialised()?;
+        self.ensure_jit_inactive_for_external_mutation()?;
         let matching_indices = self
             .module
             .imports
@@ -324,6 +391,8 @@ impl AotModule {
     }
 
     pub fn instantiate(&mut self) -> Result<()> {
+        self.ensure_initialised()?;
+        self.ensure_jit_inactive_for_external_mutation()?;
         self.materialise_defined_state_from_instance()?;
         Ok(())
     }
@@ -337,6 +406,9 @@ impl AotModule {
     }
 
     pub fn set_memory(&mut self, mut memory: Memory) {
+        self.ensure_jit_inactive_for_external_mutation()
+            .expect("active JIT execution blocks replacing module memory");
+        self.custom_memories = true;
         memory.attach_meter(&self.meter);
         if self.memories.is_empty() {
             self.memories.push(memory);
@@ -346,6 +418,9 @@ impl AotModule {
     }
 
     pub fn get_memory(&self) -> Option<Memory> {
+        if self.ensure_initialised().is_err() {
+            return None;
+        }
         if self.import_counts().0 > 0 {
             self.imported_memory(0)
                 .and_then(|memory| memory.lock().ok().map(|memory| memory.clone()))
@@ -354,14 +429,185 @@ impl AotModule {
         }
     }
 
+    pub fn allocate_shared_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
+        self.ensure_jit_inactive_for_external_mutation()?;
+        self.shared_memory.lock().allocate_region(size, alignment)
+    }
+
+    pub fn destroy_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
+        self.ensure_jit_inactive_for_external_mutation()?;
+        self.shared_memory.lock().destroy_region(region_id)
+    }
+
+    pub fn shared_region_len(&self, region_id: SharedRegionId) -> Result<u32> {
+        self.shared_memory.lock().region_len(region_id)
+    }
+
+    pub fn attach_shared_region(
+        &mut self,
+        region_id: SharedRegionId,
+        region_offset: u32,
+        len: u32,
+    ) -> Result<SharedMemoryMappingId> {
+        self.ensure_jit_inactive_for_external_mutation()?;
+        validate_shared_memory_attachment(
+            self.shared_memory_mappings.values(),
+            region_id,
+            region_offset,
+            len,
+        )?;
+
+        let mapping = self
+            .shared_memory
+            .lock()
+            .attach_region(region_id, region_offset, len)?;
+        let mapping_id = mapping.mapping_id();
+        self.shared_memory_mappings.insert(mapping_id, mapping);
+        Ok(mapping_id)
+    }
+
+    pub fn attach_shared_region_whole(
+        &mut self,
+        region_id: SharedRegionId,
+    ) -> Result<SharedMemoryMappingId> {
+        let len = self.shared_region_len(region_id)?;
+        self.attach_shared_region(region_id, 0, len)
+    }
+
+    pub fn detach_shared_region(&mut self, mapping_id: SharedMemoryMappingId) -> Result<()> {
+        self.ensure_jit_inactive_for_external_mutation()?;
+        let mapping = *self
+            .shared_memory_mappings
+            .get(&mapping_id)
+            .ok_or_else(|| {
+                WasmError::Runtime(format!(
+                    "shared memory mapping {} is detached or not attached",
+                    mapping_id.raw()
+                ))
+            })?;
+        self.shared_memory.lock().detach_region(mapping)?;
+        self.shared_memory_mappings.remove(&mapping_id);
+        Ok(())
+    }
+
+    pub fn read_shared_region(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.read(offset, buf)
+    }
+
+    pub fn write_shared_region(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+        buf: &[u8],
+    ) -> Result<()> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.write(offset, buf)
+    }
+
+    pub fn read_shared_region_u8(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+    ) -> Result<u8> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.read_u8(offset)
+    }
+
+    pub fn write_shared_region_u8(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+        value: u8,
+    ) -> Result<()> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.write_u8(offset, value)
+    }
+
+    pub fn read_shared_region_i32(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+    ) -> Result<i32> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.read_i32(offset)
+    }
+
+    pub fn write_shared_region_i32(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+        value: i32,
+    ) -> Result<()> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.write_i32(offset, value)
+    }
+
+    pub fn read_shared_region_i64(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+    ) -> Result<i64> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.read_i64(offset)
+    }
+
+    pub fn write_shared_region_i64(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+        value: i64,
+    ) -> Result<()> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.write_i64(offset, value)
+    }
+
+    pub fn read_shared_region_f32(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+    ) -> Result<f32> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.read_f32(offset)
+    }
+
+    pub fn write_shared_region_f32(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+        value: f32,
+    ) -> Result<()> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.write_f32(offset, value)
+    }
+
+    pub fn read_shared_region_f64(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+    ) -> Result<f64> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.read_f64(offset)
+    }
+
+    pub fn write_shared_region_f64(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+        offset: u32,
+        value: f64,
+    ) -> Result<()> {
+        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
+        resolved.write_f64(offset, value)
+    }
+
     pub fn memory_context(&mut self) -> Option<(*mut u8, usize)> {
         if self.import_counts().0 > 0 {
-            self.imported_memory(0).and_then(|memory| {
-                memory
-                    .lock()
-                    .ok()
-                    .map(|mut memory| (memory.as_mut_ptr(), memory.len_bytes()))
-            })
+            None
         } else {
             self.memories
                 .first_mut()
@@ -370,12 +616,18 @@ impl AotModule {
     }
 
     pub fn add_table(&mut self, table: Table) -> u32 {
+        self.ensure_jit_inactive_for_external_mutation()
+            .expect("active JIT execution blocks table mutation");
+        self.custom_tables = true;
         let idx = (self.import_counts().1 + self.tables.len()) as u32;
         self.tables.push(table);
         idx
     }
 
     pub fn get_table(&self, idx: u32) -> Option<Table> {
+        if self.ensure_initialised().is_err() {
+            return None;
+        }
         let imported_tables = self.import_counts().1 as u32;
         if idx < imported_tables {
             self.imported_table(idx)
@@ -386,12 +638,18 @@ impl AotModule {
     }
 
     pub fn add_global(&mut self, global: Global) -> u32 {
+        self.ensure_jit_inactive_for_external_mutation()
+            .expect("active JIT execution blocks global mutation");
+        self.custom_globals = true;
         let idx = (self.import_counts().2 + self.globals.len()) as u32;
         self.globals.push(global);
         idx
     }
 
     pub fn get_global(&self, idx: u32) -> Option<Global> {
+        if self.ensure_initialised().is_err() {
+            return None;
+        }
         let imported_globals = self.import_counts().2 as u32;
         if idx < imported_globals {
             self.imported_global(idx)
@@ -402,6 +660,9 @@ impl AotModule {
     }
 
     pub fn get_global_mut(&mut self, idx: u32) -> Option<&mut Global> {
+        self.ensure_jit_inactive_for_external_mutation()
+            .expect("active JIT execution blocks mutable global access");
+        self.custom_globals = true;
         let imported_globals = self.import_counts().2 as u32;
         if idx < imported_globals {
             None
@@ -411,10 +672,15 @@ impl AotModule {
     }
 
     pub fn get_func_count(&self) -> u32 {
+        if self.ensure_initialised().is_err() {
+            return 0;
+        }
         self.module.func_count()
     }
 
     pub fn grow_memory(&mut self, memory_idx: u32, delta: u32) -> Result<u32> {
+        self.ensure_initialised()?;
+        self.ensure_jit_inactive_for_external_mutation()?;
         self.resolve_memory_growth_target(memory_idx)?;
         let new_total_pages = self
             .total_memory_pages()?
@@ -434,6 +700,7 @@ impl AotModule {
     }
 
     pub fn memory_grow_wasm(&mut self, memory_idx: u32, delta: i32) -> Result<i32> {
+        self.ensure_initialised()?;
         self.resolve_memory_growth_target(memory_idx)?;
 
         let Ok(delta) = u32::try_from(delta) else {
@@ -471,6 +738,7 @@ impl AotModule {
     }
 
     pub fn memory_size(&self, memory_idx: u32) -> Result<i32> {
+        self.ensure_initialised()?;
         let imported_memories = self.import_counts().0 as u32;
         if memory_idx < imported_memories {
             let memory = self
@@ -577,6 +845,7 @@ impl AotModule {
     }
 
     fn materialise_defined_state_from_instance(&mut self) -> Result<()> {
+        self.ensure_initialised()?;
         let (imported_memories, imported_tables, imported_globals) = self.import_counts();
         let imports = self.ordered_imports();
         let instance = Instance::with_imports_and_store(
@@ -587,39 +856,45 @@ impl AotModule {
         let mut instance = instance;
         instance.set_meter(self.meter.clone())?;
 
-        self.memories = instance
-            .memories
-            .iter()
-            .skip(imported_memories)
-            .map(|memory| {
-                memory
-                    .lock()
-                    .map_err(poisoned_lock)
-                    .map(|memory| memory.clone())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.tables = instance
-            .tables
-            .iter()
-            .skip(imported_tables)
-            .map(|table| {
-                table
-                    .lock()
-                    .map_err(poisoned_lock)
-                    .map(|table| table.clone())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.globals = instance
-            .globals
-            .iter()
-            .skip(imported_globals)
-            .map(|global| {
-                global
-                    .lock()
-                    .map_err(poisoned_lock)
-                    .map(|global| global.clone())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        if !self.custom_memories {
+            self.memories = instance
+                .memories
+                .iter()
+                .skip(imported_memories)
+                .map(|memory| {
+                    memory
+                        .lock()
+                        .map_err(poisoned_lock)
+                        .map(|memory| memory.clone())
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
+        if !self.custom_tables {
+            self.tables = instance
+                .tables
+                .iter()
+                .skip(imported_tables)
+                .map(|table| {
+                    table
+                        .lock()
+                        .map_err(poisoned_lock)
+                        .map(|table| table.clone())
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
+        if !self.custom_globals {
+            self.globals = instance
+                .globals
+                .iter()
+                .skip(imported_globals)
+                .map(|global| {
+                    global
+                        .lock()
+                        .map_err(poisoned_lock)
+                        .map(|global| global.clone())
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
 
         Ok(())
     }
@@ -734,6 +1009,48 @@ impl AotModule {
             .collect()
     }
 
+    fn ensure_initialised(&self) -> Result<()> {
+        if let Some(error) = &self.initialisation_error {
+            return Err(error.clone());
+        }
+
+        Ok(())
+    }
+
+    fn ensure_jit_inactive_for_external_mutation(&self) -> Result<()> {
+        #[cfg(feature = "llvm-jit")]
+        if self.jit_execution_active.load(Ordering::SeqCst) {
+            return Err(WasmError::Runtime(
+                "cannot mutate AOT module while JIT execution is active".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn shared_memory_mapping_or_error(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+    ) -> Result<SharedMemoryMapping> {
+        self.shared_memory_mappings
+            .get(&mapping_id)
+            .copied()
+            .ok_or_else(|| {
+                WasmError::Runtime(format!(
+                    "shared memory mapping {} is detached or not attached",
+                    mapping_id.raw()
+                ))
+            })
+    }
+
+    fn resolve_shared_memory_mapping(
+        &self,
+        mapping_id: SharedMemoryMappingId,
+    ) -> Result<ResolvedSharedMemoryMapping> {
+        let mapping = self.shared_memory_mapping_or_error(mapping_id)?;
+        self.shared_memory.lock().resolve_mapping(mapping)
+    }
+
     fn validate_import_binding(
         &self,
         import_idx: usize,
@@ -816,30 +1133,51 @@ impl AotModule {
     }
 }
 
+impl Drop for AotModule {
+    fn drop(&mut self) {
+        #[cfg(feature = "llvm-jit")]
+        if self.jit_execution_active.load(Ordering::SeqCst) {
+            panic!("dropping an AOT module with an active JIT execution context is unsupported");
+        }
+
+        if self.shared_memory_mappings.is_empty() {
+            return;
+        }
+
+        let mut shared_memory = self.shared_memory.lock();
+        for mapping in self.shared_memory_mappings.values().copied() {
+            let _ = shared_memory.detach_region(mapping);
+        }
+    }
+}
+
 pub struct AotRuntime {
-    pub modules: Vec<AotModule>,
+    loader: AotLoader,
+    pub modules: Vec<Box<AotModule>>,
 }
 
 impl AotRuntime {
     pub fn new() -> Self {
+        let shared_store = Arc::new(Mutex::new(crate::runtime::Store::new()));
         Self {
+            loader: AotLoader::with_store(shared_store),
             modules: Vec::new(),
         }
     }
 
     pub fn load_module(&mut self, data: &[u8]) -> Result<u32> {
-        let module = AotLoader::new().load(data)?;
+        let module = self.loader.load(data)?;
         let module_idx = self.modules.len() as u32;
-        self.modules.push(module);
+        self.modules.push(Box::new(module));
         Ok(module_idx)
     }
 
     pub fn get_module(&self, idx: u32) -> Option<&AotModule> {
-        self.modules.get(idx as usize)
+        self.modules.get(idx as usize).map(Box::as_ref)
     }
 
     pub fn get_module_mut(&mut self, idx: u32) -> Option<&mut AotModule> {
-        self.modules.get_mut(idx as usize)
+        self.modules.get_mut(idx as usize).map(Box::as_mut)
     }
 
     pub fn call(
@@ -1041,6 +1379,21 @@ fn evaluate_const_expr_without_globals(expr: &[u8]) -> Result<WasmValue> {
 
 fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
     WasmError::Runtime("instance lock poisoned".to_string())
+}
+
+fn validate_shared_memory_attachment<'a>(
+    mut mappings: impl Iterator<Item = &'a SharedMemoryMapping>,
+    region_id: SharedRegionId,
+    region_offset: u32,
+    len: u32,
+) -> Result<()> {
+    if mappings.any(|mapping| mapping.overlaps_region_range(region_id, region_offset, len)) {
+        return Err(WasmError::Runtime(
+            "overlapping shared memory attachments are unsupported".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn create_aot_module_from_wasm(module: &Module) -> AotModule {
@@ -1491,7 +1844,7 @@ mod tests {
             .unwrap();
 
         let mut runtime = AotRuntime::new();
-        runtime.modules.push(aot_module);
+        runtime.modules.push(Box::new(aot_module));
 
         assert_eq!(runtime.memory_size(0).unwrap(), 2);
     }
@@ -1524,10 +1877,83 @@ mod tests {
             .unwrap();
 
         let mut runtime = AotRuntime::new();
-        runtime.modules.push(aot_module);
+        runtime.modules.push(Box::new(aot_module));
 
         assert_eq!(runtime.memory_size(0).unwrap(), 1);
         assert_eq!(runtime.get_global_value(0, 0).unwrap(), WasmValue::I32(7));
+    }
+
+    #[test]
+    fn test_aot_module_drop_detaches_shared_regions() {
+        let (shared_memory, region_id) = {
+            let mut module = AotModule::from_module(&Module::new());
+            let shared_memory = module.shared_memory.clone();
+            let region_id = module.allocate_shared_region(8, 4).unwrap();
+            let _mapping = module.attach_shared_region_whole(region_id).unwrap();
+            (shared_memory, region_id)
+        };
+
+        shared_memory.lock().destroy_region(region_id).unwrap();
+    }
+
+    #[test]
+    fn test_aot_shared_region_access_detach_and_alignment_failures() {
+        let mut module = AotModule::from_module(&Module::new());
+        let region_id = module.allocate_shared_region(16, 8).unwrap();
+
+        let misaligned_attach = module.attach_shared_region(region_id, 4, 8).unwrap_err();
+        assert!(matches!(
+            misaligned_attach,
+            WasmError::Runtime(message) if message.contains("attachment offset")
+        ));
+
+        let mapping_id = module.attach_shared_region(region_id, 8, 8).unwrap();
+        module.write_shared_region_i32(mapping_id, 0, 21).unwrap();
+        module.write_shared_region_i32(mapping_id, 4, 31).unwrap();
+        assert_eq!(module.read_shared_region_i32(mapping_id, 0).unwrap(), 21);
+        assert_eq!(
+            module.read_shared_region_i64(mapping_id, 0).unwrap(),
+            31i64 << 32 | 21i64
+        );
+
+        module.detach_shared_region(mapping_id).unwrap();
+        let detached_read = module.read_shared_region_i32(mapping_id, 0).unwrap_err();
+        assert!(matches!(
+            detached_read,
+            WasmError::Runtime(message) if message.contains("detached or not attached")
+        ));
+
+        module.destroy_shared_region(region_id).unwrap();
+    }
+
+    #[test]
+    fn test_aot_shared_region_visibility_across_modules() {
+        let store = Arc::new(Mutex::new(crate::runtime::Store::new()));
+        let mut first = AotModule::from_module_with_store(&Module::new(), store.clone()).unwrap();
+        let mut second = AotModule::from_module_with_store(&Module::new(), store).unwrap();
+
+        let region_id = first.allocate_shared_region(16, 4).unwrap();
+        let first_mapping = first.attach_shared_region_whole(region_id).unwrap();
+        let second_mapping = second.attach_shared_region(region_id, 0, 16).unwrap();
+
+        first.write_shared_region_i32(first_mapping, 0, 33).unwrap();
+        assert_eq!(
+            second.read_shared_region_i32(second_mapping, 0).unwrap(),
+            33
+        );
+
+        second
+            .write_shared_region(second_mapping, 4, &[1, 2, 3, 4])
+            .unwrap();
+        let mut buf = [0u8; 4];
+        first
+            .read_shared_region(first_mapping, 4, &mut buf)
+            .unwrap();
+        assert_eq!(buf, [1, 2, 3, 4]);
+
+        first.detach_shared_region(first_mapping).unwrap();
+        second.detach_shared_region(second_mapping).unwrap();
+        first.destroy_shared_region(region_id).unwrap();
     }
 
     #[test]
@@ -1761,7 +2187,7 @@ mod tests {
             .unwrap();
 
         let mut runtime = AotRuntime::new();
-        runtime.modules.push(aot_module);
+        runtime.modules.push(Box::new(aot_module));
 
         assert_eq!(runtime.get_global_value(0, 0).unwrap(), WasmValue::I32(1));
         assert!(runtime.set_global_value(0, 0, WasmValue::I32(2)).is_err());

@@ -5,7 +5,9 @@ use crate::runtime::{
     SuspensionState, ValType, WasmError, WasmValue,
 };
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::CString;
+use std::hash::{Hash, Hasher};
 use std::ptr;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,7 +43,9 @@ use llvm_sys::target::{
 
 #[cfg(feature = "llvm-jit")]
 use super::llvm_runtime::{
-    clear_trap, configure_safepoints, current_execution_context_id, has_execution_context,
+    clear_execution_context_for_owner, clear_trap, configure_safepoints,
+    current_execution_context_id, current_execution_module_fingerprint,
+    current_execution_owner_jit_id, has_execution_context, set_execution_context_pinned_for_owner,
     take_runtime_error, take_suspended_handle, take_trap,
 };
 use super::wasm_to_llvm::WasmToLlvmTranslator;
@@ -58,9 +62,8 @@ struct CompiledFunction {
 ///
 /// # Thread Safety
 ///
-/// The JIT instance can be shared across threads, but compiled functions must
-/// be invoked with the memory context set for the calling thread using
-/// [`set_memory_context`][crate::jit::set_memory_context].
+/// The JIT instance can be shared across threads, but a given module execution
+/// context must only be active on one thread at a time.
 ///
 /// # Example
 ///
@@ -78,6 +81,7 @@ pub struct LlvmJit {
     #[cfg(feature = "llvm-jit")]
     main_dylib: LLVMOrcJITDylibRef,
     compiled_functions: HashMap<u32, CompiledFunction>,
+    compiled_module_fingerprint: Option<u64>,
     #[cfg(feature = "llvm-jit")]
     helpers_registered: bool,
     safepoints_enabled: bool,
@@ -88,6 +92,12 @@ pub struct LlvmJit {
     jit_id: u64,
     execution_epoch: u64,
     last_execution_thread: Option<ThreadId>,
+}
+
+fn module_fingerprint(module: &Module) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{:?}", module).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A compiled WASM function ready for execution.
@@ -121,6 +131,16 @@ impl LlvmJit {
 
     #[cfg(feature = "llvm-jit")]
     fn validate_module_compatibility(module: &Module) -> Result<()> {
+        if module
+            .imports
+            .iter()
+            .any(|import| matches!(import.kind, crate::runtime::ImportKind::Memory(_)))
+        {
+            return Err(WasmError::Runtime(
+                "LLVM JIT does not support imported memories".to_string(),
+            ));
+        }
+
         for (type_idx, func_type) in module.types.iter().enumerate() {
             if func_type.results.len() > 1 {
                 return Err(WasmError::Runtime(format!(
@@ -213,6 +233,7 @@ impl LlvmJit {
                 lljit,
                 main_dylib,
                 compiled_functions: HashMap::new(),
+                compiled_module_fingerprint: None,
                 helpers_registered: false,
                 safepoints_enabled: false,
                 suspend_requested: false,
@@ -261,8 +282,44 @@ impl LlvmJit {
         self.suspended_handle.take()
     }
 
+    pub(crate) fn jit_id(&self) -> u64 {
+        self.jit_id
+    }
+
     pub fn is_suspended(&self) -> bool {
         self.active_suspension_id.is_some() || self.resumed_state.is_some()
+    }
+
+    pub fn cancel_suspended_execution(&mut self) -> Result<()> {
+        let had_suspended_state = self.is_suspended();
+        if let Some(thread_id) = self.last_execution_thread
+            && thread_id != std::thread::current().id()
+            && had_suspended_state
+        {
+            return Err(WasmError::Runtime(
+                "cross-thread JIT cancellation is unsupported".to_string(),
+            ));
+        }
+
+        if let Some(handle) = &self.suspended_handle {
+            handle.cancel();
+        }
+
+        self.suspended_handle = None;
+        self.active_suspension_id = None;
+        self.resumed_state = None;
+        self.suspend_requested = false;
+        let owned_context = current_execution_owner_jit_id() == Some(self.jit_id);
+        if owned_context {
+            set_execution_context_pinned_for_owner(self.jit_id, false);
+        }
+        let cleared_owned_context = clear_execution_context_for_owner(self.jit_id, true);
+        if (had_suspended_state || owned_context) && !cleared_owned_context {
+            return Err(WasmError::Runtime(
+                "failed to clear owned JIT execution context".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn try_resume(&mut self, handle: &SuspendedHandle) -> Result<()> {
@@ -298,6 +355,12 @@ impl LlvmJit {
             ));
         }
 
+        if handle.jit_id().is_none() {
+            return Err(WasmError::Runtime(
+                "suspended handle is not owned by the JIT engine".to_string(),
+            ));
+        }
+
         let state = handle
             .resume()
             .map_err(|e| WasmError::Runtime(format!("resume failed: {}", e)))?;
@@ -313,48 +376,61 @@ impl LlvmJit {
     }
 
     pub fn continue_execution(&mut self) -> Result<Vec<WasmValue>> {
-        if self.last_execution_thread != Some(std::thread::current().id()) {
-            return Err(WasmError::Runtime(
-                "cross-thread JIT continue is unsupported".to_string(),
-            ));
+        let result = (|| {
+            if self.last_execution_thread != Some(std::thread::current().id()) {
+                return Err(WasmError::Runtime(
+                    "cross-thread JIT continue is unsupported".to_string(),
+                ));
+            }
+
+            if !has_execution_context() {
+                return Err(WasmError::Runtime(
+                    "JIT continue requires a current execution context".to_string(),
+                ));
+            }
+
+            if let Some(JitState::Pending { context_id, .. }) = self.resumed_state.as_ref()
+                && current_execution_context_id() != Some(*context_id)
+            {
+                return Err(WasmError::Runtime(
+                    "JIT continue requires the original execution context".to_string(),
+                ));
+            }
+
+            let state = self.resumed_state.take().ok_or_else(|| {
+                WasmError::Runtime("no resumed JIT state to continue".to_string())
+            })?;
+
+            match state {
+                JitState::Pending {
+                    func_idx,
+                    args,
+                    jit_id: _,
+                    execution_epoch: _,
+                    context_id: _,
+                    resume_pc: 0,
+                } => self.invoke_function_internal(func_idx, &args, false),
+                JitState::Pending { resume_pc, .. } => Err(WasmError::Runtime(format!(
+                    "unsupported JIT resume pc {}",
+                    resume_pc
+                ))),
+                JitState::Suspended { .. } => Err(WasmError::Runtime(
+                    "unsupported JIT suspended register state".to_string(),
+                )),
+            }
+        })();
+
+        if !matches!(result, Err(WasmError::Suspended(_))) {
+            let owned_context = current_execution_owner_jit_id() == Some(self.jit_id);
+            let cleared_owned_context = clear_execution_context_for_owner(self.jit_id, false);
+            if owned_context && !cleared_owned_context && result.is_ok() {
+                return Err(WasmError::Runtime(
+                    "failed to clear owned JIT execution context".to_string(),
+                ));
+            }
         }
 
-        if !has_execution_context() {
-            return Err(WasmError::Runtime(
-                "JIT continue requires a current execution context".to_string(),
-            ));
-        }
-
-        if let Some(JitState::Pending { context_id, .. }) = self.resumed_state.as_ref()
-            && current_execution_context_id() != Some(*context_id)
-        {
-            return Err(WasmError::Runtime(
-                "JIT continue requires the original execution context".to_string(),
-            ));
-        }
-
-        let state = self
-            .resumed_state
-            .take()
-            .ok_or_else(|| WasmError::Runtime("no resumed JIT state to continue".to_string()))?;
-
-        match state {
-            JitState::Pending {
-                func_idx,
-                args,
-                jit_id: _,
-                execution_epoch: _,
-                context_id: _,
-                resume_pc: 0,
-            } => self.invoke_function_internal(func_idx, &args, false),
-            JitState::Pending { resume_pc, .. } => Err(WasmError::Runtime(format!(
-                "unsupported JIT resume pc {}",
-                resume_pc
-            ))),
-            JitState::Suspended { .. } => Err(WasmError::Runtime(
-                "unsupported JIT suspended register state".to_string(),
-            )),
-        }
+        result
     }
 
     #[cfg(feature = "llvm-jit")]
@@ -390,6 +466,98 @@ impl LlvmJit {
         register_helper!("llvm_jit_i64_store8", llvm_jit_i64_store8 as *const u8);
         register_helper!("llvm_jit_i64_store16", llvm_jit_i64_store16 as *const u8);
         register_helper!("llvm_jit_i64_store32", llvm_jit_i64_store32 as *const u8);
+        register_helper!(
+            "llvm_jit_shared_memory_i32_load",
+            llvm_jit_shared_memory_i32_load as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_load",
+            llvm_jit_shared_memory_i64_load as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_f32_load",
+            llvm_jit_shared_memory_f32_load as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_f64_load",
+            llvm_jit_shared_memory_f64_load as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i32_load8_s",
+            llvm_jit_shared_memory_i32_load8_s as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i32_load8_u",
+            llvm_jit_shared_memory_i32_load8_u as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i32_load16_s",
+            llvm_jit_shared_memory_i32_load16_s as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i32_load16_u",
+            llvm_jit_shared_memory_i32_load16_u as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_load8_s",
+            llvm_jit_shared_memory_i64_load8_s as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_load8_u",
+            llvm_jit_shared_memory_i64_load8_u as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_load16_s",
+            llvm_jit_shared_memory_i64_load16_s as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_load16_u",
+            llvm_jit_shared_memory_i64_load16_u as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_load32_s",
+            llvm_jit_shared_memory_i64_load32_s as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_load32_u",
+            llvm_jit_shared_memory_i64_load32_u as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i32_store",
+            llvm_jit_shared_memory_i32_store as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_store",
+            llvm_jit_shared_memory_i64_store as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_f32_store",
+            llvm_jit_shared_memory_f32_store as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_f64_store",
+            llvm_jit_shared_memory_f64_store as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i32_store8",
+            llvm_jit_shared_memory_i32_store8 as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i32_store16",
+            llvm_jit_shared_memory_i32_store16 as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_store8",
+            llvm_jit_shared_memory_i64_store8 as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_store16",
+            llvm_jit_shared_memory_i64_store16 as *const u8
+        );
+        register_helper!(
+            "llvm_jit_shared_memory_i64_store32",
+            llvm_jit_shared_memory_i64_store32 as *const u8
+        );
         register_helper!("llvm_jit_i32_div_s", llvm_jit_i32_div_s as *const u8);
         register_helper!("llvm_jit_i32_div_u", llvm_jit_i32_div_u as *const u8);
         register_helper!("llvm_jit_i32_rem_s", llvm_jit_i32_rem_s as *const u8);
@@ -437,6 +605,13 @@ impl LlvmJit {
     #[cfg(feature = "llvm-jit")]
     pub fn compile_module(&mut self, module: &Module) -> Result<Vec<CompiledLlvmFunction>> {
         Self::validate_module_compatibility(module)?;
+        if self.is_suspended() {
+            return Err(WasmError::Runtime(
+                "cannot recompile a module while JIT suspension is pending".to_string(),
+            ));
+        }
+        self.compiled_functions.clear();
+        self.compiled_module_fingerprint = Some(module_fingerprint(module));
 
         if !self.helpers_registered {
             self.register_runtime_helpers()?;
@@ -670,7 +845,17 @@ impl LlvmJit {
     /// The same requirement applies before calling `continue_execution()`.
     #[cfg(feature = "llvm-jit")]
     pub fn invoke_function(&mut self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self.invoke_function_internal(func_idx, args, true)
+        let result = self.invoke_function_internal(func_idx, args, true);
+        if !matches!(result, Err(WasmError::Suspended(_))) {
+            let owned_context = current_execution_owner_jit_id() == Some(self.jit_id);
+            let cleared_owned_context = clear_execution_context_for_owner(self.jit_id, false);
+            if owned_context && !cleared_owned_context && result.is_ok() {
+                return Err(WasmError::Runtime(
+                    "failed to clear owned JIT execution context".to_string(),
+                ));
+            }
+        }
+        result
     }
 
     #[cfg(feature = "llvm-jit")]
@@ -705,6 +890,15 @@ impl LlvmJit {
                     "JIT continue requires a current execution context".to_string(),
                 ));
             }
+            set_execution_context_pinned_for_owner(self.jit_id, false);
+        }
+
+        if let Some(expected) = self.compiled_module_fingerprint
+            && current_execution_module_fingerprint() != Some(expected)
+        {
+            return Err(WasmError::Runtime(
+                "JIT execution context does not match the compiled module".to_string(),
+            ));
         }
 
         let clear_requested = |jit: &mut Self| {
@@ -773,6 +967,7 @@ impl LlvmJit {
                 self.active_suspension_id = Some(handle.instance_id());
                 self.suspended_handle = Some(handle);
                 self.suspend_requested = false;
+                set_execution_context_pinned_for_owner(self.jit_id, true);
                 return Err(WasmError::Suspended(SuspensionKind::Safepoint));
             }
 
@@ -806,6 +1001,12 @@ impl LlvmJit {
 #[cfg(feature = "llvm-jit")]
 impl Drop for LlvmJit {
     fn drop(&mut self) {
+        if let Err(error) = self.cancel_suspended_execution() {
+            panic!(
+                "failed to cancel suspended JIT execution during drop: {}",
+                error
+            );
+        }
         unsafe {
             if !self.lljit.is_null() {
                 LLVMOrcDisposeLLJIT(self.lljit);
@@ -823,10 +1024,11 @@ impl Drop for LlvmJit {
 mod tests {
     use super::*;
     use crate::aot_runtime::runtime::AotModule;
+    use crate::interpreter::{ControlStack, OperandStack};
     use crate::jit::set_execution_context;
     use crate::runtime::{
         Func, FunctionType, HostCallOutcome, HostFunc, Import, ImportKind, InstanceLimits, Limits,
-        Module, NumType, ValType, WasmValue,
+        Module, NumType, RuntimeSuspender, ValType, WasmValue,
     };
     use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -838,16 +1040,20 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn set_jit_context(module: &Module) -> Box<AotModule> {
+    fn set_jit_context(module: &Module, owner_jit_id: u64) -> Box<AotModule> {
         let mut aot_module = Box::new(AotModule::from_module(module));
         let memory_context = aot_module
             .memory_context()
             .unwrap_or((std::ptr::null_mut(), 0));
-        set_execution_context(
-            &mut *aot_module as *mut _,
-            memory_context.0,
-            memory_context.1,
-        );
+        unsafe {
+            set_execution_context(
+                &mut *aot_module as *mut _,
+                memory_context.0,
+                memory_context.1,
+                Some(owner_jit_id),
+            )
+        }
+        .unwrap();
         aot_module
     }
 
@@ -970,7 +1176,7 @@ mod tests {
         let module = create_i32_const_module();
         jit.compile_module(&module).unwrap();
 
-        let aot_module = set_jit_context(&module);
+        let aot_module = set_jit_context(&module, jit.jit_id());
         let first = jit.invoke_function(0, &[]).unwrap();
         assert_eq!(first, vec![WasmValue::I32(42)]);
         let first_stats = aot_module.instance_stats().unwrap();
@@ -989,7 +1195,7 @@ mod tests {
         let module = create_budget_module();
         jit.compile_module(&module).unwrap();
 
-        let mut aot_module = set_jit_context(&module);
+        let mut aot_module = set_jit_context(&module, jit.jit_id());
         aot_module
             .set_instance_limits(InstanceLimits::new(Some(2), None))
             .unwrap();
@@ -1008,7 +1214,7 @@ mod tests {
         let module = create_memory_grow_module();
         jit.compile_module(&module).unwrap();
 
-        let mut aot_module = set_jit_context(&module);
+        let mut aot_module = set_jit_context(&module, jit.jit_id());
         aot_module
             .set_instance_limits(InstanceLimits::new(None, Some(1)))
             .unwrap();
@@ -1029,7 +1235,7 @@ mod tests {
         let module = create_memory_grow_fail_module();
         jit.compile_module(&module).unwrap();
 
-        let aot_module = set_jit_context(&module);
+        let aot_module = set_jit_context(&module, jit.jit_id());
         let result = jit.invoke_function(0, &[]).unwrap();
 
         assert_eq!(result, vec![WasmValue::I32(-1)]);
@@ -1043,7 +1249,7 @@ mod tests {
         let module = create_i32_const_module();
         jit.compile_module(&module).unwrap();
 
-        let aot_module = set_jit_context(&module);
+        let aot_module = set_jit_context(&module, jit.jit_id());
         aot_module.record_execution(u64::MAX).unwrap();
 
         let error = jit.invoke_function(0, &[]).unwrap_err();
@@ -1075,7 +1281,7 @@ mod tests {
         let mut jit = LlvmJit::new("test_i32_const").unwrap();
         let module = create_i32_const_module();
         jit.compile_module(&module).unwrap();
-        let _aot_module = set_jit_context(&module);
+        let _aot_module = set_jit_context(&module, jit.jit_id());
 
         let result = jit.invoke_function(0, &[]).unwrap();
         assert_eq!(result.len(), 1);
@@ -1158,7 +1364,7 @@ mod tests {
         jit.enable_safepoints();
         jit.request_safepoint().unwrap();
 
-        let _aot_module = set_jit_context(&module);
+        let _aot_module = set_jit_context(&module, jit.jit_id());
 
         let result = jit.invoke_function(0, &[]);
         assert!(matches!(
@@ -1184,7 +1390,7 @@ mod tests {
         jit.enable_safepoints();
         jit.request_safepoint().unwrap();
 
-        let mut aot_module = set_jit_context(&module);
+        let mut aot_module = set_jit_context(&module, jit.jit_id());
 
         let result = jit.invoke_function(0, &[]);
         assert!(matches!(
@@ -1195,22 +1401,25 @@ mod tests {
         let handle = jit.take_suspended_handle().unwrap();
         jit.try_resume(&handle).unwrap();
 
-        set_execution_context(std::ptr::null_mut(), std::ptr::null_mut(), 0);
-
-        let failed = jit.continue_execution();
+        let failed =
+            unsafe { set_execution_context(std::ptr::null_mut(), std::ptr::null_mut(), 0, None) };
         assert!(matches!(
             failed,
-            Err(WasmError::Runtime(msg)) if msg.contains("current execution context")
+            Err(WasmError::Runtime(msg)) if msg.contains("cannot replace execution context")
         ));
 
         let memory_context = aot_module
             .memory_context()
             .unwrap_or((std::ptr::null_mut(), 0));
-        set_execution_context(
-            &mut *aot_module as *mut _,
-            memory_context.0,
-            memory_context.1,
-        );
+        unsafe {
+            set_execution_context(
+                &mut *aot_module as *mut _,
+                memory_context.0,
+                memory_context.1,
+                Some(jit.jit_id()),
+            )
+        }
+        .unwrap();
         let resumed = jit.continue_execution().unwrap();
         assert_eq!(resumed, vec![WasmValue::I32(42)]);
     }
@@ -1224,7 +1433,7 @@ mod tests {
         jit.enable_safepoints();
         jit.request_safepoint().unwrap();
 
-        let mut original_aot_module = set_jit_context(&module);
+        let mut original_aot_module = set_jit_context(&module, jit.jit_id());
         let result = jit.invoke_function(0, &[]);
         assert!(matches!(
             result,
@@ -1234,21 +1443,31 @@ mod tests {
         let handle = jit.take_suspended_handle().unwrap();
         jit.try_resume(&handle).unwrap();
 
-        let _wrong_aot_module = set_jit_context(&module);
-        let failed = jit.continue_execution();
+        let failed = unsafe {
+            set_execution_context(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                Some(jit.jit_id()),
+            )
+        };
         assert!(matches!(
             failed,
-            Err(WasmError::Runtime(msg)) if msg.contains("original execution context")
+            Err(WasmError::Runtime(msg)) if msg.contains("cannot replace execution context")
         ));
 
         let memory_context = original_aot_module
             .memory_context()
             .unwrap_or((std::ptr::null_mut(), 0));
-        set_execution_context(
-            &mut *original_aot_module as *mut _,
-            memory_context.0,
-            memory_context.1,
-        );
+        unsafe {
+            set_execution_context(
+                &mut *original_aot_module as *mut _,
+                memory_context.0,
+                memory_context.1,
+                Some(jit.jit_id()),
+            )
+        }
+        .unwrap();
         let resumed = jit.continue_execution().unwrap();
         assert_eq!(resumed, vec![WasmValue::I32(42)]);
     }
@@ -1264,7 +1483,7 @@ mod tests {
         jit1.enable_safepoints();
         jit1.request_safepoint().unwrap();
 
-        let _aot_module = set_jit_context(&module);
+        let _aot_module = set_jit_context(&module, jit1.jit_id());
         let result = jit1.invoke_function(0, &[]);
         assert!(matches!(
             result,
@@ -1290,7 +1509,7 @@ mod tests {
         jit.enable_safepoints();
 
         jit.request_safepoint().unwrap();
-        let _first_aot_module = set_jit_context(&module);
+        let _first_aot_module = set_jit_context(&module, jit.jit_id());
         let first = jit.invoke_function(0, &[]);
         assert!(matches!(
             first,
@@ -1303,7 +1522,7 @@ mod tests {
         assert_eq!(resumed, vec![WasmValue::I32(42)]);
 
         jit.request_safepoint().unwrap();
-        let _second_aot_module = set_jit_context(&module);
+        let _second_aot_module = set_jit_context(&module, jit.jit_id());
         let second = jit.invoke_function(0, &[]);
         assert!(matches!(
             second,
@@ -1378,11 +1597,15 @@ mod tests {
         let memory_context = aot_module
             .memory_context()
             .unwrap_or((std::ptr::null_mut(), 0));
-        set_execution_context(
-            &mut aot_module as *mut _,
-            memory_context.0,
-            memory_context.1,
-        );
+        unsafe {
+            set_execution_context(
+                &mut aot_module as *mut _,
+                memory_context.0,
+                memory_context.1,
+                Some(jit.jit_id()),
+            )
+        }
+        .unwrap();
 
         let result = jit.invoke_function(1, &[]);
         assert!(matches!(
@@ -1406,7 +1629,7 @@ mod tests {
             Err(WasmError::Runtime(msg)) if msg.contains("not compiled")
         ));
 
-        let _aot_module = set_jit_context(&module);
+        let _aot_module = set_jit_context(&module, jit.jit_id());
         let result = jit.invoke_function(0, &[]).unwrap();
         assert_eq!(result, vec![WasmValue::I32(42)]);
         assert!(!jit.is_suspended());
@@ -1421,7 +1644,7 @@ mod tests {
         jit.enable_safepoints();
         jit.request_safepoint().unwrap();
 
-        let _aot_module = set_jit_context(&module);
+        let _aot_module = set_jit_context(&module, jit.jit_id());
         let result = jit.invoke_function(0, &[]);
         assert!(matches!(
             result,
@@ -1452,7 +1675,7 @@ mod tests {
         jit.enable_safepoints();
         jit.request_safepoint().unwrap();
 
-        let _aot_module = set_jit_context(&module);
+        let _aot_module = set_jit_context(&module, jit.jit_id());
         let result = jit.invoke_function(0, &[]);
         assert!(matches!(
             result,
@@ -1467,6 +1690,114 @@ mod tests {
             request,
             Err(WasmError::Runtime(msg)) if msg.contains("suspended state is pending")
         ));
+    }
+
+    #[test]
+    fn test_interpreter_handle_is_not_consumed_by_jit_resume() {
+        let _guard = llvm_test_guard();
+        let mut jit = LlvmJit::new("test_wrong_engine_handle").unwrap();
+        jit.compile_module(&create_i32_const_module()).unwrap();
+
+        let handle = RuntimeSuspender::new().suspend_interpreter(
+            0,
+            vec![],
+            OperandStack::new(8),
+            ControlStack::new(),
+            1,
+            1,
+        );
+
+        let result = jit.try_resume(&handle);
+        assert!(matches!(
+            result,
+            Err(WasmError::Runtime(msg)) if msg.contains("not owned by the JIT engine")
+        ));
+        assert!(handle.is_suspended());
+    }
+
+    #[test]
+    fn test_dropping_unrelated_jit_keeps_owned_execution_context() {
+        let _guard = llvm_test_guard();
+        let module = create_i32_const_module();
+        let mut jit1 = LlvmJit::new("test_owner_context_survives_drop").unwrap();
+        let jit2 = LlvmJit::new("test_unrelated_drop").unwrap();
+        jit1.compile_module(&module).unwrap();
+
+        let _aot_module = set_jit_context(&module, jit1.jit_id());
+        drop(jit2);
+
+        let result = jit1.invoke_function(0, &[]).unwrap();
+        assert_eq!(result, vec![WasmValue::I32(42)]);
+    }
+
+    #[test]
+    fn test_cancel_suspended_execution_releases_module_guard() {
+        let _guard = llvm_test_guard();
+        let module = create_i32_const_module();
+        let mut jit = LlvmJit::new("test_cancel_suspended_execution").unwrap();
+        jit.compile_module(&module).unwrap();
+        jit.enable_safepoints();
+        jit.request_safepoint().unwrap();
+
+        let mut aot_module = set_jit_context(&module, jit.jit_id());
+        let result = jit.invoke_function(0, &[]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Suspended(SuspensionKind::Safepoint))
+        ));
+
+        jit.cancel_suspended_execution().unwrap();
+        assert!(!jit.is_suspended());
+        aot_module
+            .set_instance_limits(InstanceLimits::new(Some(4), None))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_cancel_suspended_execution_invalidates_taken_handle() {
+        let _guard = llvm_test_guard();
+        let module = create_i32_const_module();
+        let mut jit = LlvmJit::new("test_cancel_invalidates_handle").unwrap();
+        jit.compile_module(&module).unwrap();
+        jit.enable_safepoints();
+        jit.request_safepoint().unwrap();
+
+        let _aot_module = set_jit_context(&module, jit.jit_id());
+        let result = jit.invoke_function(0, &[]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Suspended(SuspensionKind::Safepoint))
+        ));
+
+        let handle = jit.take_suspended_handle().unwrap();
+        jit.cancel_suspended_execution().unwrap();
+
+        let resumed = jit.try_resume(&handle);
+        assert!(matches!(
+            resumed,
+            Err(WasmError::Runtime(msg))
+                if msg.contains("resume failed") || msg.contains("not owned by the JIT engine")
+        ));
+        assert!(!handle.is_suspended());
+    }
+
+    #[test]
+    fn test_compile_module_clears_stale_compiled_entries() {
+        let _guard = llvm_test_guard();
+        let mut first = create_i32_const_module();
+        first.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x2B, 0x0F],
+        });
+
+        let second = create_i32_const_module();
+        let mut jit = LlvmJit::new("test_recompile_clears_stale_entries").unwrap();
+        jit.compile_module(&first).unwrap();
+        assert!(jit.get_function_entry(1).is_some());
+
+        jit.compile_module(&second).unwrap();
+        assert!(jit.get_function_entry(1).is_none());
     }
 
     #[test]

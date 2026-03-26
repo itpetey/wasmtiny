@@ -326,7 +326,7 @@ impl SuspendedInstance {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SuspendedHandle(Arc<SuspendedInstance>);
 
 impl SuspendedHandle {
@@ -421,6 +421,13 @@ impl SuspendedHandle {
 
     pub(crate) fn resume(&self) -> Result<SuspensionState, SuspensionError> {
         self.0.resume()
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    pub(crate) fn cancel(&self) {
+        let mut state = self.0.state.write();
+        *state = SuspensionState::None;
+        self.0.suspended.store(false, Ordering::SeqCst);
     }
 
     #[allow(dead_code)]
