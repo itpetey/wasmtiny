@@ -14,6 +14,14 @@ impl OperandStack {
         }
     }
 
+    pub fn from_vec(slots: Vec<WasmValue>, max_size: usize) -> Self {
+        Self { slots, max_size }
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.max_size
+    }
+
     pub fn push(&mut self, value: WasmValue) -> crate::runtime::Result<()> {
         if self.slots.len() >= self.max_size {
             return Err(crate::runtime::WasmError::Runtime("stack overflow".into()));
@@ -97,6 +105,10 @@ impl OperandStack {
     pub fn truncate(&mut self, len: usize) {
         self.slots.truncate(len);
     }
+
+    pub fn to_vec(&self) -> Vec<WasmValue> {
+        self.slots.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +168,84 @@ impl ControlStack {
     pub fn get_mut(&mut self, idx: usize) -> Option<&mut ControlFrame> {
         self.frames.get_mut(idx)
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use std::io::Write;
+        let mut bytes = Vec::new();
+        for frame in &self.frames {
+            bytes
+                .write_all(&(frame.position as u32).to_le_bytes())
+                .unwrap();
+            bytes
+                .write_all(&(frame.arity as u32).to_le_bytes())
+                .unwrap();
+            bytes
+                .write_all(&(frame.label_arity as u32).to_le_bytes())
+                .unwrap();
+            bytes
+                .write_all(&(frame.height as u32).to_le_bytes())
+                .unwrap();
+            bytes
+                .write_all(&(frame.local_count as u32).to_le_bytes())
+                .unwrap();
+            bytes.push(frame.kind as u8);
+        }
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let mut frames = Vec::new();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if cursor + 21 > bytes.len() {
+                break;
+            }
+            let position = u32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]) as usize;
+            let arity = u32::from_le_bytes([
+                bytes[cursor + 4],
+                bytes[cursor + 5],
+                bytes[cursor + 6],
+                bytes[cursor + 7],
+            ]) as usize;
+            let label_arity = u32::from_le_bytes([
+                bytes[cursor + 8],
+                bytes[cursor + 9],
+                bytes[cursor + 10],
+                bytes[cursor + 11],
+            ]) as usize;
+            let height = u32::from_le_bytes([
+                bytes[cursor + 12],
+                bytes[cursor + 13],
+                bytes[cursor + 14],
+                bytes[cursor + 15],
+            ]) as usize;
+            let local_count = u32::from_le_bytes([
+                bytes[cursor + 16],
+                bytes[cursor + 17],
+                bytes[cursor + 18],
+                bytes[cursor + 19],
+            ]) as usize;
+            let kind = FrameKind::from_u8(bytes[cursor + 20]);
+            cursor += 21;
+
+            frames.push(ControlFrame {
+                kind,
+                position,
+                code: Vec::new(),
+                arity,
+                label_arity,
+                local_count,
+                height,
+                locals: Vec::new(),
+            });
+        }
+        Self { frames }
+    }
 }
 
 impl Default for ControlStack {
@@ -164,11 +254,22 @@ impl Default for ControlStack {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum FrameKind {
     Function,
     Block,
     Loop,
+}
+
+impl FrameKind {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => FrameKind::Function,
+            1 => FrameKind::Block,
+            2 => FrameKind::Loop,
+            _ => FrameKind::Block,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

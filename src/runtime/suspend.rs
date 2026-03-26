@@ -122,6 +122,24 @@ impl InterpreterState {
             self.control_stack.clone(),
         )
     }
+
+    pub(crate) fn restore_from_snapshot(
+        pc: usize,
+        locals: Vec<WasmValue>,
+        operand_stack: OperandStack,
+        control_stack: crate::interpreter::stack::ControlStack,
+        interpreter_id: u64,
+        suspension_epoch: u64,
+    ) -> Self {
+        Self {
+            pc,
+            locals,
+            operand_stack,
+            control_stack,
+            interpreter_id,
+            suspension_epoch,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -159,7 +177,7 @@ pub(crate) enum SuspensionState {
     None,
 }
 
-struct SuspendedInstance {
+pub(crate) struct SuspendedInstance {
     engine: ExecutionEngine,
     state: Arc<RwLock<SuspensionState>>,
     suspended: Arc<AtomicBool>,
@@ -189,7 +207,7 @@ impl Clone for SuspendedInstance {
 }
 
 impl SuspendedInstance {
-    fn new_interpreter(state: InterpreterState, instance_id: u64) -> Self {
+    pub(crate) fn new_interpreter(state: InterpreterState, instance_id: u64) -> Self {
         Self {
             engine: ExecutionEngine::Interpreter,
             state: Arc::new(RwLock::new(SuspensionState::Interpreter(state))),
@@ -330,7 +348,7 @@ impl SuspendedInstance {
 pub struct SuspendedHandle(Arc<SuspendedInstance>);
 
 impl SuspendedHandle {
-    fn new(instance: SuspendedInstance) -> Self {
+    pub(crate) fn new(instance: SuspendedInstance) -> Self {
         Self(Arc::new(instance))
     }
 
@@ -342,6 +360,10 @@ impl SuspendedHandle {
         let state = self.0.state();
         let guard = state.read();
         matches!(*guard, SuspensionState::HostcallPending { .. })
+    }
+
+    pub(crate) fn suspension_state(&self) -> crate::runtime::suspend::SuspensionState {
+        self.0.state().read().clone()
     }
 
     pub(crate) fn interpreter_id(&self) -> Option<u64> {

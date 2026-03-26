@@ -5,6 +5,7 @@ mod instance;
 mod metering;
 mod module;
 mod shared_memory;
+mod snapshot;
 mod suspend;
 mod types;
 mod values;
@@ -21,6 +22,10 @@ pub use metering::{InstanceLimits, InstanceStats};
 pub use module::{DataKind, DataSegment, ElemKind, ElemSegment, Func, Local, Module};
 pub(crate) use shared_memory::{ResolvedSharedMemoryMapping, SharedMemoryRegistry};
 pub use shared_memory::{SharedMemoryMapping, SharedMemoryMappingId, SharedRegionId};
+pub use snapshot::{
+    Result as SnapshotResult, SNAPSHOT_FORMAT_VERSION, SnapshotError, SnapshotPayload,
+    capture_snapshot, restore_snapshot, validate_snapshot_compatibility,
+};
 #[cfg(feature = "llvm-jit")]
 pub(crate) use suspend::JitState;
 pub(crate) use suspend::{InterpreterState, SuspensionState};

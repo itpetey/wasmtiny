@@ -18,6 +18,7 @@ leb128 = "0.2"
 memchr = "2.8"
 llvm-sys = { version = "170", optional = true }
 parking_lot = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
