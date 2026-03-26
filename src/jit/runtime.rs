@@ -15,15 +15,21 @@ pub struct JitCodeCache {
 }
 
 #[derive(Clone, Debug)]
+/// A machine-code entry point for on-stack replacement.
 pub struct OsrEntryPoint {
+    /// WebAssembly program-counter offset associated with the entry.
     pub pc_offset: u32,
+    /// Native code address to jump to for OSR.
     pub target_address: u64,
 }
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
+/// Metadata describing a compiled safepoint.
 pub struct SafepointEntry {
+    /// WebAssembly program-counter offset of the safepoint.
     pub pc_offset: u32,
+    /// Offset of the generated safepoint handler code.
     pub handler_offset: u32,
 }
 
@@ -35,6 +41,7 @@ pub(crate) struct Trampoline {
 }
 
 impl JitCodeCache {
+    /// Creates a new `JitCodeCache`.
     pub fn new() -> Self {
         Self {
             trampolines: HashMap::new(),
@@ -54,34 +61,42 @@ impl JitCodeCache {
         id
     }
 
+    /// Returns suspended instance.
     pub fn get_suspended_instance(&self, id: u64) -> Option<&SuspendedHandle> {
         self.suspended_instances.get(&id)
     }
 
+    /// Removes suspended instance.
     pub fn remove_suspended_instance(&mut self, id: u64) -> Option<SuspendedHandle> {
         self.suspended_instances.remove(&id)
     }
 
+    /// Enables osr.
     pub fn enable_osr(&mut self) {
         self.osr_enabled = true;
     }
 
+    /// Disables osr.
     pub fn disable_osr(&mut self) {
         self.osr_enabled = false;
     }
 
+    /// Returns whether osr enabled.
     pub fn is_osr_enabled(&self) -> bool {
         self.osr_enabled
     }
 
+    /// Sets osr threshold.
     pub fn set_osr_threshold(&mut self, threshold: u64) {
         self.osr_threshold = threshold;
     }
 
+    /// Returns osr threshold.
     pub fn get_osr_threshold(&self) -> u64 {
         self.osr_threshold
     }
 
+    /// Adds osr entry point.
     pub fn add_osr_entry_point(&mut self, func_idx: u64, pc_offset: u32, target_address: u64) {
         let entry = OsrEntryPoint {
             pc_offset,
@@ -93,10 +108,12 @@ impl JitCodeCache {
             .push(entry);
     }
 
+    /// Returns osr entry points.
     pub fn get_osr_entry_points(&self, func_idx: u64) -> Option<&Vec<OsrEntryPoint>> {
         self.osr_entry_points.get(&func_idx)
     }
 
+    /// Adds trampoline.
     pub fn add_trampoline(&mut self, table_idx: u32, target: u32) {
         let trampoline = Trampoline {
             code: vec![],
@@ -105,10 +122,12 @@ impl JitCodeCache {
         self.trampolines.insert(table_idx, trampoline);
     }
 
+    /// Stores compiled code in the cache.
     pub fn store_compiled(&mut self, key: u64, code: Vec<u8>) {
         self.compiled_code.insert(key, code);
     }
 
+    /// Returns compiled.
     pub fn get_compiled(&self, key: u64) -> Option<&Vec<u8>> {
         self.compiled_code.get(&key)
     }

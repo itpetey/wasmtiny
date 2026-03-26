@@ -11,68 +11,108 @@ use crate::runtime::module::Module;
 use crate::runtime::suspend::SuspendedHandle;
 use crate::runtime::types::{GlobalType, MemoryType, TableType};
 
+/// Snapshot format version used by serialised payloads.
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
+/// Complete snapshot payload for an instance.
 pub struct SnapshotPayload {
+    /// Snapshot format version.
     pub version: u32,
+    /// Hash of the source module used for compatibility checks.
     pub module_hash: u64,
+    /// Snapshots of the instance memories.
     pub memory_snapshots: Vec<MemorySnapshot>,
+    /// Snapshots of the instance globals.
     pub global_snapshots: Vec<GlobalSnapshot>,
+    /// Snapshots of the instance tables.
     pub table_snapshots: Vec<TableSnapshot>,
+    /// Captured execution state, if the instance was suspended.
     pub execution_state: Option<ExecutionStateSnapshot>,
+    /// Snapshot metadata used for bookkeeping.
     pub metadata: SnapshotMetadata,
 }
 
 #[derive(Debug, Clone)]
+/// Metadata associated with a snapshot payload.
 pub struct SnapshotMetadata {
+    /// Timestamp recorded when the snapshot was captured.
     pub timestamp: u64,
+    /// Source instance identifier, if one was available.
     pub source_instance_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
+/// Snapshot of a single linear memory.
 pub struct MemorySnapshot {
+    /// The zero-based index.
     pub index: u32,
+    /// Declared type of the captured memory.
     pub memory_type: MemoryType,
+    /// Raw linear-memory bytes.
     pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
+/// Snapshot of a single global.
 pub struct GlobalSnapshot {
+    /// The zero-based index.
     pub index: u32,
+    /// Declared type of the captured global.
     pub global_type: GlobalType,
+    /// Captured value of the global.
     pub value: WasmValue,
 }
 
 #[derive(Debug, Clone)]
+/// Snapshot of a single table.
 pub struct TableSnapshot {
+    /// The zero-based index.
     pub index: u32,
+    /// Declared type of the captured table.
     pub table_type: TableType,
+    /// Captured table elements.
     pub elements: Vec<WasmValue>,
 }
 
 #[derive(Debug, Clone)]
+/// Captured execution state for a suspended instance.
 pub struct ExecutionStateSnapshot {
+    /// Interpreter-specific execution state.
     pub interpreter_state: InterpreterStateSnapshot,
 }
 
 #[derive(Debug, Clone)]
+/// Captured interpreter state needed to resume execution.
 pub struct InterpreterStateSnapshot {
+    /// Program-counter offset within the current function body.
     pub pc: usize,
+    /// Captured locals for the current frame.
     pub locals: Vec<WasmValue>,
+    /// Captured operand-stack contents.
     pub operand_stack: Vec<WasmValue>,
+    /// Maximum capacity of the operand stack.
     pub operand_stack_max_size: usize,
+    /// Serialised control-stack state.
     pub control_stack: Vec<u8>,
+    /// Identifier of the interpreter that produced the snapshot.
     pub interpreter_id: u64,
+    /// Suspension epoch used to validate resumption.
     pub suspension_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Errors that can occur while capturing or restoring snapshots.
 pub enum SnapshotError {
+    /// The target instance is not currently suspended.
     InstanceNotSuspended(String),
+    /// The snapshot contains a resource that is not currently supported.
     UnsupportedResource(String),
+    /// The snapshot does not match the requested restore target.
     IncompatibleTarget(String),
+    /// The snapshot payload is malformed or inconsistent.
     InvalidSnapshot(String),
+    /// A snapshot operation is already in progress.
     SnapshotInProgress,
 }
 
@@ -98,6 +138,7 @@ impl std::fmt::Display for SnapshotError {
 
 impl std::error::Error for SnapshotError {}
 
+/// Type alias for `Result`.
 pub type Result<T> = std::result::Result<T, SnapshotError>;
 
 fn compute_module_hash(module: &Module) -> u64 {
@@ -196,6 +237,7 @@ fn compute_module_hash(module: &Module) -> u64 {
     ])
 }
 
+/// Captures snapshot.
 pub fn capture_snapshot(
     instance: &Instance,
     suspended_handle: Option<&SuspendedHandle>,
@@ -291,6 +333,7 @@ pub fn capture_snapshot(
     })
 }
 
+/// Validates snapshot compatibility.
 pub fn validate_snapshot_compatibility(
     snapshot: &SnapshotPayload,
     target_module: &Module,
@@ -312,6 +355,7 @@ pub fn validate_snapshot_compatibility(
     Ok(())
 }
 
+/// Restores snapshot.
 pub fn restore_snapshot(
     snapshot: &SnapshotPayload,
     target_module: Arc<Module>,

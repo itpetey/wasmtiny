@@ -11,13 +11,19 @@ const MAX_STACK_SIZE: usize = 16384;
 
 static NEXT_INTERPRETER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Configuration for interpreter safepoints.
+///
+/// Safepoints are points in the execution where the interpreter can be suspended
+/// for async operations (e.g., host calls, cooperative multitasking).
 #[derive(Clone)]
+/// Safepoint config.
 pub struct SafepointConfig {
     check_interval: u32,
     enabled: Arc<AtomicBool>,
 }
 
 impl SafepointConfig {
+    /// Creates a new `SafepointConfig`.
     pub fn new(enabled: bool) -> Self {
         Self {
             check_interval: 100,
@@ -25,19 +31,23 @@ impl SafepointConfig {
         }
     }
 
+    /// Returns this value configured with interval.
     pub fn with_interval(mut self, interval: u32) -> Self {
         self.check_interval = interval;
         self
     }
 
+    /// Returns whether enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
 
+    /// Enables safepoint checks.
     pub fn enable(&self) {
         self.enabled.store(true, Ordering::SeqCst);
     }
 
+    /// Disables safepoint checks.
     pub fn disable(&self) {
         self.enabled.store(false, Ordering::SeqCst);
     }
@@ -60,10 +70,15 @@ struct BlockSignature {
     result_count: usize,
 }
 
+/// WebAssembly interpreter state and execution engine.
 pub struct Interpreter {
+    /// The operand stack for WebAssembly values.
     pub operand_stack: OperandStack,
+    /// The control flow stack (for blocks, loops, functions).
     pub control_stack: ControlStack,
+    /// The WebAssembly instance being executed.
     pub instance: Option<Arc<Mutex<Instance>>>,
+    /// Local variables for the current function.
     pub locals: Vec<WasmValue>,
     safepoint_config: SafepointConfig,
     instruction_count: u32,
@@ -79,6 +94,7 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
+    /// Creates a new `Interpreter`.
     pub fn new() -> Self {
         Self {
             operand_stack: OperandStack::new(MAX_STACK_SIZE),
@@ -99,6 +115,7 @@ impl Interpreter {
         }
     }
 
+    /// Returns this value configured with instance.
     pub fn with_instance(instance: Arc<Mutex<Instance>>) -> Self {
         Self {
             operand_stack: OperandStack::new(MAX_STACK_SIZE),
@@ -119,21 +136,25 @@ impl Interpreter {
         }
     }
 
+    /// Returns this value configured with safepoints.
     pub fn with_safepoints(mut self, config: SafepointConfig) -> Self {
         self.safepoint_armed = config.is_enabled();
         self.safepoint_config = config;
         self
     }
 
+    /// Returns this value configured with suspender.
     pub fn with_suspender(mut self, suspender: RuntimeSuspender) -> Self {
         self.suspender = Some(suspender);
         self
     }
 
+    /// Executes the requested function.
     pub fn execute(&mut self, module: &Module, func_idx: u32) -> Result<Vec<WasmValue>> {
         self.execute_function(module, func_idx, &[])
     }
 
+    /// Executes function.
     pub fn execute_function(
         &mut self,
         module: &Module,
@@ -172,28 +193,34 @@ impl Interpreter {
         self.run(module)
     }
 
+    /// Enables safepoints.
     pub fn enable_safepoints(&mut self) {
         self.safepoint_config.enable();
         self.safepoint_armed = true;
     }
 
+    /// Disables safepoints.
     pub fn disable_safepoints(&mut self) {
         self.safepoint_config.disable();
         self.safepoint_armed = false;
     }
 
+    /// Returns whether safepoint enabled.
     pub fn is_safepoint_enabled(&self) -> bool {
         self.safepoint_config.is_enabled()
     }
 
+    /// Returns whether suspended.
     pub fn is_suspended(&self) -> bool {
         self.needs_resume || self.active_suspension_id.is_some()
     }
 
+    /// Takes suspended handle.
     pub fn take_suspended_handle(&mut self) -> Option<SuspendedHandle> {
         self.suspended_handle.take()
     }
 
+    /// Returns the current suspended execution handle, if any.
     pub fn suspended_handle(&self) -> Option<&SuspendedHandle> {
         self.suspended_handle.as_ref()
     }
@@ -354,6 +381,7 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Attempts to resume execution from a suspended handle.
     pub fn try_resume(
         &mut self,
         handle: &SuspendedHandle,
@@ -413,6 +441,7 @@ impl Interpreter {
         }
     }
 
+    /// Continues execution after a suspension point.
     pub fn continue_execution(&mut self, module: &Module) -> Result<Vec<WasmValue>> {
         if let Some(thread_id) = self.execution_thread
             && thread_id != std::thread::current().id()

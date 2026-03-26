@@ -16,117 +16,229 @@ use llvm_sys::prelude::*;
 #[cfg(feature = "llvm-jit")]
 #[allow(dead_code)]
 mod opcodes {
+    /// Constant `OP_UNREACHABLE`.
     pub const OP_UNREACHABLE: u8 = 0x00;
+    /// Constant `OP_NOP`.
     pub const OP_NOP: u8 = 0x01;
+    /// Constant `OP_BLOCK`.
     pub const OP_BLOCK: u8 = 0x02;
+    /// Constant `OP_LOOP`.
     pub const OP_LOOP: u8 = 0x03;
+    /// Constant `OP_IF`.
     pub const OP_IF: u8 = 0x04;
+    /// Constant `OP_ELSE`.
     pub const OP_ELSE: u8 = 0x05;
+    /// Constant `OP_END`.
     pub const OP_END: u8 = 0x0B;
+    /// Constant `OP_BR`.
     pub const OP_BR: u8 = 0x0C;
+    /// Constant `OP_BR_IF`.
     pub const OP_BR_IF: u8 = 0x0D;
+    /// Constant `OP_RETURN`.
     pub const OP_RETURN: u8 = 0x0F;
+    /// Constant `OP_CALL`.
     pub const OP_CALL: u8 = 0x10;
+    /// Constant `OP_CALL_INDIRECT`.
     pub const OP_CALL_INDIRECT: u8 = 0x11;
+    /// Constant `OP_DROP`.
     pub const OP_DROP: u8 = 0x1A;
+    /// Constant `OP_LOCAL_GET`.
     pub const OP_LOCAL_GET: u8 = 0x20;
+    /// Constant `OP_LOCAL_SET`.
     pub const OP_LOCAL_SET: u8 = 0x21;
+    /// Constant `OP_LOCAL_TEE`.
     pub const OP_LOCAL_TEE: u8 = 0x22;
+    /// Constant `OP_I32_LOAD`.
     pub const OP_I32_LOAD: u8 = 0x28;
+    /// Constant `OP_I64_LOAD`.
     pub const OP_I64_LOAD: u8 = 0x29;
+    /// Constant `OP_F32_LOAD`.
     pub const OP_F32_LOAD: u8 = 0x2A;
+    /// Constant `OP_F64_LOAD`.
     pub const OP_F64_LOAD: u8 = 0x2B;
+    /// Constant `OP_I32_LOAD8_S`.
     pub const OP_I32_LOAD8_S: u8 = 0x2C;
+    /// Constant `OP_I32_LOAD8_U`.
     pub const OP_I32_LOAD8_U: u8 = 0x2D;
+    /// Constant `OP_I32_LOAD16_S`.
     pub const OP_I32_LOAD16_S: u8 = 0x2E;
+    /// Constant `OP_I32_LOAD16_U`.
     pub const OP_I32_LOAD16_U: u8 = 0x2F;
+    /// Constant `OP_I32_STORE`.
     pub const OP_I32_STORE: u8 = 0x36;
+    /// Constant `OP_I64_STORE`.
     pub const OP_I64_STORE: u8 = 0x37;
+    /// Constant `OP_F32_STORE`.
     pub const OP_F32_STORE: u8 = 0x38;
+    /// Constant `OP_F64_STORE`.
     pub const OP_F64_STORE: u8 = 0x39;
+    /// Constant `OP_I32_STORE8`.
     pub const OP_I32_STORE8: u8 = 0x3A;
+    /// Constant `OP_I32_STORE16`.
     pub const OP_I32_STORE16: u8 = 0x3B;
+    /// Constant `OP_I32_EQZ`.
     pub const OP_I32_EQZ: u8 = 0x45;
+    /// Constant `OP_I32_EQ`.
     pub const OP_I32_EQ: u8 = 0x46;
+    /// Constant `OP_I32_NE`.
     pub const OP_I32_NE: u8 = 0x47;
+    /// Constant `OP_I32_LT_S`.
     pub const OP_I32_LT_S: u8 = 0x48;
+    /// Constant `OP_I32_LT_U`.
     pub const OP_I32_LT_U: u8 = 0x49;
+    /// Constant `OP_I32_GT_S`.
     pub const OP_I32_GT_S: u8 = 0x4A;
+    /// Constant `OP_I32_GT_U`.
     pub const OP_I32_GT_U: u8 = 0x4B;
+    /// Constant `OP_I32_LE_S`.
     pub const OP_I32_LE_S: u8 = 0x4C;
+    /// Constant `OP_I32_LE_U`.
     pub const OP_I32_LE_U: u8 = 0x4D;
+    /// Constant `OP_I32_GE_S`.
     pub const OP_I32_GE_S: u8 = 0x4E;
+    /// Constant `OP_I32_GE_U`.
     pub const OP_I32_GE_U: u8 = 0x4F;
+    /// Constant `OP_I32_CONST`.
     pub const OP_I32_CONST: u8 = 0x41;
+    /// Constant `OP_I64_CONST`.
     pub const OP_I64_CONST: u8 = 0x42;
+    /// Constant `OP_F32_CONST`.
     pub const OP_F32_CONST: u8 = 0x43;
+    /// Constant `OP_F64_CONST`.
     pub const OP_F64_CONST: u8 = 0x44;
+    /// Constant `OP_I32_CLZ`.
     pub const OP_I32_CLZ: u8 = 0x67;
+    /// Constant `OP_I32_CTZ`.
     pub const OP_I32_CTZ: u8 = 0x68;
+    /// Constant `OP_I32_POPCNT`.
     pub const OP_I32_POPCNT: u8 = 0x69;
+    /// Constant `OP_I32_ADD`.
     pub const OP_I32_ADD: u8 = 0x6A;
+    /// Constant `OP_I32_SUB`.
     pub const OP_I32_SUB: u8 = 0x6B;
+    /// Constant `OP_I32_MUL`.
     pub const OP_I32_MUL: u8 = 0x6C;
+    /// Constant `OP_I32_DIV_S`.
     pub const OP_I32_DIV_S: u8 = 0x6D;
+    /// Constant `OP_I32_DIV_U`.
     pub const OP_I32_DIV_U: u8 = 0x6E;
+    /// Constant `OP_I32_REM_S`.
     pub const OP_I32_REM_S: u8 = 0x6F;
+    /// Constant `OP_I32_REM_U`.
     pub const OP_I32_REM_U: u8 = 0x70;
+    /// Constant `OP_I32_AND`.
     pub const OP_I32_AND: u8 = 0x71;
+    /// Constant `OP_I32_OR`.
     pub const OP_I32_OR: u8 = 0x72;
+    /// Constant `OP_I32_XOR`.
     pub const OP_I32_XOR: u8 = 0x73;
+    /// Constant `OP_I32_SHL`.
     pub const OP_I32_SHL: u8 = 0x74;
+    /// Constant `OP_I32_SHR_S`.
     pub const OP_I32_SHR_S: u8 = 0x75;
+    /// Constant `OP_I32_SHR_U`.
     pub const OP_I32_SHR_U: u8 = 0x76;
+    /// Constant `OP_I32_ROTL`.
     pub const OP_I32_ROTL: u8 = 0x77;
+    /// Constant `OP_I32_ROTR`.
     pub const OP_I32_ROTR: u8 = 0x78;
+    /// Constant `OP_I64_CLZ`.
     pub const OP_I64_CLZ: u8 = 0x79;
+    /// Constant `OP_I64_CTZ`.
     pub const OP_I64_CTZ: u8 = 0x7A;
+    /// Constant `OP_I64_POPCNT`.
     pub const OP_I64_POPCNT: u8 = 0x7B;
+    /// Constant `OP_I64_ADD`.
     pub const OP_I64_ADD: u8 = 0x7C;
+    /// Constant `OP_I64_SUB`.
     pub const OP_I64_SUB: u8 = 0x7D;
+    /// Constant `OP_I64_MUL`.
     pub const OP_I64_MUL: u8 = 0x7E;
+    /// Constant `OP_I64_DIV_S`.
     pub const OP_I64_DIV_S: u8 = 0x7F;
+    /// Constant `OP_I64_DIV_U`.
     pub const OP_I64_DIV_U: u8 = 0x80;
+    /// Constant `OP_I64_REM_S`.
     pub const OP_I64_REM_S: u8 = 0x81;
+    /// Constant `OP_I64_REM_U`.
     pub const OP_I64_REM_U: u8 = 0x82;
+    /// Constant `OP_I64_AND`.
     pub const OP_I64_AND: u8 = 0x83;
+    /// Constant `OP_I64_OR`.
     pub const OP_I64_OR: u8 = 0x84;
+    /// Constant `OP_I64_XOR`.
     pub const OP_I64_XOR: u8 = 0x85;
+    /// Constant `OP_I64_SHL`.
     pub const OP_I64_SHL: u8 = 0x86;
+    /// Constant `OP_I64_SHR_S`.
     pub const OP_I64_SHR_S: u8 = 0x87;
+    /// Constant `OP_I64_SHR_U`.
     pub const OP_I64_SHR_U: u8 = 0x88;
+    /// Constant `OP_I64_ROTL`.
     pub const OP_I64_ROTL: u8 = 0x89;
+    /// Constant `OP_I64_ROTR`.
     pub const OP_I64_ROTR: u8 = 0x8A;
+    /// Constant `OP_F32_ADD`.
     pub const OP_F32_ADD: u8 = 0x8C;
+    /// Constant `OP_F32_SUB`.
     pub const OP_F32_SUB: u8 = 0x8D;
+    /// Constant `OP_F32_MUL`.
     pub const OP_F32_MUL: u8 = 0x8E;
+    /// Constant `OP_F32_DIV`.
     pub const OP_F32_DIV: u8 = 0x8F;
+    /// Constant `OP_F32_MIN`.
     pub const OP_F32_MIN: u8 = 0x90;
+    /// Constant `OP_F32_NEG`.
     pub const OP_F32_NEG: u8 = 0x91;
+    /// Constant `OP_F64_ADD`.
     pub const OP_F64_ADD: u8 = 0x92;
+    /// Constant `OP_F64_SUB`.
     pub const OP_F64_SUB: u8 = 0x93;
+    /// Constant `OP_F64_MUL`.
     pub const OP_F64_MUL: u8 = 0x94;
+    /// Constant `OP_F64_DIV`.
     pub const OP_F64_DIV: u8 = 0x95;
+    /// Constant `OP_F64_MIN`.
     pub const OP_F64_MIN: u8 = 0x96;
+    /// Constant `OP_F64_NEG`.
     pub const OP_F64_NEG: u8 = 0x97;
+    /// Constant `OP_F64_DEMOTE_F32`.
     pub const OP_F64_DEMOTE_F32: u8 = 0x98;
+    /// Constant `OP_F32_PROMOTE_F64`.
     pub const OP_F32_PROMOTE_F64: u8 = 0x99;
+    /// Constant `OP_I32_TRUNC_F32_S`.
     pub const OP_I32_TRUNC_F32_S: u8 = 0xA2;
+    /// Constant `OP_I32_TRUNC_F32_U`.
     pub const OP_I32_TRUNC_F32_U: u8 = 0xA3;
+    /// Constant `OP_I64_TRUNC_F32_S`.
     pub const OP_I64_TRUNC_F32_S: u8 = 0xA4;
+    /// Constant `OP_I64_TRUNC_F32_U`.
     pub const OP_I64_TRUNC_F32_U: u8 = 0xA5;
+    /// Constant `OP_I32_TRUNC_F64_S`.
     pub const OP_I32_TRUNC_F64_S: u8 = 0xA6;
+    /// Constant `OP_F32_CONVERT_I32_S`.
     pub const OP_F32_CONVERT_I32_S: u8 = 0xC0;
+    /// Constant `OP_F32_CONVERT_I32_U`.
     pub const OP_F32_CONVERT_I32_U: u8 = 0xC1;
+    /// Constant `OP_F32_CONVERT_I64_S`.
     pub const OP_F32_CONVERT_I64_S: u8 = 0xC2;
+    /// Constant `OP_F32_CONVERT_I64_U`.
     pub const OP_F32_CONVERT_I64_U: u8 = 0xC3;
+    /// Constant `OP_F64_CONVERT_I32_S`.
     pub const OP_F64_CONVERT_I32_S: u8 = 0xC4;
+    /// Constant `OP_F64_CONVERT_I32_U`.
     pub const OP_F64_CONVERT_I32_U: u8 = 0xC5;
+    /// Constant `OP_F64_CONVERT_I64_S`.
     pub const OP_F64_CONVERT_I64_S: u8 = 0xC6;
+    /// Constant `OP_F64_CONVERT_I64_U`.
     pub const OP_F64_CONVERT_I64_U: u8 = 0xC7;
+    /// Constant `OP_I32_REINTERPRET_F32`.
     pub const OP_I32_REINTERPRET_F32: u8 = 0xBC;
+    /// Constant `OP_I64_REINTERPRET_F64`.
     pub const OP_I64_REINTERPRET_F64: u8 = 0xBD;
+    /// Constant `OP_F32_REINTERPRET_I32`.
     pub const OP_F32_REINTERPRET_I32: u8 = 0xBE;
+    /// Constant `OP_F64_REINTERPRET_I64`.
     pub const OP_F64_REINTERPRET_I64: u8 = 0xBF;
 }
 
@@ -141,11 +253,15 @@ struct BlockInfo {
 #[cfg(feature = "llvm-jit")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlockKind {
+    /// Variant `Block`.
     Block,
+    /// Variant `Loop`.
     Loop,
+    /// Variant `If`.
     If,
 }
 
+/// Translator from WebAssembly to LLVM IR.
 pub struct WasmToLlvmTranslator {
     #[cfg(feature = "llvm-jit")]
     context: LLVMContextRef,
@@ -161,6 +277,7 @@ pub struct WasmToLlvmTranslator {
 
 impl WasmToLlvmTranslator {
     #[cfg(feature = "llvm-jit")]
+    /// Creates a new `WasmToLlvmTranslator`.
     pub fn new(context: LLVMContextRef) -> Result<Self> {
         unsafe {
             let builder = LLVMCreateBuilderInContext(context);
@@ -181,6 +298,7 @@ impl WasmToLlvmTranslator {
     }
 
     #[cfg(not(feature = "llvm-jit"))]
+    /// Creates a new `WasmToLlvmTranslator`.
     pub fn new(_context: *mut std::ffi::c_void) -> Result<Self> {
         Err(WasmError::Runtime(
             "LLVM JIT not available: compile with --features llvm-jit".to_string(),
@@ -188,6 +306,7 @@ impl WasmToLlvmTranslator {
     }
 
     #[cfg(feature = "llvm-jit")]
+    /// Translates a WebAssembly function into LLVM IR.
     pub fn translate_function(
         &mut self,
         func: &Func,

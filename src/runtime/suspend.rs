@@ -51,15 +51,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Returns whether suspension error.
 pub fn is_suspension_error(error: &WasmError) -> bool {
     matches!(error, WasmError::Suspended(_))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Suspension error.
 pub enum SuspensionError {
+    /// The target instance is not currently suspended.
     InstanceNotSuspended(String),
+    /// The saved state cannot be resumed safely.
     InvalidResumeState(String),
+    /// The suspension state is recognised but not supported here.
     UnsupportedSuspensionState(String),
+    /// A pending host call must complete before resumption can continue.
     HostcallPending,
 }
 
@@ -96,6 +102,7 @@ pub(crate) struct InterpreterState {
 }
 
 impl InterpreterState {
+    /// Captures the current execution state.
     pub fn capture(
         pc: usize,
         locals: Vec<WasmValue>,
@@ -114,6 +121,7 @@ impl InterpreterState {
         }
     }
 
+    /// Restores the captured execution state.
     pub fn restore(&self) -> (usize, Vec<WasmValue>, OperandStack, ControlStack) {
         (
             self.pc,
@@ -345,6 +353,7 @@ impl SuspendedInstance {
 }
 
 #[derive(Debug, Clone)]
+/// Suspended handle.
 pub struct SuspendedHandle(Arc<SuspendedInstance>);
 
 impl SuspendedHandle {
@@ -352,10 +361,12 @@ impl SuspendedHandle {
         Self(Arc::new(instance))
     }
 
+    /// Returns whether suspended.
     pub fn is_suspended(&self) -> bool {
         self.0.is_suspended()
     }
 
+    /// Returns whether this value has pending hostcall.
     pub fn has_pending_hostcall(&self) -> bool {
         let state = self.0.state();
         let guard = state.read();
@@ -424,6 +435,7 @@ impl SuspendedHandle {
         }
     }
 
+    /// Returns the pending host work payload, if one is present.
     pub fn pending_work(&self) -> Option<Vec<u8>> {
         let state = self.0.state();
         let guard = state.read();
@@ -457,6 +469,7 @@ impl SuspendedHandle {
         self.0.engine()
     }
 
+    /// Returns the identifier for the suspended instance.
     pub fn instance_id(&self) -> u64 {
         self.0.instance_id()
     }
@@ -468,9 +481,11 @@ impl From<SuspendedInstance> for SuspendedHandle {
     }
 }
 
+/// Runtime suspender.
 pub struct RuntimeSuspender;
 
 impl RuntimeSuspender {
+    /// Creates a new `RuntimeSuspender`.
     pub fn new() -> Self {
         Self
     }
@@ -538,6 +553,7 @@ impl RuntimeSuspender {
         SuspendedHandle::new(instance)
     }
 
+    /// Returns whether suspended.
     pub fn is_suspended(handle: &SuspendedHandle) -> bool {
         handle.is_suspended()
     }

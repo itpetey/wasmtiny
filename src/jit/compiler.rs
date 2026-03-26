@@ -108,18 +108,26 @@ const WASM_I64_SHR_S: u8 = 0x87;
 const WASM_I64_SHR_U: u8 = 0x88;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// JIT compilation tier.
 pub enum CompilationTier {
+    /// Fast baseline code generation.
     Baseline,
+    /// Higher-cost optimised code generation.
     Optimized,
 }
 
 #[derive(Clone, Debug)]
+/// Compiled machine code for a single WebAssembly function.
 pub struct CompiledFunction {
+    /// Function identifier within the compiler cache.
     pub id: u64,
+    /// Compilation tier used to produce this code.
     pub tier: CompilationTier,
+    /// Generated machine-code bytes.
     pub code: Vec<u8>,
 }
 
+/// WebAssembly JIT compiler.
 pub struct JitCompiler {
     code_cache: HashMap<u64, CompiledFunction>,
     compilation_tier: CompilationTier,
@@ -132,8 +140,11 @@ pub struct JitCompiler {
 
 #[derive(Clone, Copy, Debug)]
 enum BlockKind {
+    /// Variant `Block`.
     Block,
+    /// Variant `Loop`.
     Loop,
+    /// Variant `If`.
     If,
 }
 
@@ -156,6 +167,7 @@ struct PatchSite {
 
 #[allow(clippy::new_without_default)]
 impl JitCompiler {
+    /// Creates a new `JitCompiler`.
     pub fn new() -> Self {
         Self {
             code_cache: HashMap::new(),
@@ -168,10 +180,12 @@ impl JitCompiler {
         }
     }
 
+    /// Sets memory size.
     pub fn set_memory_size(&mut self, size: u32) {
         self.memory_size = size;
     }
 
+    /// Compiles the selected function.
     pub fn compile(&mut self, module: &Module, func_idx: u32) -> Result<CompiledFunction> {
         let cache_key = self.compute_cache_key(module, func_idx);
 
@@ -1182,18 +1196,22 @@ impl JitCompiler {
         hasher.finish()
     }
 
+    /// Sets tier.
     pub fn set_tier(&mut self, tier: CompilationTier) {
         self.compilation_tier = tier;
     }
 
+    /// Clears cache.
     pub fn clear_cache(&mut self) {
         self.code_cache.clear();
     }
 
+    /// Returns the number of cached compiled functions.
     pub fn cache_size(&self) -> usize {
         self.code_cache.len()
     }
 
+    /// Returns compiled.
     pub fn get_compiled(&self, module: &Module, func_idx: u32) -> Option<&CompiledFunction> {
         let cache_key = self.compute_cache_key(module, func_idx);
         self.code_cache.get(&cache_key)
@@ -1222,6 +1240,7 @@ impl JitCompiler {
             .ok_or_else(|| WasmError::Runtime(format!("function {} not found", func_idx)))
     }
 
+    /// Records a function call for tiering and OSR decisions.
     pub fn record_call(&mut self, func_idx: u64) {
         let count = self.call_counts.entry(func_idx).or_insert(0);
         *count += 1;
@@ -1231,42 +1250,52 @@ impl JitCompiler {
         }
     }
 
+    /// Returns call count.
     pub fn get_call_count(&self, func_idx: u64) -> u64 {
         *self.call_counts.get(&func_idx).unwrap_or(&0)
     }
 
+    /// Returns whether hot.
     pub fn is_hot(&self, func_idx: u64) -> bool {
         self.get_call_count(func_idx) >= HOT_THRESHOLD
     }
 
+    /// Returns whether the function should be considered for OSR.
     pub fn should_osr(&self, func_idx: u64) -> bool {
         self.osr_enabled && self.is_hot(func_idx)
     }
 
+    /// Queues the function for on-stack replacement.
     pub fn queue_for_osr(&mut self, func_idx: u64) {
         self.osr_queue.push(func_idx);
     }
 
+    /// Returns next osr candidate.
     pub fn get_next_osr_candidate(&mut self) -> Option<u64> {
         self.osr_queue.pop()
     }
 
+    /// Returns whether this value has osr candidates.
     pub fn has_osr_candidates(&self) -> bool {
         !self.osr_queue.is_empty()
     }
 
+    /// Enables osr.
     pub fn enable_osr(&mut self) {
         self.osr_enabled = true;
     }
 
+    /// Disables osr.
     pub fn disable_osr(&mut self) {
         self.osr_enabled = false;
     }
 
+    /// Returns whether osr enabled.
     pub fn is_osr_enabled(&self) -> bool {
         self.osr_enabled
     }
 
+    /// Queues an optimised OSR compilation task.
     pub fn queue_osr_compilation(&mut self, func_idx: u64, module_id: u64, priority: u32) {
         let task = OsrCompilationTask {
             func_idx,
@@ -1276,14 +1305,17 @@ impl JitCompiler {
         self.osr_compilation_queue.push(task);
     }
 
+    /// Returns next osr task.
     pub fn get_next_osr_task(&mut self) -> Option<OsrCompilationTask> {
         self.osr_compilation_queue.pop()
     }
 
+    /// Returns whether this value has pending osr tasks.
     pub fn has_pending_osr_tasks(&self) -> bool {
         !self.osr_compilation_queue.is_empty()
     }
 
+    /// Compiles an optimised version of the selected function.
     pub fn compile_optimized(
         &mut self,
         module: &Module,
@@ -1295,6 +1327,7 @@ impl JitCompiler {
         result
     }
 
+    /// Creates osr entry point.
     pub fn create_osr_entry_point(&self, _func_idx: u64, code: &[u8]) -> Vec<u8> {
         let mut entry = Vec::new();
         entry.extend_from_slice(code);
@@ -1302,20 +1335,28 @@ impl JitCompiler {
     }
 }
 
+/// Constant `HOT_THRESHOLD`.
 pub const HOT_THRESHOLD: u64 = 1000;
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
+/// Captured frame metadata used for on-stack replacement.
 pub struct OsrFrameMetadata {
+    /// Function index associated with the captured frame.
     pub func_idx: u64,
+    /// Program-counter offset within the function.
     pub pc: u32,
+    /// The local values.
     pub locals: Vec<OsrValue>,
+    /// Operand-stack values captured at the transition point.
     pub operand_stack: Vec<OsrValue>,
+    /// Control-flow frames captured at the transition point.
     pub control_frames: Vec<OsrControlFrame>,
 }
 
 #[allow(dead_code)]
 impl OsrFrameMetadata {
+    /// Creates a new `OsrFrameMetadata`.
     pub fn new(func_idx: u64, pc: u32) -> Self {
         Self {
             func_idx,
@@ -1326,21 +1367,25 @@ impl OsrFrameMetadata {
         }
     }
 
+    /// Returns this value configured with locals.
     pub fn with_locals(mut self, locals: Vec<OsrValue>) -> Self {
         self.locals = locals;
         self
     }
 
+    /// Returns this value configured with operand stack.
     pub fn with_operand_stack(mut self, stack: Vec<OsrValue>) -> Self {
         self.operand_stack = stack;
         self
     }
 
+    /// Returns this value configured with control frames.
     pub fn with_control_frames(mut self, frames: Vec<OsrControlFrame>) -> Self {
         self.control_frames = frames;
         self
     }
 
+    /// Copies captured local values into the target storage.
     pub fn transfer_locals(&self, target: &mut [OsrValue]) {
         for (i, val) in self.locals.iter().enumerate() {
             if i < target.len() {
@@ -1349,6 +1394,7 @@ impl OsrFrameMetadata {
         }
     }
 
+    /// Copies captured stack values into the target storage.
     pub fn transfer_stack(&self, target: &mut Vec<OsrValue>) {
         target.clear();
         target.extend_from_slice(&self.operand_stack);
@@ -1357,16 +1403,23 @@ impl OsrFrameMetadata {
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
+/// A value carried through an on-stack replacement transition.
 pub enum OsrValue {
+    /// A 32-bit integer value.
     I32(i32),
+    /// A 64-bit integer value.
     I64(i64),
+    /// A 32-bit floating-point value.
     F32(f32),
+    /// A 64-bit floating-point value.
     F64(f64),
+    /// A nullable reference encoded as an optional raw handle.
     Ref(Option<u64>),
 }
 
 #[allow(dead_code)]
 impl OsrValue {
+    /// Converts a WebAssembly value into its OSR representation.
     pub fn from_wasm_value(wasm: crate::runtime::WasmValue) -> Self {
         match wasm {
             crate::runtime::WasmValue::I32(v) => OsrValue::I32(v),
@@ -1379,6 +1432,7 @@ impl OsrValue {
         }
     }
 
+    /// Converts this OSR value back into a WebAssembly value.
     pub fn to_wasm_value(&self) -> crate::runtime::WasmValue {
         match self {
             OsrValue::I32(v) => crate::runtime::WasmValue::I32(*v),
@@ -1392,22 +1446,32 @@ impl OsrValue {
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
+/// Control-frame metadata captured for on-stack replacement.
 pub struct OsrControlFrame {
+    /// Encoded block type for the frame.
     pub block_type: u32,
+    /// Start program-counter offset for the frame.
     pub start_pc: u32,
+    /// End program-counter offset for the frame.
     pub end_pc: u32,
 }
 
 #[allow(dead_code)]
+/// Runtime state tracked for a function considered for OSR.
 pub struct OsrContext {
+    /// Function index associated with the context.
     pub func_idx: u64,
+    /// Number of observed calls for the function.
     pub call_count: u64,
+    /// Current OSR state for the function.
     pub state: OsrState,
+    /// Captured frame metadata, when available.
     pub frame_metadata: Option<OsrFrameMetadata>,
 }
 
 #[allow(dead_code)]
 impl OsrContext {
+    /// Creates a new `OsrContext`.
     pub fn new(func_idx: u64, call_count: u64) -> Self {
         Self {
             func_idx,
@@ -1417,11 +1481,13 @@ impl OsrContext {
         }
     }
 
+    /// Returns this value configured with metadata.
     pub fn with_metadata(mut self, metadata: OsrFrameMetadata) -> Self {
         self.frame_metadata = Some(metadata);
         self
     }
 
+    /// Extracts captured local values.
     pub fn extract_locals(&self) -> Vec<OsrValue> {
         self.frame_metadata
             .as_ref()
@@ -1429,6 +1495,7 @@ impl OsrContext {
             .unwrap_or_default()
     }
 
+    /// Extracts the captured operand stack.
     pub fn extract_operand_stack(&self) -> Vec<OsrValue> {
         self.frame_metadata
             .as_ref()
@@ -1436,6 +1503,7 @@ impl OsrContext {
             .unwrap_or_default()
     }
 
+    /// Extracts the captured control frames.
     pub fn extract_control_frames(&self) -> Vec<OsrControlFrame> {
         self.frame_metadata
             .as_ref()
@@ -1443,14 +1511,17 @@ impl OsrContext {
             .unwrap_or_default()
     }
 
+    /// Sets state.
     pub fn set_state(&mut self, state: OsrState) {
         self.state = state;
     }
 
+    /// Marks the transition as ready.
     pub fn mark_ready(&mut self) {
         self.state = OsrState::Ready;
     }
 
+    /// Marks the transition as in progress.
     pub fn mark_transitioning(&mut self) {
         self.state = OsrState::Transitioning;
     }
@@ -1458,43 +1529,55 @@ impl OsrContext {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
+/// Lifecycle state for an OSR candidate.
 pub enum OsrState {
+    /// The function is queued but not yet being compiled.
     Pending,
+    /// An optimised version is currently being compiled.
     Compiling,
+    /// An optimised version is ready for transition.
     Ready,
+    /// Execution is actively transitioning into optimised code.
     Transitioning,
 }
 
+/// Osr queue.
 pub struct OsrQueue {
     queue: VecDeque<u64>,
 }
 
 #[allow(dead_code)]
 impl OsrQueue {
+    /// Creates a new `OsrQueue`.
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
         }
     }
 
+    /// Pushes a value onto the stack.
     pub fn push(&mut self, func_idx: u64) {
         if !self.queue.contains(&func_idx) {
             self.queue.push_back(func_idx);
         }
     }
 
+    /// Pops and returns the top value, if present.
     pub fn pop(&mut self) -> Option<u64> {
         self.queue.pop_front()
     }
 
+    /// Returns whether the collection contains the given item.
     pub fn contains(&self, func_idx: u64) -> bool {
         self.queue.contains(&func_idx)
     }
 
+    /// Returns the length.
     pub fn len(&self) -> usize {
         self.queue.len()
     }
 
+    /// Returns `true` if this value is empty.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -1507,22 +1590,29 @@ impl Default for OsrQueue {
 }
 
 #[derive(Clone)]
+/// A queued request to compile an OSR target.
 pub struct OsrCompilationTask {
+    /// Function index to compile.
     pub func_idx: u64,
+    /// Module identifier used to resolve the function.
     pub module_id: u64,
+    /// Scheduling priority for the task.
     pub priority: u32,
 }
 
+/// Osr compilation queue.
 pub struct OsrCompilationQueue {
     tasks: Vec<OsrCompilationTask>,
 }
 
 #[allow(dead_code)]
 impl OsrCompilationQueue {
+    /// Creates a new `OsrCompilationQueue`.
     pub fn new() -> Self {
         Self { tasks: Vec::new() }
     }
 
+    /// Pushes a value onto the stack.
     pub fn push(&mut self, task: OsrCompilationTask) {
         let pos = self
             .tasks
@@ -1532,6 +1622,7 @@ impl OsrCompilationQueue {
         self.tasks.insert(pos, task);
     }
 
+    /// Pops and returns the top value, if present.
     pub fn pop(&mut self) -> Option<OsrCompilationTask> {
         if self.tasks.is_empty() {
             None
@@ -1540,10 +1631,12 @@ impl OsrCompilationQueue {
         }
     }
 
+    /// Returns the length.
     pub fn len(&self) -> usize {
         self.tasks.len()
     }
 
+    /// Returns `true` if this value is empty.
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
@@ -1556,21 +1649,30 @@ impl Default for OsrCompilationQueue {
 }
 
 #[allow(dead_code)]
+/// Transition stub used to enter optimised code during OSR.
 pub struct OsrTrampoline {
+    /// Source compilation tier for the transition.
     pub from_tier: CompilationTier,
+    /// Destination compilation tier for the transition.
     pub to_tier: CompilationTier,
+    /// The encoded bytes.
     pub code: Vec<u8>,
+    /// OSR entry points available in the generated code.
     pub entry_points: Vec<OsrEntryPoint>,
 }
 
 #[derive(Clone, Debug)]
+/// An entry point into optimised code for a specific program-counter offset.
 pub struct OsrEntryPoint {
+    /// WebAssembly program-counter offset for the transition site.
     pub pc_offset: u32,
+    /// Native target address for the transition.
     pub target_address: u64,
 }
 
 #[allow(dead_code)]
 impl OsrTrampoline {
+    /// Creates a new `OsrTrampoline`.
     pub fn new(from_tier: CompilationTier, to_tier: CompilationTier) -> Self {
         Self {
             from_tier,
@@ -1580,6 +1682,7 @@ impl OsrTrampoline {
         }
     }
 
+    /// Adds entry point.
     pub fn add_entry_point(&mut self, pc_offset: u32, target_address: u64) {
         self.entry_points.push(OsrEntryPoint {
             pc_offset,
@@ -1587,6 +1690,7 @@ impl OsrTrampoline {
         });
     }
 
+    /// Patches compiled code for the requested transition.
     pub fn patch_code(&self, code: &mut [u8], _target_func_idx: u64) -> Result<()> {
         for entry in &self.entry_points {
             if (entry.pc_offset as usize) < code.len() {
@@ -1605,15 +1709,21 @@ impl OsrTrampoline {
 }
 
 #[allow(dead_code)]
+/// Osr jump buffer.
 pub struct OsrJumpBuffer {
+    /// The local values.
     pub locals: Vec<OsrValue>,
+    /// Operand-stack values captured for the jump.
     pub operand_stack: Vec<OsrValue>,
+    /// Program-counter offset to resume from.
     pub pc: u32,
+    /// Function index associated with the buffer.
     pub func_idx: u64,
 }
 
 #[allow(dead_code)]
 impl OsrJumpBuffer {
+    /// Creates a new `OsrJumpBuffer`.
     pub fn new() -> Self {
         Self {
             locals: Vec::new(),
@@ -1623,6 +1733,7 @@ impl OsrJumpBuffer {
         }
     }
 
+    /// Captures the current execution state.
     pub fn capture(&mut self, func_idx: u64, pc: u32, locals: Vec<OsrValue>, stack: Vec<OsrValue>) {
         self.func_idx = func_idx;
         self.pc = pc;
@@ -1630,10 +1741,12 @@ impl OsrJumpBuffer {
         self.operand_stack = stack;
     }
 
+    /// Restores the captured execution state.
     pub fn restore(&self) -> (u32, Vec<OsrValue>, Vec<OsrValue>) {
         (self.pc, self.locals.clone(), self.operand_stack.clone())
     }
 
+    /// Transfers the captured OSR state into the target storage.
     pub fn transfer_to(&self, target_locals: &mut [OsrValue], target_stack: &mut Vec<OsrValue>) {
         for (i, val) in self.locals.iter().enumerate() {
             if i < target_locals.len() {
@@ -1652,6 +1765,7 @@ impl Default for OsrJumpBuffer {
 }
 
 #[cfg(test)]
+/// Jit runtime.
 pub struct JitRuntime {
     compiler: JitCompiler,
     compiled_code: HashMap<u64, Vec<u8>>,
@@ -1659,6 +1773,7 @@ pub struct JitRuntime {
 
 #[cfg(test)]
 impl JitRuntime {
+    /// Creates a new `JitRuntime`.
     pub fn new() -> Self {
         Self {
             compiler: JitCompiler::new(),
@@ -1666,6 +1781,7 @@ impl JitRuntime {
         }
     }
 
+    /// Compiles all supported functions in the module.
     pub fn compile_module(&mut self, module: &Module) -> Result<()> {
         let import_func_count = JitCompiler::import_func_count(module);
         for (idx, _) in module.funcs.iter().enumerate() {
@@ -1674,6 +1790,7 @@ impl JitRuntime {
         Ok(())
     }
 
+    /// Compiles a single function from the module.
     pub fn compile_function(&mut self, module: &Module, func_idx: u32) -> Result<CompiledFunction> {
         let cache_key = self.compiler.compute_cache_key(module, func_idx);
         let compiled = self.compiler.compile(module, func_idx)?;
@@ -1685,6 +1802,7 @@ impl JitRuntime {
         Ok(compiled)
     }
 
+    /// Executes the requested function.
     pub fn execute(
         &self,
         module_idx: u32,

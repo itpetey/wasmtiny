@@ -1,26 +1,47 @@
+/// Import descriptor from the WebAssembly module.
+///
+/// Represents an import from an external module (e.g., host functions, memories).
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Import.
 pub struct Import {
+    /// The module name of the import.
     pub module: String,
+    /// The field name of the import.
     pub name: String,
+    /// The kind of import (function, table, memory, or global).
     pub kind: ImportKind,
 }
 
+/// The kind of an import.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Import kind.
 pub enum ImportKind {
+    /// A function import (type index).
     Func(u32),
+    /// A table import (table type).
     Table(crate::runtime::TableType),
+    /// A memory import (memory type).
     Memory(crate::runtime::MemoryType),
+    /// A global import (global type).
     Global(crate::runtime::GlobalType),
 }
 
+/// Import type descriptor.
+///
+/// Used during instantiation to specify what imports a module requires.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Import type.
 pub struct ImportType {
+    /// The module name of the import.
     pub module: String,
+    /// The field name of the import.
     pub name: String,
+    /// The type of import required.
     pub type_: ImportKind,
 }
 
 impl ImportType {
+    /// Creates a new `ImportType`.
     pub fn new(module: String, name: String, kind: ImportKind) -> Self {
         Self {
             module,

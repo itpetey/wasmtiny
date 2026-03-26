@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use super::runtime::{AotExport, AotModule};
 
+/// Ahead-of-time module loader.
 pub struct AotLoader {
     parser: Parser,
     validator: Validator,
@@ -11,10 +12,12 @@ pub struct AotLoader {
 }
 
 impl AotLoader {
+    /// Creates a new `AotLoader`.
     pub fn new() -> Self {
         Self::with_store(Arc::new(Mutex::new(crate::runtime::Store::new())))
     }
 
+    /// Returns this value configured with store.
     pub fn with_store(store: Arc<Mutex<crate::runtime::Store>>) -> Self {
         Self {
             parser: Parser::new(),
@@ -23,6 +26,7 @@ impl AotLoader {
         }
     }
 
+    /// Loads a WebAssembly module into the target runtime representation.
     pub fn load(&self, data: &[u8]) -> Result<AotModule> {
         self.load_with_store(data, self.store.clone())
     }
@@ -36,10 +40,12 @@ impl AotLoader {
         self.convert_to_aot_module(&module, store)
     }
 
+    /// Loads wasm.
     pub fn load_wasm(&self, data: &[u8]) -> Result<AotModule> {
         self.load(data)
     }
 
+    /// Validates the provided WebAssembly module or binary input.
     pub fn validate(&self, data: &[u8]) -> Result<()> {
         self.parse_validated_module(data).map(|_| ())
     }

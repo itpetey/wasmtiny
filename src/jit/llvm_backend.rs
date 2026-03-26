@@ -102,6 +102,7 @@ fn module_fingerprint(module: &Module) -> u64 {
 
 /// A compiled WASM function ready for execution.
 #[derive(Debug, Clone)]
+/// Compiled llvm function.
 pub struct CompiledLlvmFunction {
     /// The function index in the original WASM module.
     pub func_idx: u32,
@@ -186,6 +187,7 @@ impl LlvmJit {
     ///
     /// Returns an error if LLVM initialisation fails or the JIT cannot be created.
     #[cfg(feature = "llvm-jit")]
+    /// Creates a new `LlvmJit`.
     pub fn new(_module_name: &str) -> Result<Self> {
         unsafe {
             Self::initialise_llvm()?;
@@ -248,21 +250,25 @@ impl LlvmJit {
     }
 
     #[cfg(not(feature = "llvm-jit"))]
+    /// Creates a new `LlvmJit`.
     pub fn new(_module_name: &str) -> Result<Self> {
         Err(WasmError::Runtime(
             "LLVM JIT not available: compile with --features llvm-jit".to_string(),
         ))
     }
 
+    /// Enables safepoints.
     pub fn enable_safepoints(&mut self) {
         self.safepoints_enabled = true;
     }
 
+    /// Disables safepoints.
     pub fn disable_safepoints(&mut self) {
         self.safepoints_enabled = false;
         self.suspend_requested = false;
     }
 
+    /// Requests suspension at the next safepoint.
     pub fn request_safepoint(&mut self) -> Result<()> {
         if !self.safepoints_enabled {
             return Err(WasmError::Runtime(
@@ -278,6 +284,7 @@ impl LlvmJit {
         Ok(())
     }
 
+    /// Takes suspended handle.
     pub fn take_suspended_handle(&mut self) -> Option<SuspendedHandle> {
         self.suspended_handle.take()
     }
@@ -286,10 +293,12 @@ impl LlvmJit {
         self.jit_id
     }
 
+    /// Returns whether suspended.
     pub fn is_suspended(&self) -> bool {
         self.active_suspension_id.is_some() || self.resumed_state.is_some()
     }
 
+    /// Cancels the currently suspended execution, if any.
     pub fn cancel_suspended_execution(&mut self) -> Result<()> {
         let had_suspended_state = self.is_suspended();
         if let Some(thread_id) = self.last_execution_thread
@@ -322,6 +331,7 @@ impl LlvmJit {
         Ok(())
     }
 
+    /// Attempts to resume execution from a suspended handle.
     pub fn try_resume(&mut self, handle: &SuspendedHandle) -> Result<()> {
         if let Some(thread_id) = self.last_execution_thread
             && thread_id != std::thread::current().id()
@@ -375,6 +385,7 @@ impl LlvmJit {
         }
     }
 
+    /// Continues execution after a suspension point.
     pub fn continue_execution(&mut self) -> Result<Vec<WasmValue>> {
         let result = (|| {
             if self.last_execution_thread != Some(std::thread::current().id()) {
@@ -434,6 +445,7 @@ impl LlvmJit {
     }
 
     #[cfg(feature = "llvm-jit")]
+    /// Registers runtime helpers.
     pub fn register_runtime_helpers(&mut self) -> Result<()> {
         use super::llvm_runtime::*;
 
@@ -603,6 +615,7 @@ impl LlvmJit {
     ///
     /// Returns an error if translation or compilation fails for any function.
     #[cfg(feature = "llvm-jit")]
+    /// Compiles all supported functions in the module.
     pub fn compile_module(&mut self, module: &Module) -> Result<Vec<CompiledLlvmFunction>> {
         Self::validate_module_compatibility(module)?;
         if self.is_suspended() {
@@ -744,6 +757,7 @@ impl LlvmJit {
         }
     }
 
+    /// Returns function entry.
     pub fn get_function_entry(&self, func_idx: u32) -> Option<*const u8> {
         self.compiled_functions
             .get(&func_idx)
@@ -751,6 +765,7 @@ impl LlvmJit {
     }
 
     #[cfg(feature = "llvm-jit")]
+    /// Registers host function.
     pub fn register_host_function(&mut self, name: &str, addr: *const u8) -> Result<()> {
         unsafe {
             use llvm_sys::orc2::lljit::LLVMOrcLLJITMangleAndIntern;
@@ -844,6 +859,7 @@ impl LlvmJit {
     /// The caller must ensure the execution context is set for the current thread.
     /// The same requirement applies before calling `continue_execution()`.
     #[cfg(feature = "llvm-jit")]
+    /// Invokes function.
     pub fn invoke_function(&mut self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         let result = self.invoke_function_internal(func_idx, args, true);
         if !matches!(result, Err(WasmError::Suspended(_))) {

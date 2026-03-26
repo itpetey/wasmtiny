@@ -9,17 +9,27 @@ use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Type alias for a shared (thread-safe) memory reference.
 pub type SharedMemory = Arc<Mutex<Memory>>;
+/// Type alias for a shared (thread-safe) table reference.
 pub type SharedTable = Arc<Mutex<Table>>;
+/// Type alias for a shared (thread-safe) global reference.
 pub type SharedGlobal = Arc<Mutex<Global>>;
 
+/// A WebAssembly instance.
+///
+/// An instance is an instantiated module with runtime state including memories,
+/// tables, globals, and exported functions.
 pub struct Instance {
     module: Arc<Module>,
     store: Arc<Mutex<Store>>,
     shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
     meter: Arc<InstanceMeter>,
+    /// The memory values.
     pub memories: Vec<SharedMemory>,
+    /// The table values.
     pub tables: Vec<SharedTable>,
+    /// The global values.
     pub globals: Vec<SharedGlobal>,
     shared_memory_mappings: HashMap<SharedMemoryMappingId, SharedMemoryMapping>,
     funcs: Vec<Arc<dyn HostFunc>>,
@@ -27,12 +37,22 @@ pub struct Instance {
     import_bindings: Vec<Option<Extern>>,
 }
 
+/// An external value that can be imported or exported.
+///
+/// Represents a function, table, memory, or global that can be passed between
+/// the host and WebAssembly.
 #[derive(Clone)]
+/// A host or guest value exposed through imports and exports.
 pub enum Extern {
+    /// A function index within the instance.
     Func(u32),
+    /// A host-provided function.
     HostFunc(Arc<dyn HostFunc>),
+    /// A shared table value.
     Table(SharedTable),
+    /// A shared linear memory value.
     Memory(SharedMemory),
+    /// A shared global value.
     Global(SharedGlobal),
 }
 
@@ -48,9 +68,39 @@ impl std::fmt::Debug for Extern {
     }
 }
 
+/// Trait for host-provided functions callable from WebAssembly.
+///
+/// Implement this trait to create host functions that can be imported into
+/// WebAssembly modules.
+///
+/// # Example
+///
+/// ```
+/// use wasmtiny::runtime::{Store, WasmValue, Result, FunctionType, ValType, NumType, HostFunc};
+///
+/// struct Add;
+///
+/// impl HostFunc for Add {
+///     fn call(&self, _store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+///         let a = args[0].i32()?;
+///         let b = args[1].i32()?;
+///         Ok(vec![WasmValue::I32(a + b)])
+///     }
+///
+///     fn function_type(&self) -> Option<&FunctionType> {
+///         static TYPE: std::sync::OnceLock<FunctionType> = std::sync::OnceLock::new();
+///         Some(TYPE.get_or_init(|| FunctionType::new(
+///             vec![ValType::Num(NumType::I32), ValType::Num(NumType::I32)],
+///             vec![ValType::Num(NumType::I32)]
+///         )))
+///     }
+/// }
+/// ```
 pub trait HostFunc: Send + Sync + 'static {
+    /// Executes the host function synchronously.
     fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>>;
 
+    /// Executes the host function and may suspend before completion.
     fn call_with_suspension(
         &self,
         store: &mut Store,
@@ -59,13 +109,23 @@ pub trait HostFunc: Send + Sync + 'static {
         self.call(store, args).map(HostCallOutcome::Complete)
     }
 
+    /// Returns the declared function signature for this host function.
     fn function_type(&self) -> Option<&FunctionType>;
 }
 
+/// Outcome of a host function call.
+///
+/// Used to support asynchronous host calls that may yield pending work.
 #[derive(Debug, Clone, PartialEq)]
+/// Result of invoking a host function.
 pub enum HostCallOutcome {
+    /// The host call completed immediately with result values.
     Complete(Vec<WasmValue>),
-    Pending { pending_work: Vec<u8> },
+    /// The host call yielded and must be resumed later.
+    Pending {
+        /// Opaque host-managed state required to resume the call.
+        pending_work: Vec<u8>,
+    },
 }
 
 impl<F> HostFunc for F
@@ -81,9 +141,13 @@ where
     }
 }
 
+/// A registered host function together with its signature metadata.
 pub struct NativeFuncRef {
+    /// The host function implementation.
     pub func: Arc<dyn HostFunc>,
+    /// The function signature exposed to WebAssembly.
     pub func_type: FunctionType,
+    /// Optional symbolic name used for diagnostics.
     pub name: Option<String>,
 }
 
@@ -117,6 +181,7 @@ impl HostFunc for TypedHostFunc {
 }
 
 impl NativeFuncRef {
+    /// Creates a new `NativeFuncRef`.
     pub fn new(func: Arc<dyn HostFunc>, func_type: FunctionType) -> Self {
         Self {
             func,
@@ -125,15 +190,18 @@ impl NativeFuncRef {
         }
     }
 
+    /// Returns this value configured with name.
     pub fn with_name(mut self, name: String) -> Self {
         self.name = Some(name);
         self
     }
 
+    /// Invokes the target function.
     pub fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.func.call(store, args)
     }
 
+    /// Calls with suspension.
     pub fn call_with_suspension(
         &self,
         store: &mut Store,
@@ -143,14 +211,22 @@ impl NativeFuncRef {
     }
 }
 
+/// The WebAssembly store.
+///
+/// A store holds all runtime state including instantiated instances and
+/// registered native (host) functions. It is shared among instances to enable
+/// inter-module communication.
 #[derive(Default)]
+/// Shared runtime store for instances and host resources.
 pub struct Store {
+    /// Instances currently owned by this store.
     pub instances: Vec<Instance>,
     native_funcs: Vec<NativeFuncRef>,
     shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
 }
 
 impl Store {
+    /// Creates a new `Store`.
     pub fn new() -> Self {
         Self {
             instances: Vec::new(),
@@ -163,11 +239,13 @@ impl Store {
         self.shared_memory.clone()
     }
 
+    /// Adds instance.
     pub fn add_instance(&mut self, instance: Instance) -> usize {
         self.instances.push(instance);
         self.instances.len() - 1
     }
 
+    /// Registers native.
     pub fn register_native(&mut self, func: Box<dyn HostFunc>, func_type: FunctionType) -> u32 {
         let idx = self.native_funcs.len() as u32;
         self.native_funcs
@@ -175,6 +253,7 @@ impl Store {
         idx
     }
 
+    /// Registers native func.
     pub fn register_native_func(
         &mut self,
         _name: &str,
@@ -184,26 +263,32 @@ impl Store {
         self.register_native(func, func_type)
     }
 
+    /// Returns native func.
     pub fn get_native_func(&self, idx: u32) -> Option<&NativeFuncRef> {
         self.native_funcs.get(idx as usize)
     }
 
+    /// Returns native func count.
     pub fn get_native_func_count(&self) -> u32 {
         self.native_funcs.len() as u32
     }
 
+    /// Allocates shared region.
     pub fn allocate_shared_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
         self.shared_memory.lock().allocate_region(size, alignment)
     }
 
+    /// Destroys shared region.
     pub fn destroy_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
         self.shared_memory.lock().destroy_region(region_id)
     }
 
+    /// Returns the length of the shared region in bytes.
     pub fn shared_region_len(&self, region_id: SharedRegionId) -> Result<u32> {
         self.shared_memory.lock().region_len(region_id)
     }
 
+    /// Attaches shared region.
     pub fn attach_shared_region(
         &mut self,
         region_id: SharedRegionId,
@@ -215,10 +300,12 @@ impl Store {
             .attach_region(region_id, region_offset, len)
     }
 
+    /// Detaches shared region.
     pub fn detach_shared_region(&mut self, mapping: SharedMemoryMapping) -> Result<()> {
         self.shared_memory.lock().detach_region(mapping)
     }
 
+    /// Reads shared region.
     pub fn read_shared_region(
         &self,
         mapping: SharedMemoryMapping,
@@ -229,6 +316,7 @@ impl Store {
         resolved.read(offset, buf)
     }
 
+    /// Writes shared region.
     pub fn write_shared_region(
         &self,
         mapping: SharedMemoryMapping,
@@ -239,11 +327,13 @@ impl Store {
         resolved.write(offset, buf)
     }
 
+    /// Reads shared region u8.
     pub fn read_shared_region_u8(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<u8> {
         let resolved = self.resolve_shared_memory_mapping(mapping)?;
         resolved.read_u8(offset)
     }
 
+    /// Writes shared region u8.
     pub fn write_shared_region_u8(
         &self,
         mapping: SharedMemoryMapping,
@@ -254,11 +344,13 @@ impl Store {
         resolved.write_u8(offset, value)
     }
 
+    /// Reads shared region i32.
     pub fn read_shared_region_i32(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<i32> {
         let resolved = self.resolve_shared_memory_mapping(mapping)?;
         resolved.read_i32(offset)
     }
 
+    /// Writes shared region i32.
     pub fn write_shared_region_i32(
         &self,
         mapping: SharedMemoryMapping,
@@ -269,11 +361,13 @@ impl Store {
         resolved.write_i32(offset, value)
     }
 
+    /// Reads shared region i64.
     pub fn read_shared_region_i64(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<i64> {
         let resolved = self.resolve_shared_memory_mapping(mapping)?;
         resolved.read_i64(offset)
     }
 
+    /// Writes shared region i64.
     pub fn write_shared_region_i64(
         &self,
         mapping: SharedMemoryMapping,
@@ -284,11 +378,13 @@ impl Store {
         resolved.write_i64(offset, value)
     }
 
+    /// Reads shared region f32.
     pub fn read_shared_region_f32(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<f32> {
         let resolved = self.resolve_shared_memory_mapping(mapping)?;
         resolved.read_f32(offset)
     }
 
+    /// Writes shared region f32.
     pub fn write_shared_region_f32(
         &self,
         mapping: SharedMemoryMapping,
@@ -299,11 +395,13 @@ impl Store {
         resolved.write_f32(offset, value)
     }
 
+    /// Reads shared region f64.
     pub fn read_shared_region_f64(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<f64> {
         let resolved = self.resolve_shared_memory_mapping(mapping)?;
         resolved.read_f64(offset)
     }
 
+    /// Writes shared region f64.
     pub fn write_shared_region_f64(
         &self,
         mapping: SharedMemoryMapping,
@@ -323,14 +421,17 @@ impl Store {
 }
 
 impl Instance {
+    /// Returns the underlying module.
     pub fn module(&self) -> &Module {
         &self.module
     }
 
+    /// Creates a new `Instance`.
     pub fn new(module: Arc<Module>) -> Result<Self> {
         Self::new_with_store(module, Arc::new(Mutex::new(Store::new())))
     }
 
+    /// Creates a new instance backed by the provided store.
     pub fn new_with_store(module: Arc<Module>, store: Arc<Mutex<Store>>) -> Result<Self> {
         let shared_memory = store
             .lock()
@@ -344,10 +445,12 @@ impl Instance {
         Ok(instance)
     }
 
+    /// Returns this value configured with imports.
     pub fn with_imports(module: Arc<Module>, imports: &[(&str, &str, Extern)]) -> Result<Self> {
         Self::with_imports_and_store(module, imports, Arc::new(Mutex::new(Store::new())))
     }
 
+    /// Returns this value configured with imports and store.
     pub fn with_imports_and_store(
         module: Arc<Module>,
         imports: &[(&str, &str, Extern)],
@@ -564,6 +667,7 @@ impl Instance {
         }
     }
 
+    /// Adds import.
     pub fn add_import(&mut self, module_name: &str, name: &str, extern_: &Extern) -> Result<()> {
         let matching_indices = self
             .module
@@ -605,26 +709,32 @@ impl Instance {
         }))
     }
 
+    /// Returns func.
     pub fn get_func(&self, idx: u32) -> Option<&dyn HostFunc> {
         self.funcs.get(idx as usize).map(|f| f.as_ref())
     }
 
+    /// Returns the memory at the given index.
     pub fn memory(&self, idx: u32) -> Option<&SharedMemory> {
         self.memories.get(idx as usize)
     }
 
+    /// Allocates shared region.
     pub fn allocate_shared_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
         self.shared_memory.lock().allocate_region(size, alignment)
     }
 
+    /// Destroys shared region.
     pub fn destroy_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
         self.shared_memory.lock().destroy_region(region_id)
     }
 
+    /// Returns the length of the shared region in bytes.
     pub fn shared_region_len(&self, region_id: SharedRegionId) -> Result<u32> {
         self.shared_memory.lock().region_len(region_id)
     }
 
+    /// Attaches shared region.
     pub fn attach_shared_region(
         &mut self,
         region_id: SharedRegionId,
@@ -647,6 +757,7 @@ impl Instance {
         Ok(mapping_id)
     }
 
+    /// Attaches shared region whole.
     pub fn attach_shared_region_whole(
         &mut self,
         region_id: SharedRegionId,
@@ -655,6 +766,7 @@ impl Instance {
         self.attach_shared_region(region_id, 0, len)
     }
 
+    /// Detaches shared region.
     pub fn detach_shared_region(&mut self, mapping_id: SharedMemoryMappingId) -> Result<()> {
         let mapping = *self
             .shared_memory_mappings
@@ -670,6 +782,7 @@ impl Instance {
         Ok(())
     }
 
+    /// Reads shared region.
     pub fn read_shared_region(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -680,6 +793,7 @@ impl Instance {
         resolved.read(offset, buf)
     }
 
+    /// Writes shared region.
     pub fn write_shared_region(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -690,6 +804,7 @@ impl Instance {
         resolved.write(offset, buf)
     }
 
+    /// Reads shared region u8.
     pub fn read_shared_region_u8(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -699,6 +814,7 @@ impl Instance {
         resolved.read_u8(offset)
     }
 
+    /// Writes shared region u8.
     pub fn write_shared_region_u8(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -709,6 +825,7 @@ impl Instance {
         resolved.write_u8(offset, value)
     }
 
+    /// Reads shared region i32.
     pub fn read_shared_region_i32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -718,6 +835,7 @@ impl Instance {
         resolved.read_i32(offset)
     }
 
+    /// Writes shared region i32.
     pub fn write_shared_region_i32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -728,6 +846,7 @@ impl Instance {
         resolved.write_i32(offset, value)
     }
 
+    /// Reads shared region i64.
     pub fn read_shared_region_i64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -737,6 +856,7 @@ impl Instance {
         resolved.read_i64(offset)
     }
 
+    /// Writes shared region i64.
     pub fn write_shared_region_i64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -747,6 +867,7 @@ impl Instance {
         resolved.write_i64(offset, value)
     }
 
+    /// Reads shared region f32.
     pub fn read_shared_region_f32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -756,6 +877,7 @@ impl Instance {
         resolved.read_f32(offset)
     }
 
+    /// Writes shared region f32.
     pub fn write_shared_region_f32(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -766,6 +888,7 @@ impl Instance {
         resolved.write_f32(offset, value)
     }
 
+    /// Reads shared region f64.
     pub fn read_shared_region_f64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -775,6 +898,7 @@ impl Instance {
         resolved.read_f64(offset)
     }
 
+    /// Writes shared region f64.
     pub fn write_shared_region_f64(
         &self,
         mapping_id: SharedMemoryMappingId,
@@ -785,22 +909,27 @@ impl Instance {
         resolved.write_f64(offset, value)
     }
 
+    /// Returns runtime statistics.
     pub fn stats(&self) -> Result<InstanceStats> {
         Ok(self.meter.snapshot(self.total_memory_pages()?))
     }
 
+    /// Returns the configured limits.
     pub fn limits(&self) -> InstanceLimits {
         self.meter.limits()
     }
 
+    /// Sets limits.
     pub fn set_limits(&mut self, limits: InstanceLimits) -> Result<()> {
         self.meter.set_limits(limits, self.total_memory_pages()?)
     }
 
+    /// Records executed instruction units for metering.
     pub fn record_execution(&self, units: u64) -> Result<()> {
         self.meter.charge_execution(units)
     }
 
+    /// Grows the selected memory by the requested number of pages.
     pub fn grow_memory(&mut self, idx: u32, delta: u32) -> Result<u32> {
         let memory = self
             .memory(idx)
@@ -815,6 +944,7 @@ impl Instance {
         memory.lock().map_err(poisoned_lock)?.grow(delta)
     }
 
+    /// Returns or updates memory grow wasm.
     pub fn memory_grow_wasm(&mut self, idx: u32, delta: i32) -> Result<i32> {
         let memory = self
             .memory(idx)
@@ -837,26 +967,32 @@ impl Instance {
         }
     }
 
+    /// Returns or updates memory mut.
     pub fn memory_mut(&mut self, idx: u32) -> Option<&mut SharedMemory> {
         self.memories.get_mut(idx as usize)
     }
 
+    /// Returns the table at the given index.
     pub fn table(&self, idx: u32) -> Option<&SharedTable> {
         self.tables.get(idx as usize)
     }
 
+    /// Returns or updates table mut.
     pub fn table_mut(&mut self, idx: u32) -> Option<&mut SharedTable> {
         self.tables.get_mut(idx as usize)
     }
 
+    /// Returns the global at the given index.
     pub fn global(&self, idx: u32) -> Option<&SharedGlobal> {
         self.globals.get(idx as usize)
     }
 
+    /// Returns the global at the given index mutably.
     pub fn global_mut(&mut self, idx: u32) -> Option<&mut SharedGlobal> {
         self.globals.get_mut(idx as usize)
     }
 
+    /// Invokes the target function.
     pub fn call(&mut self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         match self.call_with_suspension(func_idx, args)? {
             HostCallOutcome::Complete(results) => Ok(results),
@@ -866,6 +1002,7 @@ impl Instance {
         }
     }
 
+    /// Calls with suspension.
     pub fn call_with_suspension(
         &mut self,
         func_idx: u32,
@@ -894,10 +1031,12 @@ impl Instance {
         }
     }
 
+    /// Returns the export with the given name, if present.
     pub fn export(&self, name: &str) -> Option<&Extern> {
         self.exports.get(name)
     }
 
+    /// Adds export.
     pub fn add_export(&mut self, name: String, extern_: Extern) {
         self.exports.insert(name, extern_);
     }
