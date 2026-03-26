@@ -15,6 +15,16 @@ pub enum RefType {
     ExternRef,
 }
 
+impl RefType {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0x70 => RefType::FuncRef,
+            0x6F => RefType::ExternRef,
+            _ => RefType::FuncRef,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValType {
     Num(NumType),
@@ -41,6 +51,13 @@ impl ValType {
         match self {
             ValType::Ref(r) => Some(*r),
             _ => None,
+        }
+    }
+
+    pub fn hash_bytes(&self) -> Vec<u8> {
+        match self {
+            ValType::Num(nt) => vec![0, *nt as u8],
+            ValType::Ref(rt) => vec![1, *rt as u8],
         }
     }
 }

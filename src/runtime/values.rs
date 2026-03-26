@@ -51,6 +51,79 @@ impl WasmValue {
             _ => Err(WasmError::Runtime("expected f64".to_string())),
         }
     }
+
+    pub fn to_bytes(&self, out: &mut Vec<u8>) {
+        match self {
+            WasmValue::I32(v) => {
+                out.push(0);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            WasmValue::I64(v) => {
+                out.push(1);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            WasmValue::F32(v) => {
+                out.push(2);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            WasmValue::F64(v) => {
+                out.push(3);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            WasmValue::NullRef(rt) => {
+                out.push(4);
+                out.push(*rt as u8);
+            }
+            WasmValue::FuncRef(idx) => {
+                out.push(5);
+                out.extend_from_slice(&idx.to_le_bytes());
+            }
+            WasmValue::ExternRef(idx) => {
+                out.push(6);
+                out.extend_from_slice(&idx.to_le_bytes());
+            }
+        }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
+        if bytes.is_empty() {
+            return None;
+        }
+        match bytes[0] {
+            0 if bytes.len() >= 5 => {
+                let mut v = [0u8; 4];
+                v.copy_from_slice(&bytes[1..5]);
+                Some((WasmValue::I32(i32::from_le_bytes(v)), 5))
+            }
+            1 if bytes.len() >= 9 => {
+                let mut v = [0u8; 8];
+                v.copy_from_slice(&bytes[1..9]);
+                Some((WasmValue::I64(i64::from_le_bytes(v)), 9))
+            }
+            2 if bytes.len() >= 5 => {
+                let mut v = [0u8; 4];
+                v.copy_from_slice(&bytes[1..5]);
+                Some((WasmValue::F32(f32::from_le_bytes(v)), 5))
+            }
+            3 if bytes.len() >= 9 => {
+                let mut v = [0u8; 8];
+                v.copy_from_slice(&bytes[1..9]);
+                Some((WasmValue::F64(f64::from_le_bytes(v)), 9))
+            }
+            4 if bytes.len() >= 2 => Some((WasmValue::NullRef(RefType::from_u8(bytes[1])), 2)),
+            5 if bytes.len() >= 5 => {
+                let mut v = [0u8; 4];
+                v.copy_from_slice(&bytes[1..5]);
+                Some((WasmValue::FuncRef(u32::from_le_bytes(v)), 5))
+            }
+            6 if bytes.len() >= 5 => {
+                let mut v = [0u8; 4];
+                v.copy_from_slice(&bytes[1..5]);
+                Some((WasmValue::ExternRef(u32::from_le_bytes(v)), 5))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -73,5 +146,77 @@ mod tests {
     fn test_accessors() {
         let val = WasmValue::I32(42);
         assert_eq!(val.i32().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_i32() {
+        let val = WasmValue::I32(42);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_i64() {
+        let val = WasmValue::I64(12345678901234);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_f32() {
+        let val = WasmValue::F32(3.14);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_f64() {
+        let val = WasmValue::F64(2.718281828459045);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_nan() {
+        let val = WasmValue::F32(f32::NAN);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val.val_type(), restored.val_type());
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_funcref() {
+        let val = WasmValue::FuncRef(42);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_externref() {
+        let val = WasmValue::ExternRef(99);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_nullref() {
+        let val = WasmValue::NullRef(crate::runtime::RefType::FuncRef);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
     }
 }

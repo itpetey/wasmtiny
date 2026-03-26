@@ -164,6 +164,14 @@ impl Memory {
         self.data.len()
     }
 
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data[..]
+    }
+
     pub(crate) fn attach_meter(&mut self, meter: &Arc<InstanceMeter>) {
         self.prune_meters();
         if self
