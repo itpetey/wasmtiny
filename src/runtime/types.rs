@@ -185,12 +185,17 @@ impl TableType {
 pub struct MemoryType {
     /// Size limits in pages (64 KiB per page).
     pub limits: Limits,
+    /// Whether this memory is shared (atomic operations allowed).
+    pub shared: bool,
 }
 
 impl MemoryType {
     /// Creates a new `MemoryType`.
     pub fn new(limits: Limits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            shared: false,
+        }
     }
 
     /// Returns the WebAssembly page size in bytes.

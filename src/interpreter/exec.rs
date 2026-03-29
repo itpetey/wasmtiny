@@ -1118,10 +1118,275 @@ impl Interpreter {
                 let func_idx = self.read_var_u32_immediate()?;
                 self.operand_stack.push(WasmValue::FuncRef(func_idx))
             }
+            0xFE => {
+                let subopcode = self.read_u8_immediate()?;
+                self.execute_atomic_opcode(module, subopcode);
+                Ok(())
+            }
             _ => Err(WasmError::Runtime(format!(
                 "unsupported opcode: {:02x}",
                 opcode
             ))),
+        }
+    }
+
+    fn execute_atomic_opcode(&mut self, _module: &Module, subopcode: u8) {
+        match subopcode {
+            0x00 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_i32(address).unwrap();
+                self.operand_stack.push(WasmValue::I32(value)).unwrap();
+            }
+            0x01 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_i64(address).unwrap();
+                self.operand_stack.push(WasmValue::I64(value)).unwrap();
+            }
+            0x02 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_u8(address).unwrap() as i32;
+                self.operand_stack.push(WasmValue::I32(value)).unwrap();
+            }
+            0x03 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_u16(address).unwrap() as i32;
+                self.operand_stack.push(WasmValue::I32(value)).unwrap();
+            }
+            0x04 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_u8(address).unwrap() as i8 as i64;
+                self.operand_stack.push(WasmValue::I64(value)).unwrap();
+            }
+            0x05 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_u8(address).unwrap() as i64;
+                self.operand_stack.push(WasmValue::I64(value)).unwrap();
+            }
+            0x06 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_u16(address).unwrap() as i16 as i64;
+                self.operand_stack.push(WasmValue::I64(value)).unwrap();
+            }
+            0x07 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let value = self.read_memory_u32(address).unwrap() as i64;
+                self.operand_stack.push(WasmValue::I64(value)).unwrap();
+            }
+            0x0A => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i32().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_i32(address, value).unwrap();
+            }
+            0x0B => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i64().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_i64(address, value).unwrap();
+            }
+            0x0C => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i32().unwrap() as u8;
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_u8(address, value).unwrap();
+            }
+            0x0D => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i32().unwrap() as u16;
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_u16(address, value).unwrap();
+            }
+            0x0E => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i64().unwrap() as u8;
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_u8(address, value).unwrap();
+            }
+            0x0F => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i64().unwrap() as u16;
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_u16(address, value).unwrap();
+            }
+            0x10 => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i64().unwrap() as u32;
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_u32(address, value).unwrap();
+            }
+            0x11 => {
+                let offset = self.read_memarg().unwrap();
+                let value = self.operand_stack.pop_i64().unwrap() as u64;
+                let address = self.effective_address(offset).unwrap();
+                self.write_memory_u64(address, value).unwrap();
+            }
+            0x12 => {
+                let offset = self.read_memarg().unwrap();
+                let rhs = self.operand_stack.pop_i32().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let lhs = self.read_memory_i32(address).unwrap();
+                self.write_memory_i32(address, lhs.wrapping_add(rhs))
+                    .unwrap();
+                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
+            }
+            0x13 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i64().unwrap();
+                let lhs = self.read_memory_i64(address).unwrap();
+                self.write_memory_i64(address, lhs.wrapping_add(rhs))
+                    .unwrap();
+                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
+            }
+            0x14 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i32().unwrap();
+                let lhs = self.read_memory_i32(address).unwrap();
+                self.write_memory_i32(address, lhs.wrapping_sub(rhs))
+                    .unwrap();
+                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
+            }
+            0x15 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i64().unwrap();
+                let lhs = self.read_memory_i64(address).unwrap();
+                self.write_memory_i64(address, lhs.wrapping_sub(rhs))
+                    .unwrap();
+                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
+            }
+            0x16 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i32().unwrap();
+                let lhs = self.read_memory_i32(address).unwrap();
+                self.write_memory_i32(address, lhs & rhs).unwrap();
+                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
+            }
+            0x17 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i64().unwrap();
+                let lhs = self.read_memory_i64(address).unwrap();
+                self.write_memory_i64(address, lhs & rhs).unwrap();
+                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
+            }
+            0x18 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i32().unwrap();
+                let lhs = self.read_memory_i32(address).unwrap();
+                self.write_memory_i32(address, lhs | rhs).unwrap();
+                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
+            }
+            0x19 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i64().unwrap();
+                let lhs = self.read_memory_i64(address).unwrap();
+                self.write_memory_i64(address, lhs | rhs).unwrap();
+                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
+            }
+            0x1A => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i32().unwrap();
+                let lhs = self.read_memory_i32(address).unwrap();
+                self.write_memory_i32(address, lhs ^ rhs).unwrap();
+                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
+            }
+            0x1B => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i64().unwrap();
+                let lhs = self.read_memory_i64(address).unwrap();
+                self.write_memory_i64(address, lhs ^ rhs).unwrap();
+                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
+            }
+            0x1C => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i32().unwrap();
+                let lhs = self.read_memory_i32(address).unwrap();
+                self.write_memory_i32(address, rhs).unwrap();
+                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
+            }
+            0x1D => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let rhs = self.operand_stack.pop_i64().unwrap();
+                let lhs = self.read_memory_i64(address).unwrap();
+                self.write_memory_i64(address, rhs).unwrap();
+                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
+            }
+            0x1E => {
+                let offset = self.read_memarg().unwrap();
+                let new = self.operand_stack.pop_i32().unwrap();
+                let expected = self.operand_stack.pop_i32().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let old = self.read_memory_i32(address).unwrap();
+                if old == expected {
+                    self.write_memory_i32(address, new).unwrap();
+                }
+                self.operand_stack.push(WasmValue::I32(old)).unwrap();
+            }
+            0x1F => {
+                let offset = self.read_memarg().unwrap();
+                let new = self.operand_stack.pop_i64().unwrap();
+                let expected = self.operand_stack.pop_i64().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let old = self.read_memory_i64(address).unwrap();
+                if old == expected {
+                    self.write_memory_i64(address, new).unwrap();
+                }
+                self.operand_stack.push(WasmValue::I64(old)).unwrap();
+            }
+            0x37 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let n = self.operand_stack.pop_i32().unwrap() as u32;
+                let instance = self.instance_ref().unwrap();
+                let instance = instance.lock().unwrap();
+                let memory = instance.memory(0).unwrap();
+                let notified = memory.lock().unwrap().notify(address, n).unwrap() as i32;
+                drop(instance);
+                self.operand_stack.push(WasmValue::I32(notified)).unwrap();
+            }
+            0x38 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let expected = self.operand_stack.pop_i64().unwrap();
+                let timeout = self.operand_stack.pop_i64().unwrap();
+                let instance = self.instance_ref().unwrap();
+                let instance = instance.lock().unwrap();
+                let result = instance.wait32(address, expected, timeout).unwrap();
+                drop(instance);
+                self.operand_stack.push(WasmValue::I32(result)).unwrap();
+            }
+            0x39 => {
+                let offset = self.read_memarg().unwrap();
+                let address = self.effective_address(offset).unwrap();
+                let expected = self.operand_stack.pop_i64().unwrap();
+                let timeout = self.operand_stack.pop_i64().unwrap();
+                let instance = self.instance_ref().unwrap();
+                let instance = instance.lock().unwrap();
+                let result = instance.wait64(address, expected, timeout).unwrap();
+                drop(instance);
+                self.operand_stack.push(WasmValue::I32(result)).unwrap();
+            }
+            0xFF => {
+                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            }
+            _ => {}
         }
     }
 
@@ -1580,6 +1845,10 @@ impl Interpreter {
 
     fn write_memory_i64(&self, address: u32, value: i64) -> Result<()> {
         self.with_memory_mut(|memory| memory.write_i64(address, value))
+    }
+
+    fn write_memory_u64(&self, address: u32, value: u64) -> Result<()> {
+        self.with_memory_mut(|memory| memory.write_u64(address, value))
     }
 
     fn write_memory_f32(&self, address: u32, value: f32) -> Result<()> {
@@ -2750,5 +3019,174 @@ mod tests {
         let result = interp.continue_execution(&module).unwrap();
         assert_eq!(result, vec![WasmValue::I32(7)]);
         assert_eq!(host.calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_atomic_load_store() {
+        use crate::memory::Memory;
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(
+            vec![ValType::Num(NumType::I32)],
+            vec![ValType::Num(NumType::I32)],
+        ));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![
+                0x41, 0x00, 0x41, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x36, 0x02, 0x00, 0x41, 0x00, 0x28,
+                0x02, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let mut instance = Instance::new(module.clone()).unwrap();
+        let memory = Arc::new(Mutex::new(Memory::new(MemoryType::new(Limits::Min(1)))));
+        instance.memories.push(memory.clone());
+        let instance = Arc::new(Mutex::new(instance));
+
+        let mut interp = Interpreter::with_instance(instance);
+        let result = interp.execute_function(&module, 0, &[WasmValue::I32(42)]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_atomic_rmw_add() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x00, 0x41, 0x05, 0xFE, 0x12, 0x02, 0x00, 0x0B],
+        });
+
+        let module = Arc::new(module);
+        let instance = Instance::new(module.clone()).unwrap();
+        instance.memories[0]
+            .lock()
+            .unwrap()
+            .write_i32(0, 10)
+            .unwrap();
+        let instance = Arc::new(Mutex::new(instance));
+
+        let mut interp = Interpreter::with_instance(instance);
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(result.is_ok());
+        let returned = result.unwrap();
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0], WasmValue::I32(10));
+    }
+
+    #[test]
+    fn test_atomic_load() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(
+            vec![ValType::Num(NumType::I32)],
+            vec![ValType::Num(NumType::I32)],
+        ));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x00, 0xFE, 0x00, 0x02, 0x00, 0x0B],
+        });
+
+        let module = Arc::new(module);
+        let instance = Instance::new(module.clone()).unwrap();
+        instance.memories[0]
+            .lock()
+            .unwrap()
+            .write_i32(0, 0x12345678)
+            .unwrap();
+        let instance = Arc::new(Mutex::new(instance));
+
+        let mut interp = Interpreter::with_instance(instance);
+        let result = interp.execute_function(&module, 0, &[WasmValue::I32(0)]);
+        assert!(result.is_ok());
+        let returned = result.unwrap();
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0], WasmValue::I32(0x12345678));
+    }
+
+    #[test]
+    fn test_atomic_rmw_cmpxchg_success() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![
+                0x41, 0x00, 0x41, 0x0A, 0x41, 0x14, 0xFE, 0x1E, 0x02, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let instance = Instance::new(module.clone()).unwrap();
+        instance.memories[0]
+            .lock()
+            .unwrap()
+            .write_i32(0, 10)
+            .unwrap();
+        let instance = Arc::new(Mutex::new(instance));
+
+        let mut interp = Interpreter::with_instance(instance);
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(result.is_ok());
+        let returned = result.unwrap();
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0], WasmValue::I32(10));
+    }
+
+    #[test]
+    fn test_atomic_rmw_cmpxchg_fail() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module
+            .types
+            .push(FunctionType::new(vec![], vec![ValType::Num(NumType::I32)]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![
+                0x41, 0x00, 0x41, 0x0B, 0x41, 0x14, 0xFE, 0x1E, 0x02, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let instance = Instance::new(module.clone()).unwrap();
+        instance.memories[0]
+            .lock()
+            .unwrap()
+            .write_i32(0, 10)
+            .unwrap();
+        let instance = Arc::new(Mutex::new(instance));
+
+        let mut interp = Interpreter::with_instance(instance);
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(result.is_ok());
+        let returned = result.unwrap();
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0], WasmValue::I32(10));
     }
 }

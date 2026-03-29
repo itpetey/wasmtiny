@@ -198,7 +198,12 @@ impl Parser {
                     let limits = self.read_limits(reader)?;
                     ImportKind::Table(TableType::new(elem_type, limits))
                 }
-                0x02 => ImportKind::Memory(MemoryType::new(self.read_limits(reader)?)),
+                0x02 => {
+                    let (limits, shared) = self.read_limits_with_flags(reader)?;
+                    let mut memory_type = MemoryType::new(limits);
+                    memory_type.shared = shared;
+                    ImportKind::Memory(memory_type)
+                }
                 0x03 => {
                     let content_type = self.read_val_type(reader)?;
                     let mutable = self.read_mutability(reader)?;
@@ -262,12 +267,35 @@ impl Parser {
     ) -> Result<()> {
         let count = reader.read_uleb128()?;
         for _ in 0..count {
-            module
-                .memories
-                .push(MemoryType::new(self.read_limits(reader)?));
+            let (limits, shared) = self.read_limits_with_flags(reader)?;
+            let mut memory_type = MemoryType::new(limits);
+            memory_type.shared = shared;
+            module.memories.push(memory_type);
         }
 
         Ok(())
+    }
+
+    fn read_limits_with_flags(
+        &self,
+        reader: &mut BinaryReader<Cursor<&[u8]>>,
+    ) -> Result<(Limits, bool)> {
+        match reader.read_u8()? {
+            0x00 => Ok((Limits::Min(reader.read_uleb128()?), false)),
+            0x01 => Ok((
+                Limits::MinMax(reader.read_uleb128()?, reader.read_uleb128()?),
+                false,
+            )),
+            0x02 => Ok((Limits::Min(reader.read_uleb128()?), true)),
+            0x03 => Ok((
+                Limits::MinMax(reader.read_uleb128()?, reader.read_uleb128()?),
+                true,
+            )),
+            flags => Err(WasmError::Load(format!(
+                "unsupported memory limits flags: {}",
+                flags
+            ))),
+        }
     }
 
     fn parse_global(

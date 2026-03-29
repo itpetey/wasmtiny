@@ -2475,6 +2475,103 @@ impl WasmToLlvmTranslator {
                     }
                     return Ok(());
                 }
+                0xFE => {
+                    pc += 1;
+                    let atomic_opcode = bytecode[pc];
+                    pc += 1;
+                    let align = self.read_uleb(bytecode, &mut pc)?;
+                    let offset = self.read_uleb(bytecode, &mut pc)?;
+
+                    let fn_name = match atomic_opcode {
+                        0x00 => "llvm_jit_i32_atomic_load",
+                        0x01 => "llvm_jit_i64_atomic_load",
+                        0x0A => "llvm_jit_i32_atomic_store",
+                        0x0B => "llvm_jit_i64_atomic_store",
+                        0x12 => "llvm_jit_i32_atomic_rmw_add",
+                        0x13 => "llvm_jit_i64_atomic_rmw_add",
+                        0x14 => "llvm_jit_i32_atomic_rmw_sub",
+                        0x15 => "llvm_jit_i64_atomic_rmw_sub",
+                        0x16 => "llvm_jit_i32_atomic_rmw_and",
+                        0x17 => "llvm_jit_i64_atomic_rmw_and",
+                        0x18 => "llvm_jit_i32_atomic_rmw_or",
+                        0x19 => "llvm_jit_i64_atomic_rmw_or",
+                        0x1A => "llvm_jit_i32_atomic_rmw_xor",
+                        0x1B => "llvm_jit_i64_atomic_rmw_xor",
+                        0x1C => "llvm_jit_i32_atomic_rmw_xchg",
+                        0x1D => "llvm_jit_i64_atomic_rmw_xchg",
+                        0x1E => "llvm_jit_i32_atomic_rmw_cmpxchg",
+                        0x1F => "llvm_jit_i64_atomic_rmw_cmpxchg",
+                        0x37 => "llvm_jit_memory_atomic_notify",
+                        0x38 => "llvm_jit_memory_atomic_wait32",
+                        0x39 => "llvm_jit_memory_atomic_wait64",
+                        _ => {
+                            return Err(WasmError::Runtime(format!(
+                                "Unsupported WASM atomic opcode: 0x{:02X}",
+                                atomic_opcode
+                            )));
+                        }
+                    };
+
+                    let fn_val = match LLVMGetNamedFunction(
+                        module,
+                        CString::new(fn_name).unwrap().as_c_str(),
+                    ) {
+                        existing if !existing.is_null() => existing,
+                        _ => {
+                            let ret_type = match atomic_opcode {
+                                0x00 | 0x0A | 0x12 | 0x14 | 0x16 | 0x18 | 0x1A | 0x1C | 0x1E
+                                | 0x37 | 0x38 | 0x39 => LLVMInt32TypeInContext(self.context),
+                                _ => LLVMInt64TypeInContext(self.context),
+                            };
+                            let param_types = [
+                                LLVMInt32TypeInContext(self.context),
+                                LLVMInt32TypeInContext(self.context),
+                            ];
+                            let func_type =
+                                LLVMFunctionType(ret_type, param_types.as_mut_ptr(), 2, 0);
+                            LLVMAddFunction(
+                                module,
+                                CString::new(fn_name).unwrap().as_c_str(),
+                                func_type,
+                            )
+                        }
+                    };
+
+                    let align_val =
+                        LLVMConstInt(LLVMInt32TypeInContext(self.context), align as u64, 0);
+                    let offset_val =
+                        LLVMConstInt(LLVMInt32TypeInContext(self.context), offset as u64, 0);
+
+                    let args = [align_val, offset_val];
+                    let call_result = LLVMBuildCall2(
+                        self.builder,
+                        LLVMGetElementType(LLVMTypeOf(fn_val)),
+                        fn_val,
+                        args.as_ptr(),
+                        2,
+                        c"atomic_result".as_ptr(),
+                    );
+
+                    let result_type = match atomic_opcode {
+                        0x00 => LLVMInt32TypeInContext(self.context),
+                        0x01 => LLVMInt64TypeInContext(self.context),
+                        0x0A | 0x0B | 0x12 | 0x13 | 0x14 | 0x15 | 0x16 | 0x17 | 0x18 | 0x19
+                        | 0x1A | 0x1B | 0x1C | 0x1D | 0x37 | 0x38 | 0x39 => {
+                            LLVMInt32TypeInContext(self.context)
+                        }
+                        _ => LLVMInt64TypeInContext(self.context),
+                    };
+                    let result_ptr =
+                        LLVMBuildAlloca(self.builder, result_type, c"result_ptr".as_ptr());
+                    LLVMBuildStore(self.builder, call_result, result_ptr);
+                    let loaded_result = LLVMBuildLoad2(
+                        self.builder,
+                        result_type,
+                        result_ptr,
+                        c"loaded_result".as_ptr(),
+                    );
+                    value_stack.push(loaded_result);
+                }
                 _ => {
                     return Err(WasmError::Runtime(format!(
                         "Unsupported WASM opcode: 0x{:02X}",

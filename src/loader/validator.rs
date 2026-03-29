@@ -340,12 +340,20 @@ impl Validator {
                     )?;
                 }
                 0x3F | 0x40 => {
-                    if module.memory_at(0).is_none() {
-                        return Err(WasmError::Validation(format!(
+                    let memory = module.memory_at(0).ok_or_else(|| {
+                        WasmError::Validation(format!(
                             "function {} uses memory instructions without a memory",
+                            func_idx
+                        ))
+                    })?;
+
+                    if opcode == 0x40 && memory.shared && memory.limits.max().is_none() {
+                        return Err(WasmError::Validation(format!(
+                            "function {} uses memory.grow on shared memory without a maximum",
                             func_idx
                         )));
                     }
+
                     let immediate = Self::read_byte(code, &mut cursor)?;
                     if immediate != 0 {
                         let name = if opcode == 0x3F {
@@ -630,11 +638,17 @@ impl Validator {
                     }
                     type_stack.push(ValType::Ref(RefType::FuncRef));
                 }
-                0xFC => {
-                    return Err(WasmError::Validation(format!(
-                        "function {} uses unsupported 0xfc-prefixed instructions",
-                        func_idx
-                    )));
+                0xFE => {
+                    let subopcode = Self::read_byte(code, &mut cursor)?;
+                    self.validate_atomic_instruction(
+                        func_idx,
+                        subopcode,
+                        &mut type_stack,
+                        control_frames.last_mut().unwrap(),
+                        module,
+                        code,
+                        &mut cursor,
+                    )?;
                 }
                 _ => {
                     return Err(WasmError::Validation(format!(
@@ -847,6 +861,178 @@ impl Validator {
                 self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_atomic_instruction(
+        &self,
+        func_idx: usize,
+        subopcode: u8,
+        type_stack: &mut Vec<ValType>,
+        frame: &ValidationFrame,
+        module: &Module,
+        code: &[u8],
+        cursor: &mut usize,
+    ) -> Result<()> {
+        use NumType::{I32, I64};
+
+        let memory = module.memory_at(0).ok_or_else(|| {
+            WasmError::Validation(format!(
+                "function {} uses atomic instructions without a memory",
+                func_idx
+            ))
+        })?;
+
+        if !memory.shared {
+            return Err(WasmError::Validation(format!(
+                "function {} uses atomic instructions on non-shared memory",
+                func_idx
+            )));
+        }
+
+        Self::skip_uleb(code, cursor)?;
+        Self::skip_uleb(code, cursor)?;
+
+        match subopcode {
+            0x00 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x01 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x02 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x03 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x04 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x05 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x06 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x07 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x0A => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x0B => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x0C => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+            }
+            0x0D => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+            }
+            0x0E => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+            }
+            0x0F => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+            }
+            0x10 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+            }
+            0x11 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+            }
+            0x12 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x13 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x14 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x15 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x16 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x17 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x18 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x19 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x1A => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x1B => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x1C => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x1D => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x37 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x38 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I64))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x39 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I64))?;
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0xFF => {}
+            _ => {
+                return Err(WasmError::Validation(format!(
+                    "function {} uses unknown atomic subopcode {:02x}",
+                    func_idx, subopcode
+                )));
+            }
         }
         Ok(())
     }

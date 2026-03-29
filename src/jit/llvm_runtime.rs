@@ -993,6 +993,138 @@ define_store!(llvm_jit_i64_store32, 4, i64, |ptr, val| {
     std::ptr::write_unaligned(ptr as *mut u32, val as u32)
 });
 
+use std::sync::atomic::Ordering;
+
+macro_rules! define_atomic_load {
+    ($name:ident, $size:expr, $ty:ty, $cast:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32) -> $ty {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe {
+                    let atomic_ptr = ptr as *mut $ty;
+                    $cast(atomic_ptr.load(Ordering::SeqCst))
+                },
+                None => {
+                    set_trap(TrapCode::MemoryOutOfBounds);
+                    0 as $ty
+                }
+            }
+        }
+    };
+}
+
+macro_rules! define_atomic_store {
+    ($name:ident, $size:expr, $ty:ty, $cast:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32, val: $ty) {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe {
+                    let atomic_ptr = ptr as *mut $ty;
+                    atomic_ptr.store($cast(val), Ordering::SeqCst);
+                },
+                None => set_trap(TrapCode::MemoryOutOfBounds),
+            }
+        }
+    };
+}
+
+define_atomic_load!(llvm_jit_i32_atomic_load, 4, i32, |v: i32| v);
+define_atomic_load!(llvm_jit_i64_atomic_load, 8, i64, |v: i64| v);
+define_atomic_store!(llvm_jit_i32_atomic_store, 4, i32, |v: i32| v);
+define_atomic_store!(llvm_jit_i64_atomic_store, 8, i64, |v: i64| v);
+
+macro_rules! define_atomic_rmw {
+    ($name:ident, $size:expr, $ty:ty, $op:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32, val: $ty) -> $ty {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe {
+                    let atomic_ptr = ptr as *mut $ty;
+                    let old = atomic_ptr.load(Ordering::SeqCst);
+                    atomic_ptr.store($op(old, val), Ordering::SeqCst);
+                    old
+                },
+                None => {
+                    set_trap(TrapCode::MemoryOutOfBounds);
+                    0 as $ty
+                }
+            }
+        }
+    };
+}
+
+define_atomic_rmw!(llvm_jit_i32_atomic_rmw_add, 4, i32, |old, new| old
+    .wrapping_add(new));
+define_atomic_rmw!(llvm_jit_i64_atomic_rmw_add, 8, i64, |old, new| old
+    .wrapping_add(new));
+define_atomic_rmw!(llvm_jit_i32_atomic_rmw_sub, 4, i32, |old, new| old
+    .wrapping_sub(new));
+define_atomic_rmw!(llvm_jit_i64_atomic_rmw_sub, 8, i64, |old, new| old
+    .wrapping_sub(new));
+define_atomic_rmw!(llvm_jit_i32_atomic_rmw_and, 4, i32, |old, new| old & new);
+define_atomic_rmw!(llvm_jit_i64_atomic_rmw_and, 8, i64, |old, new| old & new);
+define_atomic_rmw!(llvm_jit_i32_atomic_rmw_or, 4, i32, |old, new| old | new);
+define_atomic_rmw!(llvm_jit_i64_atomic_rmw_or, 8, i64, |old, new| old | new);
+define_atomic_rmw!(llvm_jit_i32_atomic_rmw_xor, 4, i32, |old, new| old ^ new);
+define_atomic_rmw!(llvm_jit_i64_atomic_rmw_xor, 8, i64, |old, new| old ^ new);
+define_atomic_rmw!(llvm_jit_i32_atomic_rmw_xchg, 4, i32, |_old, new| new);
+define_atomic_rmw!(llvm_jit_i64_atomic_rmw_xchg, 8, i64, |_old, new| new);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_i32_atomic_rmw_cmpxchg(addr: u32, expected: i32, new: i32) -> i32 {
+    match check_bounds(addr, 4) {
+        Some(ptr) => unsafe {
+            let atomic_ptr = ptr as *mut i32;
+            let old = atomic_ptr.load(Ordering::SeqCst);
+            if old == expected {
+                atomic_ptr.store(new, Ordering::SeqCst);
+                1
+            } else {
+                0
+            }
+        },
+        None => {
+            set_trap(TrapCode::MemoryOutOfBounds);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_i64_atomic_rmw_cmpxchg(addr: u32, expected: i64, new: i64) -> i32 {
+    match check_bounds(addr, 8) {
+        Some(ptr) => unsafe {
+            let atomic_ptr = ptr as *mut i64;
+            let old = atomic_ptr.load(Ordering::SeqCst);
+            if old == expected {
+                atomic_ptr.store(new, Ordering::SeqCst);
+                1
+            } else {
+                0
+            }
+        },
+        None => {
+            set_trap(TrapCode::MemoryOutOfBounds);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_atomic_notify32(addr: u32, n: u32) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_atomic_wait32(addr: u32, expected: i32, timeout: i64) -> i32 {
+    2
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_atomic_wait64(addr: u32, expected: i64, timeout: i64) -> i32 {
+    2
+}
+
 #[unsafe(no_mangle)]
 #[allow(missing_docs)]
 pub extern "C" fn llvm_jit_i32_div_s(a: i32, b: i32) -> i32 {
