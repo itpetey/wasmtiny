@@ -1,8 +1,8 @@
 use super::{
     ExportKind, FunctionType, Global, ImportKind, InstanceLimits, InstanceMeter, InstanceStats,
     Memory, Module, RefType, ResolvedSharedMemoryMapping, Result, SharedMemoryMapping,
-    SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId, Table, ValType, WasmError,
-    WasmValue,
+    SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId, Table, TrapCode, ValType,
+    WasmError, WasmValue,
 };
 use crate::loader::BinaryReader;
 use parking_lot::Mutex as ParkingMutex;
@@ -965,6 +965,82 @@ impl Instance {
             Err(WasmError::Runtime(_)) => Ok(-1),
             Err(error) => Err(error),
         }
+    }
+
+    /// Wait32 - atomically loads a 32-bit value and waits if it equals the expected value.
+    ///
+    /// Returns: 0 = woken, 1 = not equal, 2 = not woken (timeout)
+    pub fn wait32(&self, address: u32, expected: i64, timeout: i64) -> Result<i32> {
+        let memory = self
+            .memory(0)
+            .ok_or_else(|| WasmError::Runtime("no memory".to_string()))?;
+
+        let memory = memory.lock().map_err(poisoned_lock)?;
+
+        if address as usize + 4 > memory.len_bytes() {
+            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        }
+
+        let actual = memory.read_i32(address)? as i64;
+        if actual != expected {
+            return Ok(1);
+        }
+
+        memory.get_waiter(address);
+        drop(memory);
+
+        let timeout_ns = if timeout < 0 {
+            u64::MAX
+        } else {
+            (timeout as u64) * 1_000_000
+        };
+
+        let woken = self
+            .memory(0)
+            .ok_or_else(|| WasmError::Runtime("no memory".to_string()))?
+            .lock()
+            .map_err(poisoned_lock)?
+            .wait_on(address, timeout_ns);
+
+        if woken { Ok(0) } else { Ok(2) }
+    }
+
+    /// Wait64 - atomically loads a 64-bit value and waits if it equals the expected value.
+    ///
+    /// Returns: 0 = woken, 1 = not equal, 2 = not woken (timeout)
+    pub fn wait64(&self, address: u32, expected: i64, timeout: i64) -> Result<i32> {
+        let memory = self
+            .memory(0)
+            .ok_or_else(|| WasmError::Runtime("no memory".to_string()))?;
+
+        let memory = memory.lock().map_err(poisoned_lock)?;
+
+        if address as usize + 8 > memory.len_bytes() {
+            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        }
+
+        let actual = memory.read_i64(address)?;
+        if actual != expected {
+            return Ok(1);
+        }
+
+        memory.get_waiter(address);
+        drop(memory);
+
+        let timeout_ns = if timeout < 0 {
+            u64::MAX
+        } else {
+            (timeout as u64) * 1_000_000
+        };
+
+        let woken = self
+            .memory(0)
+            .ok_or_else(|| WasmError::Runtime("no memory".to_string()))?
+            .lock()
+            .map_err(poisoned_lock)?
+            .wait_on(address, timeout_ns);
+
+        if woken { Ok(0) } else { Ok(2) }
     }
 
     /// Returns or updates memory mut.

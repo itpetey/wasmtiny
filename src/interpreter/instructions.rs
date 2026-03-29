@@ -375,6 +375,68 @@ pub enum Instruction {
     F32ReinterpretI32,
     /// WebAssembly `f64.reinterpret.i64` instruction.
     F64ReinterpretI64,
+    /// WebAssembly `i32.atomic.load` instruction.
+    I32AtomicLoad(MemArg),
+    /// WebAssembly `i64.atomic.load` instruction.
+    I64AtomicLoad(MemArg),
+    /// WebAssembly `i32.atomic.load8_u` instruction.
+    I32AtomicLoad8U(MemArg),
+    /// WebAssembly `i32.atomic.load16_u` instruction.
+    I32AtomicLoad16U(MemArg),
+    /// WebAssembly `i64.atomic.load8_u` instruction.
+    I64AtomicLoad8U(MemArg),
+    /// WebAssembly `i64.atomic.load16_u` instruction.
+    I64AtomicLoad16U(MemArg),
+    /// WebAssembly `i64.atomic.load32_u` instruction.
+    I64AtomicLoad32U(MemArg),
+    /// WebAssembly `i32.atomic.store` instruction.
+    I32AtomicStore(MemArg),
+    /// WebAssembly `i64.atomic.store` instruction.
+    I64AtomicStore(MemArg),
+    /// WebAssembly `i32.atomic.store8` instruction.
+    I32AtomicStore8(MemArg),
+    /// WebAssembly `i32.atomic.store16` instruction.
+    I32AtomicStore16(MemArg),
+    /// WebAssembly `i64.atomic.store8` instruction.
+    I64AtomicStore8(MemArg),
+    /// WebAssembly `i64.atomic.store16` instruction.
+    I64AtomicStore16(MemArg),
+    /// WebAssembly `i64.atomic.store32` instruction.
+    I64AtomicStore32(MemArg),
+    /// WebAssembly `i32.atomic.rmw.add` instruction.
+    I32AtomicRmwAdd(MemArg),
+    /// WebAssembly `i64.atomic.rmw.add` instruction.
+    I64AtomicRmwAdd(MemArg),
+    /// WebAssembly `i32.atomic.rmw.sub` instruction.
+    I32AtomicRmwSub(MemArg),
+    /// WebAssembly `i64.atomic.rmw.sub` instruction.
+    I64AtomicRmwSub(MemArg),
+    /// WebAssembly `i32.atomic.rmw.and` instruction.
+    I32AtomicRmwAnd(MemArg),
+    /// WebAssembly `i64.atomic.rmw.and` instruction.
+    I64AtomicRmwAnd(MemArg),
+    /// WebAssembly `i32.atomic.rmw.or` instruction.
+    I32AtomicRmwOr(MemArg),
+    /// WebAssembly `i64.atomic.rmw.or` instruction.
+    I64AtomicRmwOr(MemArg),
+    /// WebAssembly `i32.atomic.rmw.xor` instruction.
+    I32AtomicRmwXor(MemArg),
+    /// WebAssembly `i64.atomic.rmw.xor` instruction.
+    I64AtomicRmwXor(MemArg),
+    /// WebAssembly `i32.atomic.rmw.xchg` instruction.
+    I32AtomicRmwXchg(MemArg),
+    /// WebAssembly `i64.atomic.rmw.xchg` instruction.
+    I64AtomicRmwXchg(MemArg),
+    /// WebAssembly `i32.atomic.rmw.cmpxchg` instruction.
+    I32AtomicRmwCmpxchg(MemArg),
+    /// WebAssembly `i64.atomic.rmw.cmpxchg` instruction.
+    I64AtomicRmwCmpxchg(MemArg),
+    /// WebAssembly `memory.atomic.notify` instruction.
+    MemoryAtomicNotify(MemArg),
+    /// WebAssembly `memory.atomic.wait32` instruction.
+    MemoryAtomicWait32(MemArg),
+    /// WebAssembly `memory.atomic.wait64` instruction.
+    MemoryAtomicWait64(MemArg),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

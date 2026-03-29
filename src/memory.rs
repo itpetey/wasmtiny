@@ -14,6 +14,7 @@
 //! - Grow: `memory.grow(pages)`
 
 use crate::runtime::{InstanceMeter, MemoryType, Result, TrapCode, WasmError};
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::sync::{Arc, Weak};
 
 /// Constant `PAGE_SIZE_BYTES`.
@@ -43,6 +44,13 @@ pub struct Memory {
     mem_type: MemoryType,
     data: Vec<u8>,
     meters: Vec<Weak<InstanceMeter>>,
+    waiters: Arc<RwLock<std::collections::HashMap<u32, Arc<Waiter>>>>,
+}
+
+#[derive(Debug)]
+struct Waiter {
+    notified: Mutex<bool>,
+    condvar: Condvar,
 }
 
 impl Memory {
@@ -54,7 +62,79 @@ impl Memory {
             mem_type,
             data: vec![0; byte_len],
             meters: Vec::new(),
+            waiters: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Blocks the current thread waiting for the address to be notified.
+    /// Returns true if woken, false if timeout.
+    pub(crate) fn wait_on(&self, address: u32, timeout_ns: u64) -> bool {
+        let waiter = {
+            let mut waiters = self.waiters.write();
+            waiters
+                .entry(address)
+                .or_insert_with(|| {
+                    Arc::new(Waiter {
+                        notified: Mutex::new(false),
+                        condvar: Condvar::new(),
+                    })
+                })
+                .clone()
+        };
+
+        if timeout_ns == 0 {
+            return false;
+        }
+
+        let mut notified = waiter.notified.lock();
+        if *notified {
+            *notified = false;
+            return true;
+        }
+
+        let timeout = std::time::Duration::from_nanos(timeout_ns);
+        let result = waiter.condvar.wait_for(&mut notified, timeout);
+
+        if result.timed_out() {
+            false
+        } else {
+            *notified = false;
+            true
+        }
+    }
+
+    /// Notifies waiters at the given address.
+    /// Returns the number of waiters notified.
+    pub fn notify(&self, address: u32, n: u32) -> Result<u32> {
+        if address as usize + 4 > self.data.len() {
+            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        }
+
+        let waiters = self.waiters.read();
+        let Some(waiter) = waiters.get(&address) else {
+            return Ok(0);
+        };
+
+        let mut notified = 0;
+        for _ in 0..n {
+            let mut flag = waiter.notified.lock();
+            *flag = true;
+            waiter.condvar.notify_one();
+            notified += 1;
+        }
+
+        Ok(notified)
+    }
+
+    /// Returns a waiter reference for the given address (for atomic wait).
+    pub(crate) fn get_waiter(&self, address: u32) {
+        let mut waiters = self.waiters.write();
+        waiters.entry(address).or_insert_with(|| {
+            Arc::new(Waiter {
+                notified: Mutex::new(false),
+                condvar: Condvar::new(),
+            })
+        });
     }
 
     /// Returns the size.
