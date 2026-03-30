@@ -14,6 +14,8 @@ pub struct Module {
     pub memories: Vec<MemoryType>,
     /// Global types declared by the module.
     pub globals: Vec<GlobalType>,
+    /// Tag signatures declared by the module.
+    pub tags: Vec<u32>,
     /// Initialiser expressions for defined globals.
     pub global_inits: Vec<Vec<u8>>,
     /// Exports declared by the module.
@@ -80,8 +82,12 @@ pub struct ElemSegment {
     pub kind: ElemKind,
     /// Reference type stored by the segment.
     pub type_: super::RefType,
+    /// Whether the element segment permits null references.
+    pub nullable: bool,
     /// Encoded initialiser expressions for each element.
     pub init: Vec<Vec<u8>>,
+    /// Whether this segment was synthesised from a table declaration initialiser.
+    pub generated_by_table_init: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +129,7 @@ impl Module {
             tables: Vec::new(),
             memories: Vec::new(),
             globals: Vec::new(),
+            tags: Vec::new(),
             global_inits: Vec::new(),
             exports: Vec::new(),
             imports: Vec::new(),
@@ -195,6 +202,24 @@ impl Module {
 
         let local_idx = idx.checked_sub(import_global_count)?;
         self.globals.get(local_idx as usize)
+    }
+
+    /// Returns the tag type at the given index.
+    pub fn tag_type(&self, idx: u32) -> Option<&FunctionType> {
+        let mut import_tag_count = 0u32;
+        for import in &self.imports {
+            if let ImportKind::Tag(type_idx) = import.kind {
+                if import_tag_count == idx {
+                    return self.type_at(type_idx);
+                }
+                import_tag_count += 1;
+            }
+        }
+
+        let local_idx = idx.checked_sub(import_tag_count)?;
+        self.tags
+            .get(local_idx as usize)
+            .and_then(|type_idx| self.type_at(*type_idx))
     }
 
     /// Returns the function signature for the given function index.

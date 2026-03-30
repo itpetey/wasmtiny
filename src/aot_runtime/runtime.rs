@@ -3,8 +3,8 @@ use crate::interpreter::Interpreter;
 use crate::runtime::{
     Extern, FunctionType, Global, HostCallOutcome, HostFunc, ImportKind, Instance, InstanceLimits,
     InstanceMeter, InstanceStats, Memory, Module, ResolvedSharedMemoryMapping, Result,
-    SharedMemoryMapping, SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId, Table,
-    WasmError, WasmValue,
+    SharedMemoryMapping, SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId, SharedTable,
+    Table, WasmError, WasmValue,
 };
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
@@ -67,7 +67,7 @@ pub struct AotModule {
     /// Defined memories owned by the module.
     pub memories: Vec<Memory>,
     /// Defined tables owned by the module.
-    pub tables: Vec<Table>,
+    pub tables: Vec<SharedTable>,
     /// Defined globals owned by the module.
     pub globals: Vec<Global>,
     shared_memory_mappings: HashMap<SharedMemoryMappingId, SharedMemoryMapping>,
@@ -109,6 +109,8 @@ pub enum AotExport {
     Memory(u32),
     /// A global export identified by global index.
     Global(u32),
+    /// A tag export identified by tag index.
+    Tag(u32),
 }
 
 impl AotModule {
@@ -192,6 +194,11 @@ impl AotModule {
         &self.module.imports
     }
 
+    /// Returns a resolved import binding, if present.
+    pub fn import_binding(&self, idx: usize) -> Option<&Extern> {
+        self.imports.get(idx).and_then(|binding| binding.as_ref())
+    }
+
     /// Registers native.
     pub fn register_native(&mut self, func: NativeFunc) -> u32 {
         let idx = self.native_functions.len() as u32;
@@ -239,9 +246,9 @@ impl AotModule {
             for (offset, table) in self.tables.iter().cloned().enumerate() {
                 let target = imported_tables + offset;
                 if target >= instance_guard.tables.len() {
-                    instance_guard.tables.push(Arc::new(Mutex::new(table)));
+                    instance_guard.tables.push(table);
                 } else {
-                    instance_guard.tables[target] = Arc::new(Mutex::new(table));
+                    instance_guard.tables[target] = table;
                 }
             }
             for (offset, global) in self.globals.iter().cloned().enumerate() {
@@ -675,7 +682,7 @@ impl AotModule {
             .expect("active JIT execution blocks table mutation");
         self.custom_tables = true;
         let idx = (self.import_counts().1 + self.tables.len()) as u32;
-        self.tables.push(table);
+        self.tables.push(Arc::new(Mutex::new(table)));
         idx
     }
 
@@ -689,7 +696,44 @@ impl AotModule {
             self.imported_table(idx)
                 .and_then(|table| table.lock().ok().map(|table| table.clone()))
         } else {
+            self.tables
+                .get((idx - imported_tables) as usize)
+                .and_then(|table| table.lock().ok().map(|table| table.clone()))
+        }
+    }
+
+    /// Returns a shared table binding by index.
+    pub fn table_binding(&self, idx: u32) -> Option<SharedTable> {
+        if self.ensure_initialised().is_err() {
+            return None;
+        }
+        let imported_tables = self.import_counts().1 as u32;
+        if idx < imported_tables {
+            self.imported_table(idx)
+        } else {
             self.tables.get((idx - imported_tables) as usize).cloned()
+        }
+    }
+
+    /// Replaces the table at the given index.
+    pub fn set_table(&mut self, idx: u32, table: Table) -> Result<()> {
+        self.ensure_initialised()?;
+        self.ensure_jit_inactive_for_external_mutation()?;
+        let imported_tables = self.import_counts().1 as u32;
+        if idx < imported_tables {
+            let shared = self
+                .imported_table(idx)
+                .ok_or_else(|| WasmError::Runtime(format!("table {} not found", idx)))?;
+            *shared.lock().map_err(poisoned_lock)? = table;
+            Ok(())
+        } else {
+            let slot = (idx - imported_tables) as usize;
+            let target = self
+                .tables
+                .get(slot)
+                .ok_or_else(|| WasmError::Runtime(format!("table {} not found", idx)))?;
+            *target.lock().map_err(poisoned_lock)? = table;
+            Ok(())
         }
     }
 
@@ -860,7 +904,7 @@ impl AotModule {
                 crate::runtime::ImportKind::Memory(_) => memories += 1,
                 crate::runtime::ImportKind::Table(_) => tables += 1,
                 crate::runtime::ImportKind::Global(_) => globals += 1,
-                crate::runtime::ImportKind::Func(_) => {}
+                crate::runtime::ImportKind::Func(_) | crate::runtime::ImportKind::Tag(_) => {}
             }
         }
         (memories, tables, globals)
@@ -881,8 +925,14 @@ impl AotModule {
             );
         }
         if self.tables.is_empty() {
-            self.tables
-                .extend(self.module.tables.iter().cloned().map(Table::new));
+            self.tables.extend(
+                self.module
+                    .tables
+                    .iter()
+                    .cloned()
+                    .map(Table::new)
+                    .map(|table| Arc::new(Mutex::new(table))),
+            );
         }
     }
 
@@ -897,12 +947,22 @@ impl AotModule {
             return Ok(());
         }
 
+        let imported_global_count = self
+            .module
+            .imports
+            .iter()
+            .filter(|import| matches!(import.kind, ImportKind::Global(_)))
+            .count();
+        let mut const_globals = vec![None; imported_global_count];
+
         for (index, global_type) in self.module.globals.iter().enumerate() {
             let init = self.module.global_inits.get(index).ok_or_else(|| {
                 WasmError::Instantiate(format!("missing init for global {}", index))
             })?;
-            let value = evaluate_const_expr_without_globals(init)?;
-            self.globals.push(Global::new(global_type.clone(), value)?);
+            let value = evaluate_const_expr_with_globals(init, &const_globals)?;
+            let global = Global::new(global_type.clone(), value)?;
+            self.globals.push(global.clone());
+            const_globals.push((!global_type.mutable).then_some(global));
         }
 
         Ok(())
@@ -938,13 +998,8 @@ impl AotModule {
                 .tables
                 .iter()
                 .skip(imported_tables)
-                .map(|table| {
-                    table
-                        .lock()
-                        .map_err(poisoned_lock)
-                        .map(|table| table.clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .cloned()
+                .collect();
         }
         if !self.custom_globals {
             self.globals = instance
@@ -986,13 +1041,8 @@ impl AotModule {
             .tables
             .iter()
             .skip(imported_tables)
-            .map(|table| {
-                table
-                    .lock()
-                    .map_err(poisoned_lock)
-                    .map(|table| table.clone())
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .cloned()
+            .collect();
         self.globals = instance_guard
             .globals
             .iter()
@@ -1154,13 +1204,29 @@ impl AotModule {
                     func, func_type,
                 ))))
             }
+            (ImportKind::Func(type_idx), Extern::Func(func)) => {
+                let func_type = self
+                    .module
+                    .type_at(*type_idx)
+                    .ok_or_else(|| WasmError::Instantiate(format!("type {} not found", type_idx)))?
+                    .clone();
+                if func.func_type != func_type {
+                    return Err(WasmError::Instantiate(format!(
+                        "import {}.{} function type mismatch",
+                        module, name
+                    )));
+                }
+                Ok(Extern::HostFunc(Arc::new(TypedHostImport::new(
+                    func.into_host_func(),
+                    func_type,
+                ))))
+            }
             (ImportKind::Table(expected), Extern::Table(table)) => {
-                if !table
-                    .lock()
-                    .map_err(poisoned_lock)?
-                    .type_
-                    .matches_required(expected)
-                {
+                let table_matches = {
+                    let table_guard = table.lock().map_err(poisoned_lock)?;
+                    table_matches_required(&table_guard, expected)
+                };
+                if !table_matches {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} table type mismatch",
                         module, name
@@ -1170,7 +1236,7 @@ impl AotModule {
             }
             (ImportKind::Memory(expected), Extern::Memory(memory)) => {
                 let mut memory_guard = memory.lock().map_err(poisoned_lock)?;
-                if !memory_guard.type_().matches_required(expected) {
+                if !memory_matches_required(&memory_guard, expected) {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} memory type mismatch",
                         module, name
@@ -1188,6 +1254,18 @@ impl AotModule {
                     )));
                 }
                 Ok(Extern::Global(global))
+            }
+            (ImportKind::Tag(type_idx), Extern::Tag(actual)) => {
+                let expected = self.module.type_at(*type_idx).ok_or_else(|| {
+                    WasmError::Instantiate(format!("type {} not found", type_idx))
+                })?;
+                if &actual != expected {
+                    return Err(WasmError::Instantiate(format!(
+                        "import {}.{} tag type mismatch",
+                        module, name
+                    )));
+                }
+                Ok(Extern::Tag(actual))
             }
             _ => Err(WasmError::Instantiate(format!(
                 "import {}.{} kind mismatch",
@@ -1326,7 +1404,12 @@ impl AotRuntime {
             .tables
             .get_mut((table_idx - imported_tables) as usize)
         {
-            table.grow(delta).map(|old_size| old_size as i32).or(Ok(-1))
+            table
+                .lock()
+                .map_err(poisoned_lock)?
+                .grow(delta)
+                .map(|old_size| old_size as i32)
+                .or(Ok(-1))
         } else {
             Err(WasmError::Runtime("table not found".into()))
         }
@@ -1347,7 +1430,7 @@ impl AotRuntime {
         }
 
         if let Some(table) = module.tables.get((table_idx - imported_tables) as usize) {
-            Ok(table.size() as i32)
+            Ok(table.lock().map_err(poisoned_lock)?.size() as i32)
         } else {
             Err(WasmError::Runtime("table not found".into()))
         }
@@ -1410,55 +1493,151 @@ impl Default for AotRuntime {
     }
 }
 
-fn evaluate_const_expr_without_globals(expr: &[u8]) -> Result<WasmValue> {
+fn evaluate_const_expr_with_globals(expr: &[u8], globals: &[Option<Global>]) -> Result<WasmValue> {
     let mut reader = crate::loader::BinaryReader::from_slice(expr);
-    let opcode = reader.read_u8().map_err(WasmError::from)?;
-    let value = match opcode {
-        0x41 => WasmValue::I32(reader.read_sleb128().map_err(WasmError::from)?),
-        0x42 => WasmValue::I64(reader.read_sleb128_i64().map_err(WasmError::from)?),
-        0x43 => WasmValue::F32(reader.read_f32().map_err(WasmError::from)?),
-        0x44 => WasmValue::F64(reader.read_f64().map_err(WasmError::from)?),
-        0xD0 => match reader.read_u8().map_err(WasmError::from)? {
-            0x70 => WasmValue::NullRef(crate::runtime::RefType::FuncRef),
-            0x6F => WasmValue::NullRef(crate::runtime::RefType::ExternRef),
+    let mut stack = Vec::new();
+
+    loop {
+        let opcode = reader.read_u8().map_err(WasmError::from)?;
+        match opcode {
+            0x0B => break,
+            0x23 => {
+                let idx = reader.read_uleb128().map_err(WasmError::from)? as usize;
+                let value = globals
+                    .get(idx)
+                    .and_then(|global| global.clone())
+                    .ok_or_else(|| {
+                        WasmError::Instantiate(format!(
+                            "global.get requires immutable global {} to be registered",
+                            idx
+                        ))
+                    })?
+                    .get();
+                stack.push(value);
+            }
+            0x41 => stack.push(WasmValue::I32(
+                reader.read_sleb128().map_err(WasmError::from)?,
+            )),
+            0x42 => stack.push(WasmValue::I64(
+                reader.read_sleb128_i64().map_err(WasmError::from)?,
+            )),
+            0x43 => stack.push(WasmValue::F32(reader.read_f32().map_err(WasmError::from)?)),
+            0x44 => stack.push(WasmValue::F64(reader.read_f64().map_err(WasmError::from)?)),
+            0xD0 => stack.push(match reader.read_u8().map_err(WasmError::from)? {
+                0x70 => WasmValue::NullRef(crate::runtime::RefType::FuncRef),
+                0x6F => WasmValue::NullRef(crate::runtime::RefType::ExternRef),
+                value => {
+                    return Err(WasmError::Instantiate(format!(
+                        "invalid ref.null type: {:02x}",
+                        value
+                    )));
+                }
+            }),
+            0xD2 => stack.push(WasmValue::FuncRef(
+                reader.read_uleb128().map_err(WasmError::from)?,
+            )),
+            0x6A => {
+                let rhs = pop_i32_const(&mut stack)?;
+                let lhs = pop_i32_const(&mut stack)?;
+                stack.push(WasmValue::I32(lhs.wrapping_add(rhs)));
+            }
+            0x6B => {
+                let rhs = pop_i32_const(&mut stack)?;
+                let lhs = pop_i32_const(&mut stack)?;
+                stack.push(WasmValue::I32(lhs.wrapping_sub(rhs)));
+            }
+            0x6C => {
+                let rhs = pop_i32_const(&mut stack)?;
+                let lhs = pop_i32_const(&mut stack)?;
+                stack.push(WasmValue::I32(lhs.wrapping_mul(rhs)));
+            }
+            0x7C => {
+                let rhs = pop_i64_const(&mut stack)?;
+                let lhs = pop_i64_const(&mut stack)?;
+                stack.push(WasmValue::I64(lhs.wrapping_add(rhs)));
+            }
+            0x7D => {
+                let rhs = pop_i64_const(&mut stack)?;
+                let lhs = pop_i64_const(&mut stack)?;
+                stack.push(WasmValue::I64(lhs.wrapping_sub(rhs)));
+            }
+            0x7E => {
+                let rhs = pop_i64_const(&mut stack)?;
+                let lhs = pop_i64_const(&mut stack)?;
+                stack.push(WasmValue::I64(lhs.wrapping_mul(rhs)));
+            }
             value => {
                 return Err(WasmError::Instantiate(format!(
-                    "invalid ref.null type: {:02x}",
+                    "unsupported const expr opcode: {:02x}",
                     value
                 )));
             }
-        },
-        0xD2 => WasmValue::FuncRef(reader.read_uleb128().map_err(WasmError::from)?),
-        0x23 => {
-            return Err(WasmError::Instantiate(
-                "global.get requires imported immutable globals to be registered".to_string(),
-            ));
         }
-        value => {
-            return Err(WasmError::Instantiate(format!(
-                "unsupported const expr opcode: {:02x}",
-                value
-            )));
-        }
-    };
-
-    let end = reader.read_u8().map_err(WasmError::from)?;
-    if end != 0x0B {
-        return Err(WasmError::Instantiate(
-            "constant expression missing end opcode".to_string(),
-        ));
     }
+
     if reader.remaining() != 0 {
         return Err(WasmError::Instantiate(
             "constant expression has trailing bytes".to_string(),
         ));
     }
 
-    Ok(value)
+    match stack.as_slice() {
+        [value] => Ok(*value),
+        _ => Err(WasmError::Instantiate(
+            "constant expression must leave exactly one value".to_string(),
+        )),
+    }
+}
+
+fn pop_i32_const(stack: &mut Vec<WasmValue>) -> Result<i32> {
+    match stack.pop() {
+        Some(WasmValue::I32(value)) => Ok(value),
+        Some(value) => Err(WasmError::Instantiate(format!(
+            "constant expression expected i32, got {:?}",
+            value.val_type()
+        ))),
+        None => Err(WasmError::Instantiate(
+            "constant expression stack underflow".to_string(),
+        )),
+    }
+}
+
+fn pop_i64_const(stack: &mut Vec<WasmValue>) -> Result<i64> {
+    match stack.pop() {
+        Some(WasmValue::I64(value)) => Ok(value),
+        Some(value) => Err(WasmError::Instantiate(format!(
+            "constant expression expected i64, got {:?}",
+            value.val_type()
+        ))),
+        None => Err(WasmError::Instantiate(
+            "constant expression stack underflow".to_string(),
+        )),
+    }
 }
 
 fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
     WasmError::Runtime("instance lock poisoned".to_string())
+}
+
+fn table_matches_required(actual: &Table, required: &crate::runtime::TableType) -> bool {
+    actual.type_.elem_type == required.elem_type
+        && (actual.type_.nullable == required.nullable
+            || (!actual.type_.nullable && required.nullable))
+        && actual.size() >= required.limits.min()
+        && match (actual.type_.limits.max(), required.limits.max()) {
+            (_, None) => true,
+            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
+            (None, Some(_)) => false,
+        }
+}
+
+fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryType) -> bool {
+    actual.size() >= required.limits.min()
+        && match (actual.type_().limits.max(), required.limits.max()) {
+            (_, None) => true,
+            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
+            (None, Some(_)) => false,
+        }
 }
 
 fn validate_shared_memory_attachment<'a>(

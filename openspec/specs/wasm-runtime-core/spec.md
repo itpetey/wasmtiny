@@ -15,6 +15,19 @@ The runtime SHALL provide safe read/write access to linear memory with bounds ch
 ### Requirement: Table operations
 The runtime SHALL support WebAssembly table operations including get, set, and size.
 
+### Requirement: Cross-module import aliasing
+The runtime SHALL preserve shared state for imported guest functions, tables, memories, and globals across module boundaries.
+
+#### Scenario: Imported table aliases exported table state
+- **GIVEN** module A exports a table and module B imports that table
+- **WHEN** module B mutates the imported table contents
+- **THEN** subsequent reads through module A SHALL observe the same table contents
+
+#### Scenario: Imported guest function binding executes real guest code
+- **GIVEN** module A exports a WebAssembly function and module B imports it
+- **WHEN** module B calls the imported function directly or through a funcref stored in a table
+- **THEN** the exported WebAssembly function body from module A SHALL execute with the correct type checks and results
+
 ### Requirement: Global variables
 The runtime SHALL support reading and writing mutable global variables.
 

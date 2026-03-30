@@ -1,6 +1,6 @@
 use crate::aot_runtime::runtime::AotModule;
 use crate::runtime::{
-    NumType, RuntimeSuspender, SharedMemoryMappingId, SuspendedHandle, TrapCode, ValType,
+    NumType, Result, RuntimeSuspender, SharedMemoryMappingId, SuspendedHandle, TrapCode, ValType,
     WasmError, WasmValue,
 };
 use std::cell::RefCell;
@@ -179,6 +179,7 @@ pub fn current_execution_owner_jit_id() -> Option<u64> {
 ///
 /// This is kept for compatibility with existing tests and callers that do not
 /// need module-backed import dispatch.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn set_memory_context(ptr: *mut u8, len: usize) {
     unsafe { set_execution_context(ptr::null_mut(), ptr, len, None) }
         .expect("null module context cannot fail");
@@ -662,31 +663,39 @@ define_shared_load!(
     llvm_jit_shared_memory_i32_load,
     i32,
     0i32,
-    |module, mapping_id, offset| { module.read_shared_region_i32(mapping_id, offset) }
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_i32(mapping_id, offset)
+    }
 );
 define_shared_load!(
     llvm_jit_shared_memory_i64_load,
     i64,
     0i64,
-    |module, mapping_id, offset| { module.read_shared_region_i64(mapping_id, offset) }
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_i64(mapping_id, offset)
+    }
 );
 define_shared_load!(
     llvm_jit_shared_memory_f32_load,
     f32,
     0.0f32,
-    |module, mapping_id, offset| { module.read_shared_region_f32(mapping_id, offset) }
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_f32(mapping_id, offset)
+    }
 );
 define_shared_load!(
     llvm_jit_shared_memory_f64_load,
     f64,
     0.0f64,
-    |module, mapping_id, offset| { module.read_shared_region_f64(mapping_id, offset) }
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_f64(mapping_id, offset)
+    }
 );
 define_shared_load!(
     llvm_jit_shared_memory_i32_load8_s,
     i32,
     0i32,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         module
             .read_shared_region_u8(mapping_id, offset)
             .map(|v| v as i8 as i32)
@@ -696,7 +705,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i32_load8_u,
     i32,
     0i32,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         module
             .read_shared_region_u8(mapping_id, offset)
             .map(|v| v as i32)
@@ -706,7 +715,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i32_load16_s,
     i32,
     0i32,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         let mut bytes = [0u8; 2];
         module.read_shared_region(mapping_id, offset, &mut bytes)?;
         Ok(i16::from_le_bytes(bytes) as i32)
@@ -716,7 +725,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i32_load16_u,
     i32,
     0i32,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         let mut bytes = [0u8; 2];
         module.read_shared_region(mapping_id, offset, &mut bytes)?;
         Ok(u16::from_le_bytes(bytes) as i32)
@@ -726,7 +735,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i64_load8_s,
     i64,
     0i64,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         module
             .read_shared_region_u8(mapping_id, offset)
             .map(|v| v as i8 as i64)
@@ -736,7 +745,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i64_load8_u,
     i64,
     0i64,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         module
             .read_shared_region_u8(mapping_id, offset)
             .map(|v| v as i64)
@@ -746,7 +755,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i64_load16_s,
     i64,
     0i64,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         let mut bytes = [0u8; 2];
         module.read_shared_region(mapping_id, offset, &mut bytes)?;
         Ok(i16::from_le_bytes(bytes) as i64)
@@ -756,7 +765,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i64_load16_u,
     i64,
     0i64,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         let mut bytes = [0u8; 2];
         module.read_shared_region(mapping_id, offset, &mut bytes)?;
         Ok(u16::from_le_bytes(bytes) as i64)
@@ -766,7 +775,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i64_load32_s,
     i64,
     0i64,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         let mut bytes = [0u8; 4];
         module.read_shared_region(mapping_id, offset, &mut bytes)?;
         Ok(i32::from_le_bytes(bytes) as i64)
@@ -776,7 +785,7 @@ define_shared_load!(
     llvm_jit_shared_memory_i64_load32_u,
     i64,
     0i64,
-    |module, mapping_id, offset| {
+    |module: &mut AotModule, mapping_id, offset| {
         let mut bytes = [0u8; 4];
         module.read_shared_region(mapping_id, offset, &mut bytes)?;
         Ok(u32::from_le_bytes(bytes) as i64)
@@ -786,63 +795,63 @@ define_shared_load!(
 define_shared_store!(
     llvm_jit_shared_memory_i32_store,
     i32,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region_i32(mapping_id, offset, value)
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_i64_store,
     i64,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region_i64(mapping_id, offset, value)
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_f32_store,
     f32,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region_f32(mapping_id, offset, value)
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_f64_store,
     f64,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region_f64(mapping_id, offset, value)
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_i32_store8,
     i32,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region_u8(mapping_id, offset, value as u8)
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_i32_store16,
     i32,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_i64_store8,
     i64,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region_u8(mapping_id, offset, value as u8)
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_i64_store16,
     i64,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
     }
 );
 define_shared_store!(
     llvm_jit_shared_memory_i64_store32,
     i64,
-    |module, mapping_id, offset, value| {
+    |module: &mut AotModule, mapping_id, offset, value| {
         module.write_shared_region(mapping_id, offset, &(value as u32).to_le_bytes())
     }
 );
@@ -993,16 +1002,14 @@ define_store!(llvm_jit_i64_store32, 4, i64, |ptr, val| {
     std::ptr::write_unaligned(ptr as *mut u32, val as u32)
 });
 
-use std::sync::atomic::Ordering;
-
 macro_rules! define_atomic_load {
-    ($name:ident, $size:expr, $ty:ty, $cast:expr) => {
+    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $cast:expr) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn $name(addr: u32) -> $ty {
             match check_bounds(addr, $size) {
                 Some(ptr) => unsafe {
-                    let atomic_ptr = ptr as *mut $ty;
-                    $cast(atomic_ptr.load(Ordering::SeqCst))
+                    let atomic_ptr = ptr as *mut $atomic_ty;
+                    $cast((*atomic_ptr).load(Ordering::SeqCst))
                 },
                 None => {
                     set_trap(TrapCode::MemoryOutOfBounds);
@@ -1014,13 +1021,13 @@ macro_rules! define_atomic_load {
 }
 
 macro_rules! define_atomic_store {
-    ($name:ident, $size:expr, $ty:ty, $cast:expr) => {
+    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $cast:expr) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn $name(addr: u32, val: $ty) {
             match check_bounds(addr, $size) {
                 Some(ptr) => unsafe {
-                    let atomic_ptr = ptr as *mut $ty;
-                    atomic_ptr.store($cast(val), Ordering::SeqCst);
+                    let atomic_ptr = ptr as *mut $atomic_ty;
+                    (*atomic_ptr).store($cast(val), Ordering::SeqCst);
                 },
                 None => set_trap(TrapCode::MemoryOutOfBounds),
             }
@@ -1028,20 +1035,44 @@ macro_rules! define_atomic_store {
     };
 }
 
-define_atomic_load!(llvm_jit_i32_atomic_load, 4, i32, |v: i32| v);
-define_atomic_load!(llvm_jit_i64_atomic_load, 8, i64, |v: i64| v);
-define_atomic_store!(llvm_jit_i32_atomic_store, 4, i32, |v: i32| v);
-define_atomic_store!(llvm_jit_i64_atomic_store, 8, i64, |v: i64| v);
+define_atomic_load!(
+    llvm_jit_i32_atomic_load,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |v: i32| v
+);
+define_atomic_load!(
+    llvm_jit_i64_atomic_load,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |v: i64| v
+);
+define_atomic_store!(
+    llvm_jit_i32_atomic_store,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |v: i32| v
+);
+define_atomic_store!(
+    llvm_jit_i64_atomic_store,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |v: i64| v
+);
 
 macro_rules! define_atomic_rmw {
-    ($name:ident, $size:expr, $ty:ty, $op:expr) => {
+    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $op:expr) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn $name(addr: u32, val: $ty) -> $ty {
             match check_bounds(addr, $size) {
                 Some(ptr) => unsafe {
-                    let atomic_ptr = ptr as *mut $ty;
-                    let old = atomic_ptr.load(Ordering::SeqCst);
-                    atomic_ptr.store($op(old, val), Ordering::SeqCst);
+                    let atomic_ptr = ptr as *mut $atomic_ty;
+                    let old = (*atomic_ptr).load(Ordering::SeqCst);
+                    (*atomic_ptr).store($op(old, val), Ordering::SeqCst);
                     old
                 },
                 None => {
@@ -1053,31 +1084,99 @@ macro_rules! define_atomic_rmw {
     };
 }
 
-define_atomic_rmw!(llvm_jit_i32_atomic_rmw_add, 4, i32, |old, new| old
-    .wrapping_add(new));
-define_atomic_rmw!(llvm_jit_i64_atomic_rmw_add, 8, i64, |old, new| old
-    .wrapping_add(new));
-define_atomic_rmw!(llvm_jit_i32_atomic_rmw_sub, 4, i32, |old, new| old
-    .wrapping_sub(new));
-define_atomic_rmw!(llvm_jit_i64_atomic_rmw_sub, 8, i64, |old, new| old
-    .wrapping_sub(new));
-define_atomic_rmw!(llvm_jit_i32_atomic_rmw_and, 4, i32, |old, new| old & new);
-define_atomic_rmw!(llvm_jit_i64_atomic_rmw_and, 8, i64, |old, new| old & new);
-define_atomic_rmw!(llvm_jit_i32_atomic_rmw_or, 4, i32, |old, new| old | new);
-define_atomic_rmw!(llvm_jit_i64_atomic_rmw_or, 8, i64, |old, new| old | new);
-define_atomic_rmw!(llvm_jit_i32_atomic_rmw_xor, 4, i32, |old, new| old ^ new);
-define_atomic_rmw!(llvm_jit_i64_atomic_rmw_xor, 8, i64, |old, new| old ^ new);
-define_atomic_rmw!(llvm_jit_i32_atomic_rmw_xchg, 4, i32, |_old, new| new);
-define_atomic_rmw!(llvm_jit_i64_atomic_rmw_xchg, 8, i64, |_old, new| new);
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_add,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old.wrapping_add(new)
+);
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_add,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old.wrapping_add(new)
+);
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_sub,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old.wrapping_sub(new)
+);
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_sub,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old.wrapping_sub(new)
+);
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_and,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old & new
+);
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_and,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old & new
+);
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_or,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old | new
+);
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_or,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old | new
+);
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_xor,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old ^ new
+);
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_xor,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old ^ new
+);
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_xchg,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |_old: i32, new: i32| new
+);
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_xchg,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |_old: i64, new: i64| new
+);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn llvm_jit_i32_atomic_rmw_cmpxchg(addr: u32, expected: i32, new: i32) -> i32 {
     match check_bounds(addr, 4) {
         Some(ptr) => unsafe {
-            let atomic_ptr = ptr as *mut i32;
-            let old = atomic_ptr.load(Ordering::SeqCst);
+            let atomic_ptr = ptr as *mut std::sync::atomic::AtomicI32;
+            let old = (*atomic_ptr).load(Ordering::SeqCst);
             if old == expected {
-                atomic_ptr.store(new, Ordering::SeqCst);
+                (*atomic_ptr).store(new, Ordering::SeqCst);
                 1
             } else {
                 0
@@ -1094,10 +1193,10 @@ pub extern "C" fn llvm_jit_i32_atomic_rmw_cmpxchg(addr: u32, expected: i32, new:
 pub extern "C" fn llvm_jit_i64_atomic_rmw_cmpxchg(addr: u32, expected: i64, new: i64) -> i32 {
     match check_bounds(addr, 8) {
         Some(ptr) => unsafe {
-            let atomic_ptr = ptr as *mut i64;
-            let old = atomic_ptr.load(Ordering::SeqCst);
+            let atomic_ptr = ptr as *mut std::sync::atomic::AtomicI64;
+            let old = (*atomic_ptr).load(Ordering::SeqCst);
             if old == expected {
-                atomic_ptr.store(new, Ordering::SeqCst);
+                (*atomic_ptr).store(new, Ordering::SeqCst);
                 1
             } else {
                 0
@@ -1111,17 +1210,17 @@ pub extern "C" fn llvm_jit_i64_atomic_rmw_cmpxchg(addr: u32, expected: i64, new:
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_memory_atomic_notify32(addr: u32, n: u32) -> i32 {
+pub extern "C" fn llvm_jit_memory_atomic_notify32(_addr: u32, _n: u32) -> i32 {
     0
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_memory_atomic_wait32(addr: u32, expected: i32, timeout: i64) -> i32 {
+pub extern "C" fn llvm_jit_memory_atomic_wait32(_addr: u32, _expected: i32, _timeout: i64) -> i32 {
     2
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_memory_atomic_wait64(addr: u32, expected: i64, timeout: i64) -> i32 {
+pub extern "C" fn llvm_jit_memory_atomic_wait64(_addr: u32, _expected: i64, _timeout: i64) -> i32 {
     2
 }
 

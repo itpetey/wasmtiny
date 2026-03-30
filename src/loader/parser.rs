@@ -56,8 +56,8 @@ impl Parser {
         }
 
         let mut module = Module::new();
-        let mut last_non_custom_section = 0u8;
-        let mut seen_sections = [false; 12];
+        let mut last_non_custom_order = 0u8;
+        let mut seen_sections = [false; 14];
 
         while reader.remaining() > 0 {
             let section_id = reader.read_u8()?;
@@ -78,14 +78,17 @@ impl Parser {
                         section_id
                     )));
                 }
-                if section_id < last_non_custom_section {
+                let section_order = Self::section_order(section_id).ok_or_else(|| {
+                    WasmError::Load(format!("unknown section id: {}", section_id))
+                })?;
+                if section_order < last_non_custom_order {
                     return Err(WasmError::Load(format!(
                         "section {} out of order",
                         section_id
                     )));
                 }
                 seen_sections[section_id as usize] = true;
-                last_non_custom_section = section_id;
+                last_non_custom_order = section_order;
             }
 
             match section_id {
@@ -101,6 +104,7 @@ impl Parser {
                 9 => self.parse_elem(&mut section_reader, &mut module)?,
                 10 => self.parse_code(&mut section_reader, &mut module)?,
                 11 => self.parse_data(&mut section_reader, &mut module)?,
+                13 => self.parse_tag(&mut section_reader, &mut module)?,
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown section id: {}",
@@ -130,6 +134,24 @@ impl Parser {
         let _name = reader.read_bytes(name_len)?;
         let _payload = reader.read_bytes(reader.remaining())?;
         Ok(())
+    }
+
+    fn section_order(section_id: u8) -> Option<u8> {
+        Some(match section_id {
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            13 => 4,
+            4 => 5,
+            5 => 6,
+            6 => 7,
+            7 => 8,
+            8 => 9,
+            9 => 10,
+            10 => 11,
+            11 => 12,
+            _ => return None,
+        })
     }
 
     fn parse_type(
@@ -171,6 +193,7 @@ impl Parser {
             0x7C => Ok(ValType::Num(NumType::F64)),
             0x70 => Ok(ValType::Ref(RefType::FuncRef)),
             0x6F => Ok(ValType::Ref(RefType::ExternRef)),
+            0x63 | 0x64 => Ok(ValType::Ref(self.read_heap_type_ref(reader)?)),
             _ => Err(WasmError::Load(format!("unknown val type: {}", type_byte))),
         }
     }
@@ -194,9 +217,9 @@ impl Parser {
             let kind = match kind_byte {
                 0x00 => ImportKind::Func(reader.read_uleb128()?),
                 0x01 => {
-                    let elem_type = self.read_ref_type(reader)?;
+                    let (elem_type, nullable) = self.read_table_ref_type(reader)?;
                     let limits = self.read_limits(reader)?;
-                    ImportKind::Table(TableType::new(elem_type, limits))
+                    ImportKind::Table(TableType::new_with_nullability(elem_type, nullable, limits))
                 }
                 0x02 => {
                     let (limits, shared) = self.read_limits_with_flags(reader)?;
@@ -209,6 +232,7 @@ impl Parser {
                     let mutable = self.read_mutability(reader)?;
                     ImportKind::Global(GlobalType::new(content_type, mutable))
                 }
+                0x04 => ImportKind::Tag(self.read_tag_type(reader)?),
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown import kind: {}",
@@ -252,9 +276,63 @@ impl Parser {
     ) -> Result<()> {
         let count = reader.read_uleb128()?;
         for _ in 0..count {
-            let elem_type = self.read_ref_type(reader)?;
-            let limits = self.read_limits(reader)?;
-            module.tables.push(TableType::new(elem_type, limits));
+            let prefix = reader.read_u8()?;
+            match prefix {
+                0x40 => {
+                    let flags = reader.read_u8()?;
+                    if flags != 0 {
+                        return Err(WasmError::Load(format!(
+                            "unsupported table init flags: {}",
+                            flags
+                        )));
+                    }
+                    let type_prefix = reader.read_u8()?;
+                    let (elem_type, nullable) =
+                        self.read_ref_type_with_prefix(reader, type_prefix)?;
+                    let limits = self.read_limits(reader)?;
+                    let init = self.read_const_expr(reader)?;
+                    if type_prefix == 0x64 && init.first().copied() == Some(0xD0) {
+                        return Err(WasmError::Load(
+                            "non-null table initialiser cannot be ref.null".to_string(),
+                        ));
+                    }
+                    let table_idx = module
+                        .imports
+                        .iter()
+                        .filter(|import| matches!(import.kind, ImportKind::Table(_)))
+                        .count() as u32
+                        + module.tables.len() as u32;
+                    let min = limits.min() as usize;
+
+                    module
+                        .tables
+                        .push(TableType::new_with_nullability(elem_type, nullable, limits));
+                    if min > 0 {
+                        module.elems.push(ElemSegment {
+                            kind: ElemKind::Active {
+                                table_idx,
+                                offset: Self::i32_zero_expr(),
+                            },
+                            type_: elem_type,
+                            nullable,
+                            init: vec![init; min],
+                            generated_by_table_init: true,
+                        });
+                    }
+                }
+                0x64 => {
+                    return Err(WasmError::Load(
+                        "non-null table declarations require an explicit initialiser".to_string(),
+                    ));
+                }
+                byte => {
+                    let (elem_type, nullable) = self.read_ref_type_with_prefix(reader, byte)?;
+                    let limits = self.read_limits(reader)?;
+                    module
+                        .tables
+                        .push(TableType::new_with_nullability(elem_type, nullable, limits));
+                }
+            }
         }
 
         Ok(())
@@ -333,6 +411,7 @@ impl Parser {
                 0x01 => ExportKind::Table(idx),
                 0x02 => ExportKind::Memory(idx),
                 0x03 => ExportKind::Global(idx),
+                0x04 => ExportKind::Tag(idx),
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown export kind: {}",
@@ -347,6 +426,18 @@ impl Parser {
             });
         }
 
+        Ok(())
+    }
+
+    fn parse_tag(
+        &self,
+        reader: &mut BinaryReader<Cursor<&[u8]>>,
+        module: &mut Module,
+    ) -> Result<()> {
+        let count = reader.read_uleb128()?;
+        for _ in 0..count {
+            module.tags.push(self.read_tag_type(reader)?);
+        }
         Ok(())
     }
 
@@ -377,10 +468,12 @@ impl Parser {
                             offset,
                         },
                         type_: RefType::FuncRef,
+                        nullable: false,
                         init: funcs
                             .into_iter()
                             .map(Self::func_ref_expr)
                             .collect::<Vec<_>>(),
+                        generated_by_table_init: false,
                     });
                 }
                 1 => {
@@ -389,10 +482,12 @@ impl Parser {
                     module.elems.push(ElemSegment {
                         kind: ElemKind::Passive,
                         type_: RefType::FuncRef,
+                        nullable: false,
                         init: funcs
                             .into_iter()
                             .map(Self::func_ref_expr)
                             .collect::<Vec<_>>(),
+                        generated_by_table_init: false,
                     });
                 }
                 2 => {
@@ -403,10 +498,12 @@ impl Parser {
                     module.elems.push(ElemSegment {
                         kind: ElemKind::Active { table_idx, offset },
                         type_: RefType::FuncRef,
+                        nullable: false,
                         init: funcs
                             .into_iter()
                             .map(Self::func_ref_expr)
                             .collect::<Vec<_>>(),
+                        generated_by_table_init: false,
                     });
                 }
                 3 => {
@@ -415,10 +512,12 @@ impl Parser {
                     module.elems.push(ElemSegment {
                         kind: ElemKind::Declarative,
                         type_: RefType::FuncRef,
+                        nullable: false,
                         init: funcs
                             .into_iter()
                             .map(Self::func_ref_expr)
                             .collect::<Vec<_>>(),
+                        generated_by_table_init: false,
                     });
                 }
                 4 => {
@@ -430,36 +529,44 @@ impl Parser {
                             offset,
                         },
                         type_: RefType::FuncRef,
+                        nullable: true,
                         init,
+                        generated_by_table_init: false,
                     });
                 }
                 5 => {
-                    let type_ = self.read_ref_type(reader)?;
+                    let (type_, nullable) = self.read_table_ref_type(reader)?;
                     let init = self.read_const_expr_vector(reader)?;
                     module.elems.push(ElemSegment {
                         kind: ElemKind::Passive,
                         type_,
+                        nullable,
                         init,
+                        generated_by_table_init: false,
                     });
                 }
                 6 => {
                     let table_idx = reader.read_uleb128()?;
                     let offset = self.read_const_expr(reader)?;
-                    let type_ = self.read_ref_type(reader)?;
+                    let (type_, nullable) = self.read_table_ref_type(reader)?;
                     let init = self.read_const_expr_vector(reader)?;
                     module.elems.push(ElemSegment {
                         kind: ElemKind::Active { table_idx, offset },
                         type_,
+                        nullable,
                         init,
+                        generated_by_table_init: false,
                     });
                 }
                 7 => {
-                    let type_ = self.read_ref_type(reader)?;
+                    let (type_, nullable) = self.read_table_ref_type(reader)?;
                     let init = self.read_const_expr_vector(reader)?;
                     module.elems.push(ElemSegment {
                         kind: ElemKind::Declarative,
                         type_,
+                        nullable,
                         init,
+                        generated_by_table_init: false,
                     });
                 }
                 _ => {
@@ -554,11 +661,38 @@ impl Parser {
         Ok(())
     }
 
-    fn read_ref_type(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<RefType> {
-        match reader.read_u8()? {
-            0x70 => Ok(RefType::FuncRef),
-            0x6F => Ok(RefType::ExternRef),
+    fn read_table_ref_type(
+        &self,
+        reader: &mut BinaryReader<Cursor<&[u8]>>,
+    ) -> Result<(RefType, bool)> {
+        let prefix = reader.read_u8()?;
+        self.read_ref_type_with_prefix(reader, prefix)
+    }
+
+    fn read_ref_type_with_prefix(
+        &self,
+        reader: &mut BinaryReader<Cursor<&[u8]>>,
+        prefix: u8,
+    ) -> Result<(RefType, bool)> {
+        match prefix {
+            0x70 => Ok((RefType::FuncRef, true)),
+            0x6F => Ok((RefType::ExternRef, true)),
+            0x63 => self
+                .read_heap_type_ref(reader)
+                .map(|ref_type| (ref_type, true)),
+            0x64 => self
+                .read_heap_type_ref(reader)
+                .map(|ref_type| (ref_type, false)),
             byte => Err(WasmError::Load(format!("unknown ref type: {}", byte))),
+        }
+    }
+
+    fn read_heap_type_ref(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<RefType> {
+        match reader.read_sleb128_i64()? {
+            -0x10 | -0x14 => Ok(RefType::FuncRef),
+            -0x11 | -0x13 => Ok(RefType::ExternRef),
+            idx if idx >= 0 => Ok(RefType::FuncRef),
+            heap_type => Err(WasmError::Load(format!("unknown heap type: {}", heap_type))),
         }
     }
 
@@ -587,6 +721,17 @@ impl Parser {
         }
     }
 
+    fn read_tag_type(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<u32> {
+        let attribute = reader.read_u8()?;
+        if attribute != 0x00 {
+            return Err(WasmError::Load(format!(
+                "unsupported tag attribute: {}",
+                attribute
+            )));
+        }
+        reader.read_uleb128().map_err(Into::into)
+    }
+
     fn read_const_expr(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<Vec<u8>> {
         let mut expr = Vec::new();
 
@@ -601,7 +746,8 @@ impl Parser {
                 0x42 => expr.extend(self.read_raw_sleb(reader)?),
                 0x43 => expr.extend(reader.read_bytes(4)?),
                 0x44 => expr.extend(reader.read_bytes(8)?),
-                0xD0 => expr.push(reader.read_u8()?),
+                0xD0 => expr.extend(self.read_raw_sleb(reader)?),
+                0x6A..=0x6C | 0x7C..=0x7E => {}
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unsupported constant expression opcode: {:02x}",
@@ -651,6 +797,10 @@ impl Parser {
         Self::write_uleb128(func_idx, &mut expr);
         expr.push(0x0B);
         expr
+    }
+
+    fn i32_zero_expr() -> Vec<u8> {
+        vec![0x41, 0x00, 0x0B]
     }
 
     fn write_uleb128(mut value: u32, out: &mut Vec<u8>) {

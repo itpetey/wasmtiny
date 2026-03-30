@@ -93,6 +93,8 @@ pub struct Interpreter {
     execution_thread: Option<ThreadId>,
 }
 
+const MAX_CALL_DEPTH: usize = 1024;
+
 impl Interpreter {
     /// Creates a new `Interpreter`.
     pub fn new() -> Self {
@@ -557,6 +559,17 @@ impl Interpreter {
                 Ok(())
             }
             0x1B => self.select_value(),
+            0x1C => {
+                let count = self.read_var_u32_immediate()?;
+                if count != 1 {
+                    return Err(WasmError::Runtime(format!(
+                        "unsupported typed select arity {}",
+                        count
+                    )));
+                }
+                let _ = self.read_value_type_immediate(module)?;
+                self.select_value()
+            }
             0x20 => {
                 let idx = self.read_var_u32_immediate()? as usize;
                 let value = self
@@ -882,6 +895,135 @@ impl Interpreter {
                 let a = self.operand_stack.pop_i32()? as u32;
                 self.push_bool(a >= b)
             }
+            0x50 => {
+                let value = self.operand_stack.pop_i64()?;
+                self.push_bool(value == 0)
+            }
+            0x51 => {
+                let b = self.operand_stack.pop_i64()?;
+                let a = self.operand_stack.pop_i64()?;
+                self.push_bool(a == b)
+            }
+            0x52 => {
+                let b = self.operand_stack.pop_i64()?;
+                let a = self.operand_stack.pop_i64()?;
+                self.push_bool(a != b)
+            }
+            0x53 => {
+                let b = self.operand_stack.pop_i64()?;
+                let a = self.operand_stack.pop_i64()?;
+                self.push_bool(a < b)
+            }
+            0x54 => {
+                let b = self.operand_stack.pop_i64()? as u64;
+                let a = self.operand_stack.pop_i64()? as u64;
+                self.push_bool(a < b)
+            }
+            0x55 => {
+                let b = self.operand_stack.pop_i64()?;
+                let a = self.operand_stack.pop_i64()?;
+                self.push_bool(a > b)
+            }
+            0x56 => {
+                let b = self.operand_stack.pop_i64()? as u64;
+                let a = self.operand_stack.pop_i64()? as u64;
+                self.push_bool(a > b)
+            }
+            0x57 => {
+                let b = self.operand_stack.pop_i64()?;
+                let a = self.operand_stack.pop_i64()?;
+                self.push_bool(a <= b)
+            }
+            0x58 => {
+                let b = self.operand_stack.pop_i64()? as u64;
+                let a = self.operand_stack.pop_i64()? as u64;
+                self.push_bool(a <= b)
+            }
+            0x59 => {
+                let b = self.operand_stack.pop_i64()?;
+                let a = self.operand_stack.pop_i64()?;
+                self.push_bool(a >= b)
+            }
+            0x5A => {
+                let b = self.operand_stack.pop_i64()? as u64;
+                let a = self.operand_stack.pop_i64()? as u64;
+                self.push_bool(a >= b)
+            }
+            0x5B => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.push_bool(a == b)
+            }
+            0x5C => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.push_bool(a != b)
+            }
+            0x5D => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.push_bool(a < b)
+            }
+            0x5E => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.push_bool(a > b)
+            }
+            0x5F => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.push_bool(a <= b)
+            }
+            0x60 => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.push_bool(a >= b)
+            }
+            0x61 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.push_bool(a == b)
+            }
+            0x62 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.push_bool(a != b)
+            }
+            0x63 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.push_bool(a < b)
+            }
+            0x64 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.push_bool(a > b)
+            }
+            0x65 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.push_bool(a <= b)
+            }
+            0x66 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.push_bool(a >= b)
+            }
+            0x67 => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack
+                    .push(WasmValue::I32(value.leading_zeros() as i32))
+            }
+            0x68 => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack
+                    .push(WasmValue::I32(value.trailing_zeros() as i32))
+            }
+            0x69 => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack
+                    .push(WasmValue::I32(value.count_ones() as i32))
+            }
             0x6A => {
                 let b = self.operand_stack.pop_i32()?;
                 let a = self.operand_stack.pop_i32()?;
@@ -966,6 +1108,16 @@ impl Interpreter {
                 let a = self.operand_stack.pop_i32()? as u32;
                 self.operand_stack
                     .push(WasmValue::I32(a.wrapping_shr(b) as i32))
+            }
+            0x77 => {
+                let b = self.operand_stack.pop_i32()? as u32;
+                let a = self.operand_stack.pop_i32()?;
+                self.operand_stack.push(WasmValue::I32(a.rotate_left(b)))
+            }
+            0x78 => {
+                let b = self.operand_stack.pop_i32()? as u32;
+                let a = self.operand_stack.pop_i32()?;
+                self.operand_stack.push(WasmValue::I32(a.rotate_right(b)))
             }
             0x79 => {
                 let value = self.operand_stack.pop_i64()?;
@@ -1067,30 +1219,292 @@ impl Interpreter {
                 self.operand_stack
                     .push(WasmValue::I64(a.wrapping_shr(b) as i64))
             }
+            0x89 => {
+                let b = self.operand_stack.pop_i32()? as u32;
+                let a = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::I64(a.rotate_left(b)))
+            }
+            0x8A => {
+                let b = self.operand_stack.pop_i32()? as u32;
+                let a = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::I64(a.rotate_right(b)))
+            }
+            0x8B => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(value.abs()))
+            }
+            0x8C => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(-value))
+            }
+            0x8D => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(value.ceil()))
+            }
+            0x8E => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(value.floor()))
+            }
+            0x8F => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(value.trunc()))
+            }
+            0x90 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::F32(value.round_ties_even()))
+            }
+            0x91 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(value.sqrt()))
+            }
             0x92 => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(a + b))
+            }
+            0x93 => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(a - b))
+            }
+            0x94 => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(a * b))
+            }
+            0x95 => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F32(a / b))
+            }
+            0x96 => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::F32(Self::wasm_f32_min(a, b)))
+            }
+            0x97 => {
+                let b = self.operand_stack.pop_f32()?;
+                let a = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::F32(Self::wasm_f32_max(a, b)))
+            }
+            0x98 => {
                 let b = self.operand_stack.pop_f32()?;
                 let a = self.operand_stack.pop_f32()?;
                 self.operand_stack.push(WasmValue::F32(a.copysign(b)))
             }
-            0xA6 => {
+            0x99 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F64(value.abs()))
+            }
+            0x9A => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F64(-value))
+            }
+            0x9B => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F64(value.ceil()))
+            }
+            0x9C => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F64(value.floor()))
+            }
+            0x9D => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F64(value.trunc()))
+            }
+            0x9E => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::F64(value.round_ties_even()))
+            }
+            0x9F => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F64(value.sqrt()))
+            }
+            0xA0 => {
                 let b = self.operand_stack.pop_f64()?;
                 let a = self.operand_stack.pop_f64()?;
                 self.operand_stack.push(WasmValue::F64(a + b))
             }
-            0xA7 => {
+            0xA1 => {
                 let b = self.operand_stack.pop_f64()?;
                 let a = self.operand_stack.pop_f64()?;
                 self.operand_stack.push(WasmValue::F64(a - b))
             }
-            0xA8 => {
+            0xA2 => {
                 let b = self.operand_stack.pop_f64()?;
                 let a = self.operand_stack.pop_f64()?;
                 self.operand_stack.push(WasmValue::F64(a * b))
             }
-            0xA9 => {
+            0xA3 => {
                 let b = self.operand_stack.pop_f64()?;
                 let a = self.operand_stack.pop_f64()?;
                 self.operand_stack.push(WasmValue::F64(a / b))
+            }
+            0xA4 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::F64(Self::wasm_f64_min(a, b)))
+            }
+            0xA5 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::F64(Self::wasm_f64_max(a, b)))
+            }
+            0xA6 => {
+                let b = self.operand_stack.pop_f64()?;
+                let a = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F64(a.copysign(b)))
+            }
+            0xA7 => {
+                let value = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::I32(value as i32))
+            }
+            0xA8 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_f32_to_i32_s(value)?))
+            }
+            0xA9 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_f32_to_i32_u(value)? as i32))
+            }
+            0xAA => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_f64_to_i32_s(value)?))
+            }
+            0xAB => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_f64_to_i32_u(value)? as i32))
+            }
+            0xAC => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack.push(WasmValue::I64(value as i64))
+            }
+            0xAD => {
+                let value = self.operand_stack.pop_i32()? as u32;
+                self.operand_stack.push(WasmValue::I64(value as i64))
+            }
+            0xAE => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_f32_to_i64_s(value)?))
+            }
+            0xAF => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_f32_to_i64_u(value)? as i64))
+            }
+            0xB0 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_f64_to_i64_s(value)?))
+            }
+            0xB1 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_f64_to_i64_u(value)? as i64))
+            }
+            0xB2 => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack.push(WasmValue::F32(value as f32))
+            }
+            0xB3 => {
+                let value = self.operand_stack.pop_i32()? as u32;
+                self.operand_stack.push(WasmValue::F32(value as f32))
+            }
+            0xB4 => {
+                let value = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::F32(value as f32))
+            }
+            0xB5 => {
+                let value = self.operand_stack.pop_i64()? as u64;
+                self.operand_stack.push(WasmValue::F32(value as f32))
+            }
+            0xB6 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::F32(value as f32))
+            }
+            0xB7 => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack.push(WasmValue::F64(value as f64))
+            }
+            0xB8 => {
+                let value = self.operand_stack.pop_i32()? as u32;
+                self.operand_stack.push(WasmValue::F64(value as f64))
+            }
+            0xB9 => {
+                let value = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::F64(value as f64))
+            }
+            0xBA => {
+                let value = self.operand_stack.pop_i64()? as u64;
+                self.operand_stack.push(WasmValue::F64(value as f64))
+            }
+            0xBB => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::F64(value as f64))
+            }
+            0xBC => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack.push(WasmValue::I32(i32::from_ne_bytes(
+                    value.to_bits().to_ne_bytes(),
+                )))
+            }
+            0xBD => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack.push(WasmValue::I64(i64::from_ne_bytes(
+                    value.to_bits().to_ne_bytes(),
+                )))
+            }
+            0xBE => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack
+                    .push(WasmValue::F32(f32::from_bits(value as u32)))
+            }
+            0xBF => {
+                let value = self.operand_stack.pop_i64()?;
+                self.operand_stack
+                    .push(WasmValue::F64(f64::from_bits(value as u64)))
+            }
+            0xC0 => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack.push(WasmValue::I32(value as i8 as i32))
+            }
+            0xC1 => {
+                let value = self.operand_stack.pop_i32()?;
+                self.operand_stack.push(WasmValue::I32(value as i16 as i32))
+            }
+            0xC2 => {
+                let value = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::I64(value as i8 as i64))
+            }
+            0xC3 => {
+                let value = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::I64(value as i16 as i64))
+            }
+            0xC4 => {
+                let value = self.operand_stack.pop_i64()?;
+                self.operand_stack.push(WasmValue::I64(value as i32 as i64))
+            }
+            0xFC => {
+                let subopcode = self.read_var_u32_immediate()?;
+                match subopcode {
+                    0..=7 => self.execute_numeric_extended_opcode(subopcode),
+                    12 | 13 => self.execute_table_extended_opcode(subopcode),
+                    _ => Err(WasmError::Runtime(format!(
+                        "unsupported numeric extended opcode: {:02x}",
+                        subopcode
+                    ))),
+                }
             }
             0xD0 => {
                 let ref_type = self.read_u8_immediate()?;
@@ -1101,6 +1515,9 @@ impl Interpreter {
                     0x6F => self
                         .operand_stack
                         .push(WasmValue::NullRef(RefType::ExternRef)),
+                    byte if byte < 0x40 => self
+                        .operand_stack
+                        .push(WasmValue::NullRef(RefType::FuncRef)),
                     _ => Err(WasmError::Runtime(format!(
                         "invalid ref.null type: {:02x}",
                         ref_type
@@ -1116,7 +1533,12 @@ impl Interpreter {
             }
             0xD2 => {
                 let func_idx = self.read_var_u32_immediate()?;
-                self.operand_stack.push(WasmValue::FuncRef(func_idx))
+                let instance = self.instance_ref()?;
+                let handle = instance
+                    .lock()
+                    .map_err(poisoned_lock)?
+                    .func_ref_handle(func_idx)?;
+                self.operand_stack.push(WasmValue::native_func_ref(handle))
             }
             0xFE => {
                 let subopcode = self.read_u8_immediate()?;
@@ -1391,6 +1813,17 @@ impl Interpreter {
     }
 
     fn call_function(&mut self, module: &Module, func_idx: u32) -> Result<()> {
+        if self
+            .control_stack
+            .frames()
+            .iter()
+            .filter(|frame| matches!(frame.kind, FrameKind::Function))
+            .count()
+            >= MAX_CALL_DEPTH
+        {
+            return Err(WasmError::Trap(TrapCode::StackOverflow));
+        }
+
         let func_type = module.func_type(func_idx).ok_or_else(|| {
             WasmError::Validation(format!("function type not found for func {}", func_idx))
         })?;
@@ -1442,24 +1875,32 @@ impl Interpreter {
     }
 
     fn call_indirect(&mut self, module: &Module, type_idx: u32, table_idx: u32) -> Result<()> {
+        enum IndirectCallTarget {
+            Local(u32),
+            Native(u32),
+        }
+
         let expected_type = module
             .type_at(type_idx)
             .ok_or_else(|| WasmError::Validation(format!("type {} not found", type_idx)))?;
         let elem_idx = self.operand_stack.pop_i32()? as u32;
 
-        let target_func_idx = {
+        let target = {
             let instance = self.instance_ref()?;
             let instance = instance.lock().map_err(poisoned_lock)?;
             let table = instance
                 .table(table_idx)
                 .ok_or_else(|| WasmError::Runtime(format!("table {} out of bounds", table_idx)))?;
-            match table
+            let value = table
                 .lock()
                 .map_err(poisoned_lock)?
                 .get(elem_idx)
-                .ok_or(WasmError::Trap(TrapCode::TableOutOfBounds))?
-            {
-                WasmValue::FuncRef(func_idx) => func_idx,
+                .ok_or(WasmError::Trap(TrapCode::TableOutOfBounds))?;
+            match value {
+                WasmValue::FuncRef(func_idx) => value
+                    .native_func_handle()
+                    .map(IndirectCallTarget::Native)
+                    .unwrap_or(IndirectCallTarget::Local(func_idx)),
                 WasmValue::NullRef(RefType::FuncRef) => {
                     return Err(WasmError::Trap(TrapCode::CallIndirectNull));
                 }
@@ -1471,17 +1912,57 @@ impl Interpreter {
             }
         };
 
-        let target_type = module.func_type(target_func_idx).ok_or_else(|| {
-            WasmError::Validation(format!(
-                "function type not found for func {}",
-                target_func_idx
-            ))
-        })?;
-        if target_type != expected_type {
-            return Err(WasmError::Trap(TrapCode::IndirectCallTypeMismatch));
+        match target {
+            IndirectCallTarget::Local(target_func_idx) => {
+                let target_type = module.func_type(target_func_idx).ok_or_else(|| {
+                    WasmError::Validation(format!(
+                        "function type not found for func {}",
+                        target_func_idx
+                    ))
+                })?;
+                if target_type != expected_type {
+                    return Err(WasmError::Trap(TrapCode::IndirectCallTypeMismatch));
+                }
+                self.call_function(module, target_func_idx)
+            }
+            IndirectCallTarget::Native(native_idx) => {
+                let args = self.pop_args(expected_type)?;
+                let (func, func_type, guest_target) = {
+                    let instance = self.instance_ref()?;
+                    let instance = instance.lock().map_err(poisoned_lock)?;
+                    instance.native_func_ref_parts(native_idx)?
+                };
+                if let Some(target) = guest_target {
+                    if std::ptr::eq(target.module.as_ref(), module) {
+                        let target_type =
+                            target.module.func_type(target.func_idx).ok_or_else(|| {
+                                WasmError::Validation(format!(
+                                    "function type not found for func {}",
+                                    target.func_idx
+                                ))
+                            })?;
+                        if target_type != expected_type {
+                            return Err(WasmError::Trap(TrapCode::IndirectCallTypeMismatch));
+                        }
+                        for value in &args {
+                            self.operand_stack.push(*value)?;
+                        }
+                        return self.call_function(module, target.func_idx);
+                    }
+                } else if &func_type != expected_type {
+                    return Err(WasmError::Trap(TrapCode::IndirectCallTypeMismatch));
+                }
+                let results = {
+                    let instance = self.instance_ref()?;
+                    let instance = instance.lock().map_err(poisoned_lock)?;
+                    instance.call_cloned_host_func(func, &args)?
+                };
+                for value in results {
+                    self.operand_stack.push(value)?;
+                }
+                Ok(())
+            }
         }
-
-        self.call_function(module, target_func_idx)
     }
 
     fn build_frame(
@@ -1632,7 +2113,9 @@ impl Interpreter {
         self.operand_stack.truncate(frame.height);
 
         if let Some(parent) = self.control_stack.last_mut() {
-            parent.locals = frame.locals.clone();
+            if !matches!(frame.kind, FrameKind::Function) {
+                parent.locals = frame.locals.clone();
+            }
             for value in &results {
                 self.operand_stack.push(*value)?;
             }
@@ -1753,6 +2236,333 @@ impl Interpreter {
     fn push_bool(&mut self, value: bool) -> Result<()> {
         self.operand_stack
             .push(WasmValue::I32(if value { 1 } else { 0 }))
+    }
+
+    fn execute_numeric_extended_opcode(&mut self, subopcode: u32) -> Result<()> {
+        match subopcode {
+            0 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_sat_f32_to_i32_s(value)))
+            }
+            1 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_sat_f32_to_i32_u(value) as i32))
+            }
+            2 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_sat_f64_to_i32_s(value)))
+            }
+            3 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I32(Self::trunc_sat_f64_to_i32_u(value) as i32))
+            }
+            4 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_sat_f32_to_i64_s(value)))
+            }
+            5 => {
+                let value = self.operand_stack.pop_f32()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_sat_f32_to_i64_u(value) as i64))
+            }
+            6 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_sat_f64_to_i64_s(value)))
+            }
+            7 => {
+                let value = self.operand_stack.pop_f64()?;
+                self.operand_stack
+                    .push(WasmValue::I64(Self::trunc_sat_f64_to_i64_u(value) as i64))
+            }
+            _ => Err(WasmError::Runtime(format!(
+                "unsupported numeric extended opcode: {:02x}",
+                subopcode
+            ))),
+        }
+    }
+
+    fn execute_table_extended_opcode(&mut self, subopcode: u32) -> Result<()> {
+        match subopcode {
+            12 => {
+                let elem_idx = self.read_var_u32_immediate()?;
+                let table_idx = self.read_var_u32_immediate()?;
+                let len = self.operand_stack.pop_i32()? as u32;
+                let src = self.operand_stack.pop_i32()? as u32;
+                let dst = self.operand_stack.pop_i32()? as u32;
+                let instance = self.instance_ref()?;
+                instance
+                    .lock()
+                    .map_err(poisoned_lock)?
+                    .table_init(table_idx, elem_idx, dst, src, len)
+            }
+            13 => {
+                let elem_idx = self.read_var_u32_immediate()?;
+                let instance = self.instance_ref()?;
+                instance.lock().map_err(poisoned_lock)?.elem_drop(elem_idx)
+            }
+            _ => Err(WasmError::Runtime(format!(
+                "unsupported table extended opcode: {:02x}",
+                subopcode
+            ))),
+        }
+    }
+
+    fn trunc_f32_to_i32_s(value: f32) -> Result<i32> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc() as f64;
+        if !value.is_finite() || !(-2147483648.0..2147483648.0).contains(&truncated) {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as i32)
+    }
+
+    fn trunc_f32_to_i32_u(value: f32) -> Result<u32> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc() as f64;
+        if !value.is_finite() || !(0.0..4294967296.0).contains(&truncated) {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as u32)
+    }
+
+    fn trunc_f64_to_i32_s(value: f64) -> Result<i32> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc();
+        if !value.is_finite() || !(-2147483648.0..2147483648.0).contains(&truncated) {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as i32)
+    }
+
+    fn trunc_f64_to_i32_u(value: f64) -> Result<u32> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc();
+        if !value.is_finite() || !(0.0..4294967296.0).contains(&truncated) {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as u32)
+    }
+
+    fn trunc_f32_to_i64_s(value: f32) -> Result<i64> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc() as f64;
+        if !value.is_finite()
+            || !(-9223372036854775808.0..9223372036854775808.0).contains(&truncated)
+        {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as i64)
+    }
+
+    fn trunc_f32_to_i64_u(value: f32) -> Result<u64> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc() as f64;
+        if !value.is_finite() || !(0.0..18446744073709551616.0).contains(&truncated) {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as u64)
+    }
+
+    fn trunc_f64_to_i64_s(value: f64) -> Result<i64> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc();
+        if !value.is_finite()
+            || !(-9223372036854775808.0..9223372036854775808.0).contains(&truncated)
+        {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as i64)
+    }
+
+    fn trunc_f64_to_i64_u(value: f64) -> Result<u64> {
+        if value.is_nan() {
+            return Err(WasmError::Trap(TrapCode::InvalidConversionToInt));
+        }
+        let truncated = value.trunc();
+        if !value.is_finite() || !(0.0..18446744073709551616.0).contains(&truncated) {
+            return Err(WasmError::Trap(TrapCode::IntegerOverflow));
+        }
+        Ok(truncated as u64)
+    }
+
+    fn trunc_sat_f32_to_i32_s(value: f32) -> i32 {
+        if value.is_nan() {
+            0
+        } else if (value.trunc() as f64) <= -2147483648.0 {
+            i32::MIN
+        } else if (value.trunc() as f64) >= 2147483648.0 {
+            i32::MAX
+        } else {
+            value.trunc() as i32
+        }
+    }
+
+    fn trunc_sat_f32_to_i32_u(value: f32) -> u32 {
+        if value.is_nan() || value <= 0.0 {
+            0
+        } else if (value.trunc() as f64) >= 4294967296.0 {
+            u32::MAX
+        } else {
+            value.trunc() as u32
+        }
+    }
+
+    fn trunc_sat_f64_to_i32_s(value: f64) -> i32 {
+        if value.is_nan() {
+            0
+        } else if value.trunc() <= -2147483648.0 {
+            i32::MIN
+        } else if value.trunc() >= 2147483648.0 {
+            i32::MAX
+        } else {
+            value.trunc() as i32
+        }
+    }
+
+    fn trunc_sat_f64_to_i32_u(value: f64) -> u32 {
+        if value.is_nan() || value <= 0.0 {
+            0
+        } else if value.trunc() >= 4294967296.0 {
+            u32::MAX
+        } else {
+            value.trunc() as u32
+        }
+    }
+
+    fn trunc_sat_f32_to_i64_s(value: f32) -> i64 {
+        if value.is_nan() {
+            0
+        } else if (value.trunc() as f64) <= -9223372036854775808.0 {
+            i64::MIN
+        } else if (value.trunc() as f64) >= 9223372036854775808.0 {
+            i64::MAX
+        } else {
+            value.trunc() as i64
+        }
+    }
+
+    fn trunc_sat_f32_to_i64_u(value: f32) -> u64 {
+        if value.is_nan() || value <= 0.0 {
+            0
+        } else if (value.trunc() as f64) >= 18446744073709551616.0 {
+            u64::MAX
+        } else {
+            value.trunc() as u64
+        }
+    }
+
+    fn trunc_sat_f64_to_i64_s(value: f64) -> i64 {
+        if value.is_nan() {
+            0
+        } else if value.trunc() <= -9223372036854775808.0 {
+            i64::MIN
+        } else if value.trunc() >= 9223372036854775808.0 {
+            i64::MAX
+        } else {
+            value.trunc() as i64
+        }
+    }
+
+    fn trunc_sat_f64_to_i64_u(value: f64) -> u64 {
+        if value.is_nan() || value <= 0.0 {
+            0
+        } else if value.trunc() >= 18446744073709551616.0 {
+            u64::MAX
+        } else {
+            value.trunc() as u64
+        }
+    }
+
+    fn wasm_f32_min(a: f32, b: f32) -> f32 {
+        if a.is_nan() || b.is_nan() {
+            f32::from_bits(0x7fc0_0000)
+        } else if a == b {
+            if a == 0.0 && (a.is_sign_negative() || b.is_sign_negative()) {
+                -0.0
+            } else {
+                a
+            }
+        } else if a < b {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn wasm_f32_max(a: f32, b: f32) -> f32 {
+        if a.is_nan() || b.is_nan() {
+            f32::from_bits(0x7fc0_0000)
+        } else if a == b {
+            if a == 0.0 {
+                if a.is_sign_positive() || b.is_sign_positive() {
+                    0.0
+                } else {
+                    -0.0
+                }
+            } else {
+                a
+            }
+        } else if a > b {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn wasm_f64_min(a: f64, b: f64) -> f64 {
+        if a.is_nan() || b.is_nan() {
+            f64::from_bits(0x7ff8_0000_0000_0000)
+        } else if a == b {
+            if a == 0.0 && (a.is_sign_negative() || b.is_sign_negative()) {
+                -0.0
+            } else {
+                a
+            }
+        } else if a < b {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn wasm_f64_max(a: f64, b: f64) -> f64 {
+        if a.is_nan() || b.is_nan() {
+            f64::from_bits(0x7ff8_0000_0000_0000)
+        } else if a == b {
+            if a == 0.0 {
+                if a.is_sign_positive() || b.is_sign_positive() {
+                    0.0
+                } else {
+                    -0.0
+                }
+            } else {
+                a
+            }
+        } else if a > b {
+            a
+        } else {
+            b
+        }
     }
 
     fn read_memarg(&mut self) -> Result<u32> {
@@ -1881,6 +2691,20 @@ impl Interpreter {
                 param_count: 0,
                 result_count: 1,
             }),
+            0x63 | 0x64 => {
+                let first = self.read_u8_immediate()?;
+                let heap_type = self.read_signed_leb_continuation(first)?;
+                if heap_type < 0 && !matches!(heap_type, -0x10 | -0x11 | -0x14 | -0x13) {
+                    return Err(WasmError::Validation(format!(
+                        "invalid block heap type {}",
+                        heap_type
+                    )));
+                }
+                Ok(BlockSignature {
+                    param_count: 0,
+                    result_count: 1,
+                })
+            }
             byte => {
                 let type_idx = self.read_signed_leb_continuation(byte)?;
                 if type_idx < 0 {
@@ -1897,6 +2721,37 @@ impl Interpreter {
                     result_count: type_.results.len(),
                 })
             }
+        }
+    }
+
+    fn read_value_type_immediate(&mut self, module: &Module) -> Result<ValType> {
+        let marker = self.read_u8_immediate()?;
+        match marker {
+            0x7F => Ok(ValType::Num(NumType::I32)),
+            0x7E => Ok(ValType::Num(NumType::I64)),
+            0x7D => Ok(ValType::Num(NumType::F32)),
+            0x7C => Ok(ValType::Num(NumType::F64)),
+            0x70 => Ok(ValType::Ref(RefType::FuncRef)),
+            0x6F => Ok(ValType::Ref(RefType::ExternRef)),
+            0x63 | 0x64 => {
+                let first = self.read_u8_immediate()?;
+                let heap_type = self.read_signed_leb_continuation(first)?;
+                match heap_type {
+                    -0x10 | -0x14 => Ok(ValType::Ref(RefType::FuncRef)),
+                    -0x11 | -0x13 => Ok(ValType::Ref(RefType::ExternRef)),
+                    idx if idx >= 0 && module.type_at(idx as u32).is_some() => {
+                        Ok(ValType::Ref(RefType::FuncRef))
+                    }
+                    _ => Err(WasmError::Validation(format!(
+                        "invalid value type heap type {}",
+                        heap_type
+                    ))),
+                }
+            }
+            byte => Err(WasmError::Validation(format!(
+                "invalid value type immediate {:02x}",
+                byte
+            ))),
         }
     }
 
@@ -1949,7 +2804,13 @@ impl Interpreter {
             .get(*cursor)
             .ok_or_else(|| WasmError::Load("unexpected end of block type".to_string()))?;
         *cursor += 1;
-        if !matches!(marker, 0x40 | 0x7F | 0x7E | 0x7D | 0x7C | 0x70 | 0x6F) {
+        if matches!(marker, 0x63 | 0x64) {
+            let first = *code
+                .get(*cursor)
+                .ok_or_else(|| WasmError::Load("unexpected end of heap type".to_string()))?;
+            *cursor += 1;
+            Self::skip_sleb_tail(code, cursor, first)?;
+        } else if !matches!(marker, 0x40 | 0x7F | 0x7E | 0x7D | 0x7C | 0x70 | 0x6F) {
             Self::skip_sleb_tail(code, cursor, marker)?;
         }
         Ok(())
@@ -1972,7 +2833,7 @@ impl Interpreter {
             0x1C => {
                 let count = Self::read_uleb(code, cursor)?;
                 for _ in 0..count {
-                    Self::skip_bytes(code, cursor, 1)?;
+                    Self::skip_val_type(code, cursor)?;
                 }
                 Ok(())
             }
@@ -1980,19 +2841,46 @@ impl Interpreter {
                 Self::skip_uleb(code, cursor)?;
                 Self::skip_uleb(code, cursor)
             }
-            0x3F | 0x40 | 0xD0 => Self::skip_bytes(code, cursor, 1),
+            0x3F | 0x40 => Self::skip_bytes(code, cursor, 1),
+            0xD0 => Self::skip_sleb(code, cursor),
             0x41 | 0x42 => Self::skip_sleb(code, cursor),
             0x43 => Self::skip_bytes(code, cursor, 4),
             0x44 => Self::skip_bytes(code, cursor, 8),
-            0xFC => Err(WasmError::Runtime(
-                "unsupported 0xfc prefixed opcode in structured control".to_string(),
-            )),
+            0xFC => {
+                let subopcode = Self::read_uleb(code, cursor)?;
+                match subopcode {
+                    0..=7 => Ok(()),
+                    12 => {
+                        Self::skip_uleb(code, cursor)?;
+                        Self::skip_uleb(code, cursor)
+                    }
+                    13 => Self::skip_uleb(code, cursor),
+                    _ => Err(WasmError::Runtime(
+                        "unsupported 0xfc prefixed opcode in structured control".to_string(),
+                    )),
+                }
+            }
             _ => Ok(()),
         }
     }
 
     fn skip_uleb(code: &[u8], cursor: &mut usize) -> Result<()> {
         let _ = Self::read_uleb(code, cursor)?;
+        Ok(())
+    }
+
+    fn skip_val_type(code: &[u8], cursor: &mut usize) -> Result<()> {
+        let marker = *code
+            .get(*cursor)
+            .ok_or_else(|| WasmError::Load("unexpected end of value type".to_string()))?;
+        *cursor += 1;
+        if matches!(marker, 0x63 | 0x64) {
+            let first = *code
+                .get(*cursor)
+                .ok_or_else(|| WasmError::Load("unexpected end of heap type".to_string()))?;
+            *cursor += 1;
+            Self::skip_sleb_tail(code, cursor, first)?;
+        }
         Ok(())
     }
 

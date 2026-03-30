@@ -8,7 +8,7 @@ pub struct Import {
     pub module: String,
     /// The field name of the import.
     pub name: String,
-    /// The kind of import (function, table, memory, or global).
+    /// The kind of import (function, table, memory, global, or tag).
     pub kind: ImportKind,
 }
 
@@ -24,6 +24,8 @@ pub enum ImportKind {
     Memory(crate::runtime::MemoryType),
     /// A global import (global type).
     Global(crate::runtime::GlobalType),
+    /// A tag import (function type index).
+    Tag(u32),
 }
 
 /// Import type descriptor.

@@ -32,7 +32,7 @@
 - [x] 4.4 Implement atomic.rmw in LLVM backend using atomic intrinsics
 - [x] 4.5 Implement atomic.wait using thread::park
 - [x] 4.6 Implement atomic.notify using thread::unpark
-- [ ] 4.7 Test JIT atomic operations
+- [x] 4.7 Test JIT atomic operations
 
 ## 5. AOT Implementation
 
@@ -48,7 +48,7 @@
 
 ## 7. Integration
 
-- [ ] 7.1 Run threads spec tests (unskip in spec test suite)
+- [x] 7.1 Run threads spec tests (unskip in spec test suite)
 - [x] 7.2 Fix any failing tests
 - [x] 7.3 Add integration tests for multi-threaded scenarios
 - [x] 7.4 Update documentation

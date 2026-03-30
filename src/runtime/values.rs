@@ -1,5 +1,7 @@
 use crate::runtime::{RefType, Result, ValType, WasmError};
 
+const FUNCREF_NATIVE_BIT: u32 = 0x8000_0000;
+
 /// A WebAssembly runtime value.
 ///
 /// Represents values that can be stored in locals, on the stack, or in globals.
@@ -17,13 +19,37 @@ pub enum WasmValue {
     F64(f64),
     /// Null reference (with type).
     NullRef(RefType),
-    /// Function reference (table index).
+    /// Function reference.
     FuncRef(u32),
     /// External reference (host object index).
     ExternRef(u32),
 }
 
 impl WasmValue {
+    /// Encodes a native function handle as a funcref.
+    pub fn native_func_ref(handle: u32) -> Self {
+        debug_assert_eq!(handle & FUNCREF_NATIVE_BIT, 0);
+        WasmValue::FuncRef(handle | FUNCREF_NATIVE_BIT)
+    }
+
+    /// Returns the native function handle encoded in this funcref, if any.
+    pub fn native_func_handle(&self) -> Option<u32> {
+        match self {
+            WasmValue::FuncRef(raw) if raw & FUNCREF_NATIVE_BIT != 0 => {
+                Some(raw & !FUNCREF_NATIVE_BIT)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the module-local function index encoded in this funcref, if any.
+    pub fn local_func_ref(&self) -> Option<u32> {
+        match self {
+            WasmValue::FuncRef(raw) if raw & FUNCREF_NATIVE_BIT == 0 => Some(*raw),
+            _ => None,
+        }
+    }
+
     /// Returns the WebAssembly type of this value.
     pub fn val_type(&self) -> ValType {
         match self {

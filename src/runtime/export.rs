@@ -6,7 +6,7 @@
 pub struct ExportType {
     /// The name of the export.
     pub name: String,
-    /// The kind of the export (function, table, memory, or global).
+    /// The kind of the export (function, table, memory, global, or tag).
     pub kind: ExportKind,
 }
 
@@ -22,6 +22,8 @@ pub enum ExportKind {
     Memory(u32),
     /// A global export (index into global section).
     Global(u32),
+    /// A tag export (index into tag section).
+    Tag(u32),
 }
 
 impl ExportType {
@@ -54,6 +56,14 @@ impl ExportType {
         Self {
             name,
             kind: ExportKind::Global(idx),
+        }
+    }
+
+    /// Creates a tag export descriptor.
+    pub fn new_tag(name: String, idx: u32) -> Self {
+        Self {
+            name,
+            kind: ExportKind::Tag(idx),
         }
     }
 }

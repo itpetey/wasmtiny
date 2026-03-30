@@ -2,6 +2,7 @@
 
 use crate::runtime::{Func, Module, NumType, Result, ValType, WasmError};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::ptr;
 
 #[cfg(feature = "llvm-jit")]
@@ -2512,42 +2513,43 @@ impl WasmToLlvmTranslator {
                         }
                     };
 
-                    let fn_val = match LLVMGetNamedFunction(
-                        module,
-                        CString::new(fn_name).unwrap().as_c_str(),
-                    ) {
-                        existing if !existing.is_null() => existing,
-                        _ => {
-                            let ret_type = match atomic_opcode {
-                                0x00 | 0x0A | 0x12 | 0x14 | 0x16 | 0x18 | 0x1A | 0x1C | 0x1E
-                                | 0x37 | 0x38 | 0x39 => LLVMInt32TypeInContext(self.context),
-                                _ => LLVMInt64TypeInContext(self.context),
-                            };
-                            let param_types = [
-                                LLVMInt32TypeInContext(self.context),
-                                LLVMInt32TypeInContext(self.context),
-                            ];
-                            let func_type =
-                                LLVMFunctionType(ret_type, param_types.as_mut_ptr(), 2, 0);
-                            LLVMAddFunction(
-                                module,
-                                CString::new(fn_name).unwrap().as_c_str(),
-                                func_type,
-                            )
-                        }
-                    };
+                    let fn_val =
+                        match LLVMGetNamedFunction(module, CString::new(fn_name).unwrap().as_ptr())
+                        {
+                            existing if !existing.is_null() => existing,
+                            _ => {
+                                let ret_type = match atomic_opcode {
+                                    0x00 | 0x0A | 0x12 | 0x14 | 0x16 | 0x18 | 0x1A | 0x1C
+                                    | 0x1E | 0x37 | 0x38 | 0x39 => {
+                                        LLVMInt32TypeInContext(self.context)
+                                    }
+                                    _ => LLVMInt64TypeInContext(self.context),
+                                };
+                                let mut param_types = [
+                                    LLVMInt32TypeInContext(self.context),
+                                    LLVMInt32TypeInContext(self.context),
+                                ];
+                                let func_type =
+                                    LLVMFunctionType(ret_type, param_types.as_mut_ptr(), 2, 0);
+                                LLVMAddFunction(
+                                    module,
+                                    CString::new(fn_name).unwrap().as_ptr(),
+                                    func_type,
+                                )
+                            }
+                        };
 
                     let align_val =
                         LLVMConstInt(LLVMInt32TypeInContext(self.context), align as u64, 0);
                     let offset_val =
                         LLVMConstInt(LLVMInt32TypeInContext(self.context), offset as u64, 0);
 
-                    let args = [align_val, offset_val];
+                    let mut args: [LLVMValueRef; 2] = [align_val, offset_val];
                     let call_result = LLVMBuildCall2(
                         self.builder,
                         LLVMGetElementType(LLVMTypeOf(fn_val)),
                         fn_val,
-                        args.as_ptr(),
+                        args.as_mut_ptr(),
                         2,
                         c"atomic_result".as_ptr(),
                     );

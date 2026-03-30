@@ -74,16 +74,7 @@ impl AotLoader {
                         .map(|memory| memory.clone())
                 })
                 .collect::<Result<Vec<_>>>()?;
-            aot_module.tables = instance
-                .tables
-                .iter()
-                .map(|table| {
-                    table
-                        .lock()
-                        .map_err(poisoned_lock)
-                        .map(|table| table.clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
+            aot_module.tables = instance.tables.to_vec();
             aot_module.globals = instance
                 .globals
                 .iter()
@@ -102,6 +93,7 @@ impl AotLoader {
                 crate::runtime::ExportKind::Table(idx) => AotExport::Table(*idx),
                 crate::runtime::ExportKind::Memory(idx) => AotExport::Memory(*idx),
                 crate::runtime::ExportKind::Global(idx) => AotExport::Global(*idx),
+                crate::runtime::ExportKind::Tag(idx) => AotExport::Tag(*idx),
             };
             aot_module.exports.insert(export.name.clone(), export_idx);
         }

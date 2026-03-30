@@ -161,6 +161,8 @@ impl Limits {
 pub struct TableType {
     /// The element type of the table.
     pub elem_type: RefType,
+    /// Whether the table accepts null references.
+    pub nullable: bool,
     /// Size limits for the table.
     pub limits: Limits,
 }
@@ -168,12 +170,27 @@ pub struct TableType {
 impl TableType {
     /// Creates a new `TableType`.
     pub fn new(elem_type: RefType, limits: Limits) -> Self {
-        Self { elem_type, limits }
+        Self {
+            elem_type,
+            nullable: true,
+            limits,
+        }
+    }
+
+    /// Creates a new `TableType` with explicit nullability.
+    pub fn new_with_nullability(elem_type: RefType, nullable: bool, limits: Limits) -> Self {
+        Self {
+            elem_type,
+            nullable,
+            limits,
+        }
     }
 
     /// Returns whether this type satisfies the required type.
     pub fn matches_required(&self, required: &TableType) -> bool {
-        self.elem_type == required.elem_type && self.limits.matches_required(&required.limits)
+        self.elem_type == required.elem_type
+            && (self.nullable == required.nullable || (!self.nullable && required.nullable))
+            && self.limits.matches_required(&required.limits)
     }
 }
 
@@ -273,6 +290,11 @@ impl Table {
         if val.val_type() != ValType::Ref(self.type_.elem_type) {
             return Err(super::WasmError::Validation(
                 "table element type mismatch".to_string(),
+            ));
+        }
+        if !self.type_.nullable && matches!(val, WasmValue::NullRef(_)) {
+            return Err(super::WasmError::Validation(
+                "table element nullability mismatch".to_string(),
             ));
         }
         self.data[idx as usize] = val;

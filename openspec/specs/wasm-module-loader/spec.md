@@ -12,6 +12,10 @@ The loader SHALL verify that function signatures, local types, and global types 
 ### Requirement: Section ordering
 The loader SHALL enforce proper section ordering per the WASM binary specification.
 
+#### Scenario: Tag section ordering is accepted
+- **WHEN** a module places the tag section after the function section and before globals or exports, as allowed by the binary format
+- **THEN** parsing and validation SHALL succeed
+
 ### Requirement: Name section support
 The loader SHALL parse the custom name section and make it available for debugging.
 
@@ -20,6 +24,17 @@ The loader SHALL support streaming/partial parsing for large modules.
 
 ### Requirement: Incremental validation
 The loader SHALL provide incremental validation to detect errors early during loading.
+
+### Requirement: Reference type encoding support
+The loader SHALL parse and validate supported typed-reference and tag encodings used by modules under test.
+
+#### Scenario: Non-null table initializer rejects ref.null
+- **WHEN** a module declares a non-null table type but uses `ref.null` as the declared initializer
+- **THEN** parsing or validation SHALL fail instead of accepting the initializer
+
+#### Scenario: Tag imports and exports are accepted
+- **WHEN** a module declares tag imports or tag exports with valid type indices
+- **THEN** parsing and validation SHALL succeed
 
 #### Scenario: Valid WASM module loading
 - **WHEN** a valid WASM binary is loaded

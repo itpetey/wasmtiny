@@ -17,11 +17,13 @@
 
 use crate::aot_runtime::runtime::{AotExport, AotRuntime};
 use crate::runtime::{
-    FunctionType, HostFunc, InstanceLimits, InstanceStats, Result, SharedMemoryMappingId,
-    SharedRegionId, WasmError, WasmValue,
+    Extern, FunctionType, Global, GuestFuncBinding, HostFunc, Import, InstanceLimits,
+    InstanceStats, Memory, Result, SharedMemoryMappingId, SharedRegionId, SharedTable, Table,
+    WasmError, WasmValue,
 };
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 #[cfg(feature = "llvm-jit")]
 use crate::jit::{LlvmJit, set_execution_context};
@@ -258,6 +260,260 @@ impl WasmApplication {
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
         module.register_global_import(import_module, name, global)
+    }
+
+    /// Returns the declared imports for a module.
+    pub fn imports(&self, module_idx: u32) -> Result<Vec<Import>> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        Ok(module.imports().to_vec())
+    }
+
+    /// Returns an exported memory by name.
+    pub fn export_memory(&self, module_idx: u32, name: &str) -> Result<Memory> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        match module.get_export(name) {
+            Some(AotExport::Memory(0)) => module.get_memory().ok_or_else(|| {
+                WasmError::Runtime(format!("memory export {} is unavailable", name))
+            }),
+            Some(AotExport::Memory(idx)) => Err(WasmError::Runtime(format!(
+                "memory export {} uses unsupported memory index {}",
+                name, idx
+            ))),
+            Some(_) => Err(WasmError::Runtime(format!(
+                "export {} is not a memory",
+                name
+            ))),
+            None => Err(WasmError::Runtime(format!(
+                "memory export {} not found",
+                name
+            ))),
+        }
+    }
+
+    /// Returns an exported table by name.
+    pub fn export_table(&self, module_idx: u32, name: &str) -> Result<Table> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        match module.get_export(name) {
+            Some(AotExport::Table(idx)) => module
+                .get_table(*idx)
+                .ok_or_else(|| WasmError::Runtime(format!("table export {} is unavailable", name))),
+            Some(_) => Err(WasmError::Runtime(format!(
+                "export {} is not a table",
+                name
+            ))),
+            None => Err(WasmError::Runtime(format!(
+                "table export {} not found",
+                name
+            ))),
+        }
+    }
+
+    /// Returns the index of an exported table by name.
+    pub fn export_table_index(&self, module_idx: u32, name: &str) -> Result<u32> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        match module.get_export(name) {
+            Some(AotExport::Table(idx)) => Ok(*idx),
+            Some(_) => Err(WasmError::Runtime(format!(
+                "export {} is not a table",
+                name
+            ))),
+            None => Err(WasmError::Runtime(format!(
+                "table export {} not found",
+                name
+            ))),
+        }
+    }
+
+    /// Returns a table by index.
+    pub fn table(&self, module_idx: u32, table_idx: u32) -> Result<Table> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        module
+            .get_table(table_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("table {} not found", table_idx)))
+    }
+
+    /// Returns a shared table binding by index.
+    pub fn table_binding(&self, module_idx: u32, table_idx: u32) -> Result<SharedTable> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        module
+            .table_binding(table_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("table {} not found", table_idx)))
+    }
+
+    /// Replaces a table by index.
+    pub fn set_table(&mut self, module_idx: u32, table_idx: u32, table: Table) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        module.set_table(table_idx, table)
+    }
+
+    /// Returns an exported global by name.
+    pub fn export_global(&self, module_idx: u32, name: &str) -> Result<Global> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        match module.get_export(name) {
+            Some(AotExport::Global(idx)) => module.get_global(*idx).ok_or_else(|| {
+                WasmError::Runtime(format!("global export {} is unavailable", name))
+            }),
+            Some(_) => Err(WasmError::Runtime(format!(
+                "export {} is not a global",
+                name
+            ))),
+            None => Err(WasmError::Runtime(format!(
+                "global export {} not found",
+                name
+            ))),
+        }
+    }
+
+    /// Returns the function type of an exported function by name.
+    pub fn func_type(&self, module_idx: u32, name: &str) -> Result<FunctionType> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        match module.get_export(name) {
+            Some(AotExport::Function(idx)) => {
+                module.module().func_type(*idx).cloned().ok_or_else(|| {
+                    WasmError::Runtime(format!("function export {} is unavailable", name))
+                })
+            }
+            Some(_) => Err(WasmError::Runtime(format!(
+                "export {} is not a function",
+                name
+            ))),
+            None => Err(WasmError::Runtime(format!(
+                "function export {} not found",
+                name
+            ))),
+        }
+    }
+
+    /// Returns an exported function binding suitable for another module import.
+    pub fn function_binding(&self, module_idx: u32, name: &str) -> Result<GuestFuncBinding> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        match module.get_export(name) {
+            Some(AotExport::Function(idx)) => Ok(GuestFuncBinding {
+                module: Arc::new(module.module().clone()),
+                imports: module
+                    .imports()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, import)| {
+                        module
+                            .import_binding(i)
+                            .cloned()
+                            .map(|extern_| (import.module.clone(), import.name.clone(), extern_))
+                    })
+                    .collect(),
+                func_idx: *idx,
+                func_type: module.module().func_type(*idx).cloned().ok_or_else(|| {
+                    WasmError::Runtime(format!("function export {} is unavailable", name))
+                })?,
+            }),
+            Some(_) => Err(WasmError::Runtime(format!(
+                "export {} is not a function",
+                name
+            ))),
+            None => Err(WasmError::Runtime(format!(
+                "function export {} not found",
+                name
+            ))),
+        }
+    }
+
+    /// Returns the function type of an exported tag by name.
+    pub fn tag_type(&self, module_idx: u32, name: &str) -> Result<FunctionType> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+
+        match module.get_export(name) {
+            Some(AotExport::Tag(idx)) => {
+                module.module().tag_type(*idx).cloned().ok_or_else(|| {
+                    WasmError::Runtime(format!("tag export {} is unavailable", name))
+                })
+            }
+            Some(_) => Err(WasmError::Runtime(format!("export {} is not a tag", name))),
+            None => Err(WasmError::Runtime(format!("tag export {} not found", name))),
+        }
+    }
+
+    /// Registers a tag import by name.
+    pub fn register_tag_import(
+        &mut self,
+        module_idx: u32,
+        import_module: &str,
+        name: &str,
+        function_type: FunctionType,
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.register_import(import_module, name, Extern::Tag(function_type))
+    }
+
+    /// Registers a guest function import by binding.
+    pub fn register_function_import_binding(
+        &mut self,
+        module_idx: u32,
+        import_module: &str,
+        name: &str,
+        binding: GuestFuncBinding,
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.register_import(import_module, name, Extern::Func(binding))
+    }
+
+    /// Registers a shared table import binding.
+    pub fn register_table_import_binding(
+        &mut self,
+        module_idx: u32,
+        import_module: &str,
+        name: &str,
+        table: SharedTable,
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Instantiate(format!("module {} not found", module_idx)))?;
+        module.register_import(import_module, name, Extern::Table(table))
     }
 
     /// Allocates shared region.
