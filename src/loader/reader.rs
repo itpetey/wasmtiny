@@ -117,23 +117,24 @@ impl<R: Read> BinaryReader<R> {
 
     /// Reads uleb128.
     pub fn read_uleb128(&mut self) -> Result<u32> {
-        let mut result = 0u32;
+        let mut result = 0u64;
         let mut shift = 0;
         loop {
             let byte = self.read_u8()?;
-            result |= ((byte & 0x7F) as u32) << shift;
+            result |= ((byte & 0x7F) as u64) << shift;
             if byte & 0x80 == 0 {
                 break;
             }
             shift += 7;
-            if shift > 32 {
+            if shift > 35 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "uleb128 overflow",
                 ));
             }
         }
-        Ok(result)
+        u32::try_from(result)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "uleb128 overflow"))
     }
 
     /// Reads sleb128.
@@ -144,10 +145,10 @@ impl<R: Read> BinaryReader<R> {
         loop {
             byte = self.read_u8()?;
             result |= ((byte & 0x7F) as i32) << shift;
+            shift += 7;
             if byte & 0x80 == 0 {
                 break;
             }
-            shift += 7;
             if shift > 32 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -156,7 +157,7 @@ impl<R: Read> BinaryReader<R> {
             }
         }
         if shift < 32 && (byte & 0x40) != 0 {
-            result |= -(1 << shift);
+            result |= !0_i32 << shift;
         }
         Ok(result)
     }

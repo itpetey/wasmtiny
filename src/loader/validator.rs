@@ -58,6 +58,7 @@ impl Validator {
         self.validate_types(module)?;
         self.validate_imports(module)?;
         self.validate_functions(module)?;
+        self.validate_tags(module)?;
         self.validate_instruction_set(module)?;
         self.validate_tables(module)?;
         self.validate_memories(module)?;
@@ -69,15 +70,7 @@ impl Validator {
         Ok(())
     }
 
-    fn validate_types(&self, module: &Module) -> Result<()> {
-        for (i, func_type) in module.types.iter().enumerate() {
-            if func_type.params.len() > 16 {
-                return Err(WasmError::Validation(format!(
-                    "type {}: too many parameters",
-                    i
-                )));
-            }
-        }
+    fn validate_types(&self, _module: &Module) -> Result<()> {
         Ok(())
     }
 
@@ -93,15 +86,38 @@ impl Validator {
         Ok(())
     }
 
-    fn validate_imports(&self, module: &Module) -> Result<()> {
-        for (i, import) in module.imports.iter().enumerate() {
-            if let ImportKind::Func(type_idx) = import.kind
-                && type_idx as usize >= module.types.len()
-            {
+    fn validate_tags(&self, module: &Module) -> Result<()> {
+        for (i, type_idx) in module.tags.iter().enumerate() {
+            if *type_idx as usize >= module.types.len() {
                 return Err(WasmError::Validation(format!(
-                    "import {}: invalid function type index",
+                    "tag {}: invalid type index",
                     i
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_imports(&self, module: &Module) -> Result<()> {
+        for (i, import) in module.imports.iter().enumerate() {
+            match import.kind {
+                ImportKind::Func(type_idx) => {
+                    if type_idx as usize >= module.types.len() {
+                        return Err(WasmError::Validation(format!(
+                            "import {}: invalid function type index",
+                            i
+                        )));
+                    }
+                }
+                ImportKind::Tag(type_idx) => {
+                    if type_idx as usize >= module.types.len() {
+                        return Err(WasmError::Validation(format!(
+                            "import {}: invalid tag type index",
+                            i
+                        )));
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -214,6 +230,7 @@ impl Validator {
                         )));
                     }
                     self.require_types(func_idx, &type_stack, frame, &frame.results)?;
+                    self.require_exact_height(func_idx, &type_stack, frame)?;
                     type_stack.truncate(frame.height);
                     type_stack.extend(frame.params.iter().copied());
                     frame.allow_else = false;
@@ -271,13 +288,15 @@ impl Validator {
                         ValType::Num(NumType::I32),
                     )?;
                     let default_types = self.label_types(func_idx, &control_frames, default)?;
-                    for depth in labels {
-                        let label_types = self.label_types(func_idx, &control_frames, depth)?;
-                        if label_types != default_types {
-                            return Err(WasmError::Validation(format!(
-                                "function {} br_table targets must share the same label type",
-                                func_idx
-                            )));
+                    if !control_frames.last().unwrap().unreachable {
+                        for depth in labels {
+                            let label_types = self.label_types(func_idx, &control_frames, depth)?;
+                            if label_types != default_types {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} br_table targets must share the same label type",
+                                    func_idx
+                                )));
+                            }
                         }
                     }
                     self.pop_types(
@@ -379,6 +398,15 @@ impl Validator {
                 0xD0 => match Self::read_byte(code, &mut cursor)? {
                     0x70 => type_stack.push(ValType::Ref(RefType::FuncRef)),
                     0x6F => type_stack.push(ValType::Ref(RefType::ExternRef)),
+                    byte if byte < 0x40 => {
+                        if module.type_at(byte as u32).is_none() {
+                            return Err(WasmError::Validation(format!(
+                                "function {} has invalid ref.null type {:02x}",
+                                func_idx, byte
+                            )));
+                        }
+                        type_stack.push(ValType::Ref(RefType::FuncRef));
+                    }
                     value => {
                         return Err(WasmError::Validation(format!(
                             "function {} has invalid ref.null type {:02x}",
@@ -547,7 +575,42 @@ impl Validator {
                             func_idx
                         )));
                     }
+                    if lhs.is_reference() {
+                        return Err(WasmError::Validation(format!(
+                            "function {} select requires an explicit result type for references",
+                            func_idx
+                        )));
+                    }
                     type_stack.push(lhs);
+                }
+                0x1C => {
+                    let count = Self::read_uleb(code, &mut cursor)?;
+                    if count != 1 {
+                        return Err(WasmError::Validation(format!(
+                            "function {} uses unsupported typed select arity {}",
+                            func_idx, count
+                        )));
+                    }
+                    let expected = self.read_value_type_immediate(module, code, &mut cursor)?;
+                    self.pop_type(
+                        func_idx,
+                        &mut type_stack,
+                        control_frames.last().unwrap(),
+                        ValType::Num(NumType::I32),
+                    )?;
+                    self.pop_type(
+                        func_idx,
+                        &mut type_stack,
+                        control_frames.last().unwrap(),
+                        expected,
+                    )?;
+                    self.pop_type(
+                        func_idx,
+                        &mut type_stack,
+                        control_frames.last().unwrap(),
+                        expected,
+                    )?;
+                    type_stack.push(expected);
                 }
                 0x45 => self.validate_unary_numeric(
                     func_idx,
@@ -563,7 +626,49 @@ impl Validator {
                     ValType::Num(NumType::I32),
                     ValType::Num(NumType::I32),
                 )?,
+                0x50 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I64),
+                    ValType::Num(NumType::I32),
+                )?,
+                0x51..=0x5A => self.validate_binary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I64),
+                    ValType::Num(NumType::I32),
+                )?,
+                0x5B..=0x60 => self.validate_binary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F32),
+                    ValType::Num(NumType::I32),
+                )?,
+                0x61..=0x66 => self.validate_binary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F64),
+                    ValType::Num(NumType::I32),
+                )?,
+                0x67..=0x69 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I32),
+                    ValType::Num(NumType::I32),
+                )?,
                 0x6A..=0x76 => self.validate_binary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I32),
+                    ValType::Num(NumType::I32),
+                )?,
+                0x77..=0x78 => self.validate_binary_numeric(
                     func_idx,
                     &mut type_stack,
                     control_frames.last().unwrap(),
@@ -584,7 +689,7 @@ impl Validator {
                     ValType::Num(NumType::I64),
                     ValType::Num(NumType::I64),
                 )?,
-                0x86..=0x88 => {
+                0x86..=0x8A => {
                     self.pop_type(
                         func_idx,
                         &mut type_stack,
@@ -599,19 +704,159 @@ impl Validator {
                     )?;
                     type_stack.push(ValType::Num(NumType::I64));
                 }
-                0x92 => self.validate_binary_numeric(
+                0x8B..=0x91 => self.validate_unary_numeric(
                     func_idx,
                     &mut type_stack,
                     control_frames.last().unwrap(),
                     ValType::Num(NumType::F32),
                     ValType::Num(NumType::F32),
                 )?,
-                0xA6..=0xA9 => self.validate_binary_numeric(
+                0x92..=0x98 => self.validate_binary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F32),
+                    ValType::Num(NumType::F32),
+                )?,
+                0x99..=0x9F => self.validate_unary_numeric(
                     func_idx,
                     &mut type_stack,
                     control_frames.last().unwrap(),
                     ValType::Num(NumType::F64),
                     ValType::Num(NumType::F64),
+                )?,
+                0xA0..=0xA6 => self.validate_binary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F64),
+                    ValType::Num(NumType::F64),
+                )?,
+                0xA7 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I64),
+                    ValType::Num(NumType::I32),
+                )?,
+                0xA8..=0xA9 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F32),
+                    ValType::Num(NumType::I32),
+                )?,
+                0xAA..=0xAB => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F64),
+                    ValType::Num(NumType::I32),
+                )?,
+                0xAC..=0xAD => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I32),
+                    ValType::Num(NumType::I64),
+                )?,
+                0xAE..=0xAF => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F32),
+                    ValType::Num(NumType::I64),
+                )?,
+                0xB0..=0xB1 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F64),
+                    ValType::Num(NumType::I64),
+                )?,
+                0xB2..=0xB3 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I32),
+                    ValType::Num(NumType::F32),
+                )?,
+                0xB4..=0xB5 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I64),
+                    ValType::Num(NumType::F32),
+                )?,
+                0xB6 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F64),
+                    ValType::Num(NumType::F32),
+                )?,
+                0xB7..=0xB8 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I32),
+                    ValType::Num(NumType::F64),
+                )?,
+                0xB9..=0xBA => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I64),
+                    ValType::Num(NumType::F64),
+                )?,
+                0xBB => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F32),
+                    ValType::Num(NumType::F64),
+                )?,
+                0xBC => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F32),
+                    ValType::Num(NumType::I32),
+                )?,
+                0xBD => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::F64),
+                    ValType::Num(NumType::I64),
+                )?,
+                0xBE => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I32),
+                    ValType::Num(NumType::F32),
+                )?,
+                0xBF => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I64),
+                    ValType::Num(NumType::F64),
+                )?,
+                0xC0..=0xC1 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I32),
+                    ValType::Num(NumType::I32),
+                )?,
+                0xC2..=0xC4 => self.validate_unary_numeric(
+                    func_idx,
+                    &mut type_stack,
+                    control_frames.last().unwrap(),
+                    ValType::Num(NumType::I64),
+                    ValType::Num(NumType::I64),
                 )?,
                 0xD1 => {
                     if control_frames.last().unwrap().unreachable {
@@ -649,6 +894,86 @@ impl Validator {
                         code,
                         &mut cursor,
                     )?;
+                }
+                0xFC => {
+                    let subopcode = Self::read_uleb(code, &mut cursor)?;
+                    match subopcode {
+                        0 | 1 => self.validate_unary_numeric(
+                            func_idx,
+                            &mut type_stack,
+                            control_frames.last().unwrap(),
+                            ValType::Num(NumType::F32),
+                            ValType::Num(NumType::I32),
+                        )?,
+                        2 | 3 => self.validate_unary_numeric(
+                            func_idx,
+                            &mut type_stack,
+                            control_frames.last().unwrap(),
+                            ValType::Num(NumType::F64),
+                            ValType::Num(NumType::I32),
+                        )?,
+                        4 | 5 => self.validate_unary_numeric(
+                            func_idx,
+                            &mut type_stack,
+                            control_frames.last().unwrap(),
+                            ValType::Num(NumType::F32),
+                            ValType::Num(NumType::I64),
+                        )?,
+                        6 | 7 => self.validate_unary_numeric(
+                            func_idx,
+                            &mut type_stack,
+                            control_frames.last().unwrap(),
+                            ValType::Num(NumType::F64),
+                            ValType::Num(NumType::I64),
+                        )?,
+                        12 => {
+                            let elem_idx = Self::read_uleb(code, &mut cursor)?;
+                            let table_idx = Self::read_uleb(code, &mut cursor)?;
+                            let segment = module.elems.get(elem_idx as usize).ok_or_else(|| {
+                                WasmError::Validation(format!(
+                                    "function {} uses invalid element segment {}",
+                                    func_idx, elem_idx
+                                ))
+                            })?;
+                            let table = module.table_at(table_idx).ok_or_else(|| {
+                                WasmError::Validation(format!(
+                                    "function {} uses invalid table index {}",
+                                    func_idx, table_idx
+                                ))
+                            })?;
+                            if segment.type_ != table.elem_type
+                                || (segment.nullable && !table.nullable)
+                            {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} table.init type mismatch",
+                                    func_idx
+                                )));
+                            }
+                            for _ in 0..3 {
+                                self.pop_type(
+                                    func_idx,
+                                    &mut type_stack,
+                                    control_frames.last().unwrap(),
+                                    ValType::Num(NumType::I32),
+                                )?;
+                            }
+                        }
+                        13 => {
+                            let elem_idx = Self::read_uleb(code, &mut cursor)?;
+                            if module.elems.get(elem_idx as usize).is_none() {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} uses invalid element segment {}",
+                                    func_idx, elem_idx
+                                )));
+                            }
+                        }
+                        _ => {
+                            return Err(WasmError::Validation(format!(
+                                "function {} uses unsupported opcode fc/{:02x}",
+                                func_idx, subopcode
+                            )));
+                        }
+                    }
                 }
                 _ => {
                     return Err(WasmError::Validation(format!(
@@ -690,6 +1015,30 @@ impl Validator {
             0x7C => Ok((Vec::new(), vec![ValType::Num(NumType::F64)])),
             0x70 => Ok((Vec::new(), vec![ValType::Ref(RefType::FuncRef)])),
             0x6F => Ok((Vec::new(), vec![ValType::Ref(RefType::ExternRef)])),
+            0x63 | 0x64 => {
+                let first = Self::read_byte(code, cursor)?;
+                let heap_type = Self::read_signed_leb_continuation(code, cursor, first)?;
+                let ref_type = match heap_type {
+                    -0x10 | -0x14 => RefType::FuncRef,
+                    -0x11 | -0x13 => RefType::ExternRef,
+                    idx if idx >= 0 => {
+                        if module.type_at(idx as u32).is_none() {
+                            return Err(WasmError::Validation(format!(
+                                "invalid block heap type {}",
+                                heap_type
+                            )));
+                        }
+                        RefType::FuncRef
+                    }
+                    _ => {
+                        return Err(WasmError::Validation(format!(
+                            "invalid block heap type {}",
+                            heap_type
+                        )));
+                    }
+                };
+                Ok((Vec::new(), vec![ValType::Ref(ref_type)]))
+            }
             byte => {
                 let type_idx = Self::read_signed_leb_continuation(code, cursor, byte)?;
                 if type_idx < 0 {
@@ -706,6 +1055,42 @@ impl Validator {
         }
     }
 
+    fn read_value_type_immediate(
+        &self,
+        module: &Module,
+        code: &[u8],
+        cursor: &mut usize,
+    ) -> Result<ValType> {
+        let marker = Self::read_byte(code, cursor)?;
+        match marker {
+            0x7F => Ok(ValType::Num(NumType::I32)),
+            0x7E => Ok(ValType::Num(NumType::I64)),
+            0x7D => Ok(ValType::Num(NumType::F32)),
+            0x7C => Ok(ValType::Num(NumType::F64)),
+            0x70 => Ok(ValType::Ref(RefType::FuncRef)),
+            0x6F => Ok(ValType::Ref(RefType::ExternRef)),
+            0x63 | 0x64 => {
+                let first = Self::read_byte(code, cursor)?;
+                let heap_type = Self::read_signed_leb_continuation(code, cursor, first)?;
+                match heap_type {
+                    -0x10 | -0x14 => Ok(ValType::Ref(RefType::FuncRef)),
+                    -0x11 | -0x13 => Ok(ValType::Ref(RefType::ExternRef)),
+                    idx if idx >= 0 && module.type_at(idx as u32).is_some() => {
+                        Ok(ValType::Ref(RefType::FuncRef))
+                    }
+                    _ => Err(WasmError::Validation(format!(
+                        "invalid value type heap type {}",
+                        heap_type
+                    ))),
+                }
+            }
+            byte => Err(WasmError::Validation(format!(
+                "invalid value type immediate {:02x}",
+                byte
+            ))),
+        }
+    }
+
     fn finish_frame(
         &self,
         func_idx: usize,
@@ -716,9 +1101,31 @@ impl Validator {
             WasmError::Validation(format!("function {} has unmatched end opcode", func_idx))
         })?;
         self.require_types(func_idx, type_stack, &frame, &frame.results)?;
+        self.require_exact_height(func_idx, type_stack, &frame)?;
         type_stack.truncate(frame.height);
         type_stack.extend(frame.results.iter().copied());
         Ok(control_frames.is_empty())
+    }
+
+    fn require_exact_height(
+        &self,
+        func_idx: usize,
+        type_stack: &[ValType],
+        frame: &ValidationFrame,
+    ) -> Result<()> {
+        if frame.unreachable {
+            return Ok(());
+        }
+        let expected_len = frame.height + frame.results.len();
+        if type_stack.len() != expected_len {
+            return Err(WasmError::Validation(format!(
+                "function {} stack type mismatch: expected stack height {}, got {}",
+                func_idx,
+                expected_len,
+                type_stack.len()
+            )));
+        }
+        Ok(())
     }
 
     fn require_types(
@@ -740,8 +1147,8 @@ impl Validator {
         let actual = &type_stack[type_stack.len() - expected.len()..];
         if actual != expected {
             return Err(WasmError::Validation(format!(
-                "function {} stack type mismatch",
-                func_idx
+                "function {} stack type mismatch: expected {:?}, got {:?}",
+                func_idx, expected, actual
             )));
         }
         Ok(())
@@ -828,7 +1235,23 @@ impl Validator {
         use NumType::{F32, F64, I32, I64};
 
         match opcode {
-            0x28..=0x2F => {
+            0x28 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I32));
+            }
+            0x29 => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(I64));
+            }
+            0x2A => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(F32));
+            }
+            0x2B => {
+                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
+                type_stack.push(ValType::Num(F64));
+            }
+            0x2C..=0x2F => {
                 self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
                 type_stack.push(ValType::Num(I32));
             }
@@ -1066,25 +1489,13 @@ impl Validator {
 
     fn validate_tables(&self, module: &Module) -> Result<()> {
         for (i, table) in module.tables.iter().enumerate() {
-            if table.limits.min() > 0x10000000 {
+            if let Some(max) = table.limits.max()
+                && max < table.limits.min()
+            {
                 return Err(WasmError::Validation(format!(
-                    "table {}: minimum size too large",
+                    "table {}: maximum less than minimum",
                     i
                 )));
-            }
-            if let Some(max) = table.limits.max() {
-                if max > 0x10000000 {
-                    return Err(WasmError::Validation(format!(
-                        "table {}: maximum size too large",
-                        i
-                    )));
-                }
-                if max < table.limits.min() {
-                    return Err(WasmError::Validation(format!(
-                        "table {}: maximum less than minimum",
-                        i
-                    )));
-                }
             }
         }
         Ok(())
@@ -1129,7 +1540,7 @@ impl Validator {
     }
 
     fn validate_globals(&self, module: &Module) -> Result<()> {
-        let imported_globals = self.imported_globals(module);
+        let mut available_globals = self.imported_globals(module);
 
         for (i, global) in module.globals.iter().enumerate() {
             if !matches!(global.content_type, ValType::Num(_))
@@ -1141,19 +1552,21 @@ impl Validator {
             let init = module.global_inits.get(i).ok_or_else(|| {
                 WasmError::Validation(format!("global {}: missing init expression", i))
             })?;
-            let value_type = self.validate_const_expr(module, init, imported_globals.as_slice())?;
+            let value_type =
+                self.validate_const_expr(module, init, available_globals.as_slice())?;
             if value_type != global.content_type {
                 return Err(WasmError::Validation(format!(
                     "global {}: init expression type mismatch",
                     i
                 )));
             }
+            available_globals.push(global.clone());
         }
         Ok(())
     }
 
     fn validate_data(&self, module: &Module) -> Result<()> {
-        let imported_globals = self.imported_globals(module);
+        let available_globals = self.available_globals(module);
         let memory_count = module.memories.len()
             + module
                 .imports
@@ -1170,7 +1583,7 @@ impl Validator {
                     )));
                 }
                 let value_type =
-                    self.validate_const_expr(module, offset, imported_globals.as_slice())?;
+                    self.validate_const_expr(module, offset, available_globals.as_slice())?;
                 if value_type != ValType::Num(NumType::I32) {
                     return Err(WasmError::Validation(format!(
                         "data segment {}: offset expression must be i32",
@@ -1185,6 +1598,7 @@ impl Validator {
 
     fn validate_elems(&self, module: &Module) -> Result<()> {
         let imported_globals = self.imported_globals(module);
+        let available_globals = self.available_globals(module);
         let table_count = module.tables.len()
             + module
                 .imports
@@ -1201,18 +1615,35 @@ impl Validator {
                     )));
                 }
                 let value_type =
-                    self.validate_const_expr(module, offset, imported_globals.as_slice())?;
+                    self.validate_const_expr(module, offset, available_globals.as_slice())?;
                 if value_type != ValType::Num(NumType::I32) {
                     return Err(WasmError::Validation(format!(
                         "element segment {}: offset expression must be i32",
                         i
                     )));
                 }
+
+                let table = module.table_at(*table_idx).ok_or_else(|| {
+                    WasmError::Validation(format!("element segment {}: invalid table index", i))
+                })?;
+                if table.elem_type != segment.type_ || (segment.nullable && !table.nullable) {
+                    return Err(WasmError::Validation(format!(
+                        "element segment {}: table element type mismatch",
+                        i
+                    )));
+                }
             }
 
             for expr in &segment.init {
-                let value_type =
-                    self.validate_const_expr(module, expr, imported_globals.as_slice())?;
+                let value_type = self.validate_const_expr(
+                    module,
+                    expr,
+                    if segment.generated_by_table_init {
+                        imported_globals.as_slice()
+                    } else {
+                        available_globals.as_slice()
+                    },
+                )?;
                 if value_type != ValType::Ref(segment.type_) {
                     return Err(WasmError::Validation(format!(
                         "element segment {}: init expression type mismatch",
@@ -1244,6 +1675,12 @@ impl Validator {
                 .imports
                 .iter()
                 .filter(|i| matches!(i.kind, ImportKind::Global(_)))
+                .count();
+        let tag_count = module.tags.len()
+            + module
+                .imports
+                .iter()
+                .filter(|i| matches!(i.kind, ImportKind::Tag(_)))
                 .count();
 
         for (i, export) in module.exports.iter().enumerate() {
@@ -1293,6 +1730,14 @@ impl Validator {
                         )));
                     }
                 }
+                crate::runtime::ExportKind::Tag(idx) => {
+                    if *idx as usize >= tag_count {
+                        return Err(WasmError::Validation(format!(
+                            "export {}: invalid tag index",
+                            i
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -1309,6 +1754,12 @@ impl Validator {
             .collect()
     }
 
+    fn available_globals(&self, module: &Module) -> Vec<GlobalType> {
+        let mut globals = self.imported_globals(module);
+        globals.extend(module.globals.iter().cloned());
+        globals
+    }
+
     fn validate_const_expr(
         &self,
         module: &Module,
@@ -1316,82 +1767,137 @@ impl Validator {
         imported_globals: &[GlobalType],
     ) -> Result<ValType> {
         let mut reader = BinaryReader::from_slice(expr);
-        let opcode = reader.read_u8().map_err(WasmError::from)?;
+        let mut stack = Vec::new();
 
-        let value_type = match opcode {
-            0x23 => {
-                let idx = reader.read_uleb128().map_err(WasmError::from)? as usize;
-                let global = imported_globals.get(idx).ok_or_else(|| {
-                    WasmError::Validation(format!(
-                        "constant expression references invalid global {}",
-                        idx
-                    ))
-                })?;
-                if global.mutable {
-                    return Err(WasmError::Validation(format!(
-                        "constant expression references mutable global {}",
-                        idx
-                    )));
+        loop {
+            let opcode = reader.read_u8().map_err(WasmError::from)?;
+            match opcode {
+                0x0B => break,
+                0x23 => {
+                    let idx = reader.read_uleb128().map_err(WasmError::from)? as usize;
+                    let global = imported_globals.get(idx).ok_or_else(|| {
+                        WasmError::Validation(format!(
+                            "constant expression references invalid global {}",
+                            idx
+                        ))
+                    })?;
+                    if global.mutable {
+                        return Err(WasmError::Validation(format!(
+                            "constant expression references mutable global {}",
+                            idx
+                        )));
+                    }
+                    stack.push(global.content_type);
                 }
-                global.content_type
-            }
-            0x41 => {
-                let _ = reader.read_sleb128().map_err(WasmError::from)?;
-                ValType::Num(NumType::I32)
-            }
-            0x42 => {
-                let _ = reader.read_sleb128_i64().map_err(WasmError::from)?;
-                ValType::Num(NumType::I64)
-            }
-            0x43 => {
-                let _ = reader.read_f32().map_err(WasmError::from)?;
-                ValType::Num(NumType::F32)
-            }
-            0x44 => {
-                let _ = reader.read_f64().map_err(WasmError::from)?;
-                ValType::Num(NumType::F64)
-            }
-            0xD0 => match reader.read_u8().map_err(WasmError::from)? {
-                0x70 => ValType::Ref(crate::runtime::RefType::FuncRef),
-                0x6F => ValType::Ref(crate::runtime::RefType::ExternRef),
+                0x41 => {
+                    let _ = reader.read_sleb128().map_err(WasmError::from)?;
+                    stack.push(ValType::Num(NumType::I32));
+                }
+                0x42 => {
+                    let _ = reader.read_sleb128_i64().map_err(WasmError::from)?;
+                    stack.push(ValType::Num(NumType::I64));
+                }
+                0x43 => {
+                    let _ = reader.read_f32().map_err(WasmError::from)?;
+                    stack.push(ValType::Num(NumType::F32));
+                }
+                0x44 => {
+                    let _ = reader.read_f64().map_err(WasmError::from)?;
+                    stack.push(ValType::Num(NumType::F64));
+                }
+                0xD0 => stack.push(match reader.read_u8().map_err(WasmError::from)? {
+                    0x70 => ValType::Ref(crate::runtime::RefType::FuncRef),
+                    0x6F => ValType::Ref(crate::runtime::RefType::ExternRef),
+                    0x63 | 0x64 => match reader.read_sleb128_i64().map_err(WasmError::from)? {
+                        -0x10 | -0x14 => ValType::Ref(crate::runtime::RefType::FuncRef),
+                        -0x11 | -0x13 => ValType::Ref(crate::runtime::RefType::ExternRef),
+                        idx if idx >= 0 => {
+                            if module.type_at(idx as u32).is_none() {
+                                return Err(WasmError::Validation(format!(
+                                    "invalid ref.null heap type: {}",
+                                    idx
+                                )));
+                            }
+                            ValType::Ref(crate::runtime::RefType::FuncRef)
+                        }
+                        heap_type => {
+                            return Err(WasmError::Validation(format!(
+                                "invalid ref.null heap type: {}",
+                                heap_type
+                            )));
+                        }
+                    },
+                    byte if byte < 0x40 => {
+                        if module.type_at(byte as u32).is_none() {
+                            return Err(WasmError::Validation(format!(
+                                "invalid ref.null type: {:02x}",
+                                byte
+                            )));
+                        }
+                        ValType::Ref(crate::runtime::RefType::FuncRef)
+                    }
+                    value => {
+                        return Err(WasmError::Validation(format!(
+                            "invalid ref.null type: {:02x}",
+                            value
+                        )));
+                    }
+                }),
+                0xD2 => {
+                    let idx = reader.read_uleb128().map_err(WasmError::from)?;
+                    if idx >= module.func_count() {
+                        return Err(WasmError::Validation(format!(
+                            "constant expression references invalid function {}",
+                            idx
+                        )));
+                    }
+                    stack.push(ValType::Ref(crate::runtime::RefType::FuncRef));
+                }
+                0x6A..=0x6C => {
+                    self.pop_const_expr_type(&mut stack, ValType::Num(NumType::I32))?;
+                    self.pop_const_expr_type(&mut stack, ValType::Num(NumType::I32))?;
+                    stack.push(ValType::Num(NumType::I32));
+                }
+                0x7C..=0x7E => {
+                    self.pop_const_expr_type(&mut stack, ValType::Num(NumType::I64))?;
+                    self.pop_const_expr_type(&mut stack, ValType::Num(NumType::I64))?;
+                    stack.push(ValType::Num(NumType::I64));
+                }
                 value => {
                     return Err(WasmError::Validation(format!(
-                        "invalid ref.null type: {:02x}",
+                        "unsupported constant expression opcode: {:02x}",
                         value
                     )));
                 }
-            },
-            0xD2 => {
-                let idx = reader.read_uleb128().map_err(WasmError::from)?;
-                if idx >= module.func_count() {
-                    return Err(WasmError::Validation(format!(
-                        "constant expression references invalid function {}",
-                        idx
-                    )));
-                }
-                ValType::Ref(crate::runtime::RefType::FuncRef)
             }
-            value => {
-                return Err(WasmError::Validation(format!(
-                    "unsupported constant expression opcode: {:02x}",
-                    value
-                )));
-            }
-        };
-
-        let end = reader.read_u8().map_err(WasmError::from)?;
-        if end != 0x0B {
-            return Err(WasmError::Validation(
-                "constant expression missing end opcode".to_string(),
-            ));
         }
+
         if reader.remaining() != 0 {
             return Err(WasmError::Validation(
                 "constant expression has trailing bytes".to_string(),
             ));
         }
 
-        Ok(value_type)
+        if stack.len() != 1 {
+            return Err(WasmError::Validation(
+                "constant expression must leave exactly one value".to_string(),
+            ));
+        }
+
+        Ok(stack[0])
+    }
+
+    fn pop_const_expr_type(&self, stack: &mut Vec<ValType>, expected: ValType) -> Result<()> {
+        match stack.pop() {
+            Some(value) if value == expected => Ok(()),
+            Some(value) => Err(WasmError::Validation(format!(
+                "constant expression type mismatch: expected {:?}, got {:?}",
+                expected, value
+            ))),
+            None => Err(WasmError::Validation(
+                "constant expression stack underflow".to_string(),
+            )),
+        }
     }
 
     fn skip_uleb(code: &[u8], cursor: &mut usize) -> Result<()> {
@@ -1485,6 +1991,33 @@ impl Validator {
                 ));
             }
         }
+
+        for (i, import) in module.imports.iter().enumerate() {
+            let ImportKind::Memory(memory) = &import.kind else {
+                continue;
+            };
+
+            if memory.limits.min() > 65536 {
+                return Err(WasmError::Validation(format!(
+                    "memory import {}: minimum size too large",
+                    i
+                )));
+            }
+            if let Some(max) = memory.limits.max() {
+                if max > 65536 {
+                    return Err(WasmError::Validation(format!(
+                        "memory import {}: maximum size too large",
+                        i
+                    )));
+                }
+                if max < memory.limits.min() {
+                    return Err(WasmError::Validation(format!(
+                        "memory import {}: maximum less than minimum",
+                        i
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1540,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_non_import_const_global_get() {
+    fn test_validate_accepts_prior_immutable_const_global_get() {
         let mut module = Module::new();
         module
             .types
@@ -1560,7 +2093,7 @@ mod tests {
         });
 
         let validator = Validator::new();
-        assert!(validator.validate(&module).is_err());
+        assert!(validator.validate(&module).is_ok());
     }
 
     #[test]
@@ -1608,7 +2141,7 @@ mod tests {
         module.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0xD0, 0x00, 0x1A, 0x0B],
+            body: vec![0xD0, 0x01, 0x1A, 0x0B],
         });
 
         let validator = Validator::new();
@@ -1741,7 +2274,9 @@ mod tests {
                 offset: vec![0x41, 0x00, 0x0B],
             },
             type_: RefType::FuncRef,
+            nullable: true,
             init: vec![vec![0xD0, 0x6F, 0x0B]],
+            generated_by_table_init: false,
         });
 
         let validator = Validator::new();

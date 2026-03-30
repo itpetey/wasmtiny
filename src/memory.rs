@@ -56,14 +56,41 @@ struct Waiter {
 impl Memory {
     /// Creates a new `Memory`.
     pub fn new(mem_type: MemoryType) -> Self {
+        Self::try_new(mem_type).expect("memory type should be validated before allocation")
+    }
+
+    /// Tries to create a new `Memory`.
+    pub fn try_new(mem_type: MemoryType) -> Result<Self> {
         let min_pages = mem_type.limits.min();
-        let byte_len = (min_pages * PAGE_SIZE_BYTES) as usize;
-        Self {
+        if min_pages > MAX_PAGES {
+            return Err(WasmError::Instantiate(format!(
+                "memory minimum {} pages exceeds supported limit {}",
+                min_pages, MAX_PAGES
+            )));
+        }
+
+        let byte_len = usize::try_from(min_pages)
+            .ok()
+            .and_then(|pages| pages.checked_mul(PAGE_SIZE_BYTES as usize))
+            .ok_or_else(|| {
+                WasmError::Instantiate("memory size overflow during allocation".to_string())
+            })?;
+
+        let mut data = Vec::new();
+        data.try_reserve_exact(byte_len).map_err(|_| {
+            WasmError::Instantiate(format!(
+                "unable to reserve {} bytes for linear memory",
+                byte_len
+            ))
+        })?;
+        data.resize(byte_len, 0);
+
+        Ok(Self {
             mem_type,
-            data: vec![0; byte_len],
+            data,
             meters: Vec::new(),
             waiters: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        }
+        })
     }
 
     /// Blocks the current thread waiting for the address to be notified.

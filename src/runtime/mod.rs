@@ -31,7 +31,8 @@ pub use error::{Result, SuspensionKind, TrapCode, WasmError};
 pub use export::{ExportKind, ExportType};
 pub use import::{Import, ImportKind, ImportType};
 pub use instance::{
-    Extern, HostCallOutcome, HostFunc, Instance, SharedGlobal, SharedMemory, SharedTable, Store,
+    Extern, GuestFuncBinding, HostCallOutcome, HostFunc, Instance, SharedGlobal, SharedMemory,
+    SharedTable, Store,
 };
 pub(crate) use metering::InstanceMeter;
 pub use metering::{InstanceLimits, InstanceStats};

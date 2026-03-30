@@ -15,6 +15,9 @@ The interpreter SHALL support calling imported host functions with proper parame
 ### Requirement: Branch table support
 The interpreter SHALL efficiently handle `br_table` instructions with arbitrary branch table sizes.
 
+### Requirement: Cross-module funcref dispatch
+The interpreter SHALL execute `call_indirect` through funcrefs stored in imported or shared tables, including functions defined in other modules.
+
 ### Requirement: Stack overflow detection
 The interpreter SHALL detect and trap on operand stack overflow.
 
@@ -40,3 +43,7 @@ The interpreter SHALL produce identical results for the same module input regard
 #### Scenario: Host function call
 - **WHEN** a module calls an imported host function
 - **THEN** the host function is invoked with correct arguments and result is returned
+
+#### Scenario: Indirect call through shared imported table
+- **WHEN** a module calls `call_indirect` through a table entry populated by another module
+- **THEN** the referenced function is invoked with the expected type checks and result

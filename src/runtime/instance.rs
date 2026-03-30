@@ -35,6 +35,8 @@ pub struct Instance {
     funcs: Vec<Arc<dyn HostFunc>>,
     exports: HashMap<String, Extern>,
     import_bindings: Vec<Option<Extern>>,
+    elem_segments_active: Vec<bool>,
+    func_ref_handles: Vec<u32>,
 }
 
 /// An external value that can be imported or exported.
@@ -44,8 +46,8 @@ pub struct Instance {
 #[derive(Clone)]
 /// A host or guest value exposed through imports and exports.
 pub enum Extern {
-    /// A function index within the instance.
-    Func(u32),
+    /// A guest-exported function binding.
+    Func(GuestFuncBinding),
     /// A host-provided function.
     HostFunc(Arc<dyn HostFunc>),
     /// A shared table value.
@@ -54,16 +56,27 @@ pub enum Extern {
     Memory(SharedMemory),
     /// A shared global value.
     Global(SharedGlobal),
+    /// A tag signature.
+    Tag(FunctionType),
+}
+
+#[derive(Clone)]
+pub struct GuestFuncBinding {
+    pub module: Arc<Module>,
+    pub imports: Vec<(String, String, Extern)>,
+    pub func_idx: u32,
+    pub func_type: FunctionType,
 }
 
 impl std::fmt::Debug for Extern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Extern::Func(idx) => f.debug_tuple("Func").field(idx).finish(),
+            Extern::Func(func) => f.debug_tuple("Func").field(&func.func_idx).finish(),
             Extern::HostFunc(_) => f.write_str("HostFunc(..)"),
             Extern::Table(table) => f.debug_tuple("Table").field(table).finish(),
             Extern::Memory(memory) => f.debug_tuple("Memory").field(memory).finish(),
             Extern::Global(global) => f.debug_tuple("Global").field(global).finish(),
+            Extern::Tag(tag) => f.debug_tuple("Tag").field(tag).finish(),
         }
     }
 }
@@ -149,11 +162,67 @@ pub struct NativeFuncRef {
     pub func_type: FunctionType,
     /// Optional symbolic name used for diagnostics.
     pub name: Option<String>,
+    /// Whether this native function is an internal implementation detail.
+    pub internal: bool,
+    /// Guest-function metadata for direct same-module dispatch.
+    pub(crate) guest_target: Option<GuestFuncTarget>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GuestFuncTarget {
+    pub module: Arc<Module>,
+    pub func_idx: u32,
 }
 
 struct TypedHostFunc {
     inner: Arc<dyn HostFunc>,
     func_type: FunctionType,
+}
+
+struct GuestFuncRefHost {
+    module: Arc<Module>,
+    imports: Vec<(String, String, Extern)>,
+    func_idx: u32,
+    func_type: FunctionType,
+}
+
+impl HostFunc for GuestFuncRefHost {
+    fn call(&self, _store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        let imports = self
+            .imports
+            .iter()
+            .map(|(module, name, extern_)| {
+                let extern_ = match extern_ {
+                    Extern::Table(table) => Extern::Table(Arc::new(Mutex::new(
+                        table.lock().map_err(poisoned_lock)?.clone(),
+                    ))),
+                    _ => extern_.clone(),
+                };
+                Ok((module.as_str(), name.as_str(), extern_))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let instance = Arc::new(Mutex::new(Instance::with_imports(
+            self.module.clone(),
+            &imports,
+        )?));
+        let mut interpreter = crate::interpreter::Interpreter::with_instance(instance);
+        interpreter.execute_function(&self.module, self.func_idx, args)
+    }
+
+    fn function_type(&self) -> Option<&FunctionType> {
+        Some(&self.func_type)
+    }
+}
+
+impl GuestFuncBinding {
+    pub(crate) fn into_host_func(self) -> Arc<dyn HostFunc> {
+        Arc::new(GuestFuncRefHost {
+            module: self.module,
+            imports: self.imports,
+            func_idx: self.func_idx,
+            func_type: self.func_type,
+        })
+    }
 }
 
 impl TypedHostFunc {
@@ -187,6 +256,8 @@ impl NativeFuncRef {
             func,
             func_type,
             name: None,
+            internal: false,
+            guest_target: None,
         }
     }
 
@@ -253,6 +324,33 @@ impl Store {
         idx
     }
 
+    pub(crate) fn register_internal_native(
+        &mut self,
+        func: Box<dyn HostFunc>,
+        func_type: FunctionType,
+    ) -> u32 {
+        let idx = self.native_funcs.len() as u32;
+        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
+        native.internal = true;
+        self.native_funcs.push(native);
+        idx
+    }
+
+    pub(crate) fn register_internal_guest_native(
+        &mut self,
+        func: Box<dyn HostFunc>,
+        func_type: FunctionType,
+        module: Arc<Module>,
+        func_idx: u32,
+    ) -> u32 {
+        let idx = self.native_funcs.len() as u32;
+        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
+        native.internal = true;
+        native.guest_target = Some(GuestFuncTarget { module, func_idx });
+        self.native_funcs.push(native);
+        idx
+    }
+
     /// Registers native func.
     pub fn register_native_func(
         &mut self,
@@ -270,7 +368,10 @@ impl Store {
 
     /// Returns native func count.
     pub fn get_native_func_count(&self) -> u32 {
-        self.native_funcs.len() as u32
+        self.native_funcs
+            .iter()
+            .filter(|func| !func.internal)
+            .count() as u32
     }
 
     /// Allocates shared region.
@@ -440,6 +541,7 @@ impl Instance {
         let mut instance = Self::empty(module, store, shared_memory);
         instance.instantiate_host_funcs();
         instance.validate_imports_satisfied()?;
+        instance.instantiate_func_refs()?;
         instance.instantiate_defined_state()?;
         instance.instantiate_exports();
         Ok(instance)
@@ -480,6 +582,7 @@ impl Instance {
             }
         }
         instance.validate_imports_satisfied()?;
+        instance.instantiate_func_refs()?;
         instance.instantiate_defined_state()?;
         instance.instantiate_exports();
         Ok(instance)
@@ -491,6 +594,11 @@ impl Instance {
         shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
     ) -> Self {
         let import_count = module.imports.len();
+        let elem_segments_active = module
+            .elems
+            .iter()
+            .map(|segment| matches!(segment.kind, super::ElemKind::Passive))
+            .collect();
         Self {
             module,
             store,
@@ -503,6 +611,8 @@ impl Instance {
             funcs: Vec::new(),
             exports: HashMap::new(),
             import_bindings: vec![None; import_count],
+            elem_segments_active,
+            func_ref_handles: Vec::new(),
         }
     }
 
@@ -525,11 +635,53 @@ impl Instance {
             .collect();
     }
 
+    fn instantiate_func_refs(&mut self) -> Result<()> {
+        let imports = self.ordered_imports();
+        self.func_ref_handles.clear();
+
+        for func_idx in 0..self.module.func_count() {
+            let Some(func_type) = self.module.func_type(func_idx).cloned() else {
+                self.func_ref_handles.push(0);
+                continue;
+            };
+            let native_idx = if func_idx < self.funcs.len() as u32 {
+                let host = self.funcs.get(func_idx as usize).cloned().ok_or_else(|| {
+                    WasmError::Instantiate(format!("function {} not found", func_idx))
+                })?;
+                self.store
+                    .lock()
+                    .map_err(poisoned_lock)?
+                    .register_internal_native(
+                        Box::new(TypedHostFunc::new(host, func_type.clone())),
+                        func_type.clone(),
+                    )
+            } else {
+                self.store
+                    .lock()
+                    .map_err(poisoned_lock)?
+                    .register_internal_guest_native(
+                        Box::new(GuestFuncRefHost {
+                            module: self.module.clone(),
+                            imports: imports.clone(),
+                            func_idx,
+                            func_type: func_type.clone(),
+                        }),
+                        func_type.clone(),
+                        self.module.clone(),
+                        func_idx,
+                    )
+            };
+            self.func_ref_handles.push(native_idx);
+        }
+
+        Ok(())
+    }
+
     fn instantiate_defined_state(&mut self) -> Result<()> {
-        let const_globals = self.const_expr_globals();
+        let mut const_globals = self.const_expr_globals();
 
         for memory_type in &self.module.memories {
-            let mut memory = Memory::new(memory_type.clone());
+            let mut memory = Memory::try_new(memory_type.clone())?;
             memory.attach_meter(&self.meter);
             self.memories.push(Arc::new(Mutex::new(memory)));
         }
@@ -543,11 +695,10 @@ impl Instance {
             let init = self.module.global_inits.get(index).ok_or_else(|| {
                 WasmError::Instantiate(format!("missing init for global {}", index))
             })?;
-            let value = evaluate_const_expr(init, &const_globals)?;
-            self.globals.push(Arc::new(Mutex::new(Global::new(
-                global_type.clone(),
-                value,
-            )?)));
+            let value = evaluate_const_expr(init, &const_globals, &self.func_ref_handles)?;
+            let global = Arc::new(Mutex::new(Global::new(global_type.clone(), value)?));
+            self.globals.push(global.clone());
+            const_globals.push((!global_type.mutable).then_some(global));
         }
 
         self.initialise_data_segments(&const_globals)?;
@@ -576,6 +727,52 @@ impl Instance {
         globals
     }
 
+    fn ordered_imports(&self) -> Vec<(String, String, Extern)> {
+        self.module
+            .imports
+            .iter()
+            .zip(self.import_bindings.iter())
+            .filter_map(|(import, binding)| {
+                binding
+                    .as_ref()
+                    .map(|extern_| (import.module.clone(), import.name.clone(), extern_.clone()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn func_ref_handle(&self, func_idx: u32) -> Result<u32> {
+        self.func_ref_handles
+            .get(func_idx as usize)
+            .copied()
+            .ok_or_else(|| WasmError::Runtime(format!("function ref {} not found", func_idx)))
+    }
+
+    pub(crate) fn native_func_ref_parts(
+        &self,
+        native_idx: u32,
+    ) -> Result<(Arc<dyn HostFunc>, FunctionType, Option<GuestFuncTarget>)> {
+        let store = self.store.lock().map_err(poisoned_lock)?;
+        store
+            .get_native_func(native_idx)
+            .map(|func| {
+                (
+                    func.func.clone(),
+                    func.func_type.clone(),
+                    func.guest_target.clone(),
+                )
+            })
+            .ok_or_else(|| WasmError::Runtime(format!("native function {} not found", native_idx)))
+    }
+
+    pub(crate) fn call_cloned_host_func(
+        &self,
+        func: Arc<dyn HostFunc>,
+        args: &[WasmValue],
+    ) -> Result<Vec<WasmValue>> {
+        let mut store = self.store.lock().map_err(poisoned_lock)?;
+        func.call(&mut store, args)
+    }
+
     fn validate_imports_satisfied(&self) -> Result<()> {
         for (index, (import, binding)) in self
             .module
@@ -600,7 +797,7 @@ impl Instance {
             let super::DataKind::Active { memory_idx, offset } = &segment.kind else {
                 continue;
             };
-            let offset = evaluate_const_expr(offset, const_globals)?;
+            let offset = evaluate_const_expr(offset, const_globals, &self.func_ref_handles)?;
             let WasmValue::I32(offset) = offset else {
                 return Err(WasmError::Instantiate(
                     "data segment offset must evaluate to i32".to_string(),
@@ -624,7 +821,7 @@ impl Instance {
             let super::ElemKind::Active { table_idx, offset } = &segment.kind else {
                 continue;
             };
-            let offset = evaluate_const_expr(offset, const_globals)?;
+            let offset = evaluate_const_expr(offset, const_globals, &self.func_ref_handles)?;
             let WasmValue::I32(offset) = offset else {
                 return Err(WasmError::Instantiate(
                     "element segment offset must evaluate to i32".to_string(),
@@ -636,12 +833,23 @@ impl Instance {
                 .get_mut(*table_idx as usize)
                 .ok_or_else(|| WasmError::Instantiate(format!("table {} not found", table_idx)))?;
 
+            let segment_len = segment.init.len() as u32;
+            let offset_u32 =
+                u32::try_from(offset).map_err(|_| WasmError::Trap(TrapCode::TableOutOfBounds))?;
+            let table_size = table.lock().map_err(poisoned_lock)?.size();
+            let end = offset_u32
+                .checked_add(segment_len)
+                .ok_or(WasmError::Trap(TrapCode::TableOutOfBounds))?;
+            if end > table_size || (segment_len == 0 && offset_u32 > table_size) {
+                return Err(WasmError::Trap(TrapCode::TableOutOfBounds));
+            }
+
             for (index, expr) in segment.init.iter().enumerate() {
-                let value = evaluate_const_expr(expr, const_globals)?;
+                let value = evaluate_const_expr(expr, const_globals, &self.func_ref_handles)?;
                 table
                     .lock()
                     .map_err(poisoned_lock)?
-                    .set(offset as u32 + index as u32, value)?;
+                    .set(offset_u32 + index as u32, value)?;
             }
         }
 
@@ -651,7 +859,14 @@ impl Instance {
     fn instantiate_exports(&mut self) {
         for export in &self.module.exports {
             let extern_ = match export.kind {
-                ExportKind::Func(idx) => Some(Extern::Func(idx)),
+                ExportKind::Func(idx) => self.module.func_type(idx).cloned().map(|func_type| {
+                    Extern::Func(GuestFuncBinding {
+                        module: Arc::new(self.module.as_ref().clone()),
+                        imports: self.ordered_imports(),
+                        func_idx: idx,
+                        func_type,
+                    })
+                }),
                 ExportKind::Table(idx) => self.tables.get(idx as usize).cloned().map(Extern::Table),
                 ExportKind::Memory(idx) => {
                     self.memories.get(idx as usize).cloned().map(Extern::Memory)
@@ -659,12 +874,100 @@ impl Instance {
                 ExportKind::Global(idx) => {
                     self.globals.get(idx as usize).cloned().map(Extern::Global)
                 }
+                ExportKind::Tag(idx) => self.module.tag_type(idx).cloned().map(Extern::Tag),
             };
 
             if let Some(extern_) = extern_ {
                 self.exports.insert(export.name.clone(), extern_);
             }
         }
+    }
+
+    pub fn table_init(
+        &mut self,
+        table_idx: u32,
+        elem_idx: u32,
+        dst: u32,
+        src: u32,
+        len: u32,
+    ) -> Result<()> {
+        let segment =
+            self.module.elems.get(elem_idx as usize).ok_or_else(|| {
+                WasmError::Runtime(format!("element segment {} not found", elem_idx))
+            })?;
+        let available = self
+            .elem_segments_active
+            .get(elem_idx as usize)
+            .copied()
+            .unwrap_or(false);
+        let segment_len = if available {
+            segment.init.len() as u32
+        } else {
+            0
+        };
+
+        let src_end = src
+            .checked_add(len)
+            .ok_or(WasmError::Trap(TrapCode::TableOutOfBounds))?;
+        let dst_end = dst
+            .checked_add(len)
+            .ok_or(WasmError::Trap(TrapCode::TableOutOfBounds))?;
+        if src_end > segment_len {
+            return Err(WasmError::Trap(TrapCode::TableOutOfBounds));
+        }
+
+        let const_globals = self.all_const_expr_globals();
+        let table = self
+            .tables
+            .get(table_idx as usize)
+            .ok_or_else(|| WasmError::Runtime(format!("table {} not found", table_idx)))?
+            .clone();
+        let table_size = table.lock().map_err(poisoned_lock)?.size();
+        if dst_end > table_size {
+            return Err(WasmError::Trap(TrapCode::TableOutOfBounds));
+        }
+
+        for offset in 0..len {
+            let expr = &segment.init[(src + offset) as usize];
+            let value = evaluate_const_expr(expr, &const_globals, &self.func_ref_handles)?;
+            table
+                .lock()
+                .map_err(poisoned_lock)?
+                .set(dst + offset, value)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn elem_drop(&mut self, elem_idx: u32) -> Result<()> {
+        let active = self
+            .elem_segments_active
+            .get_mut(elem_idx as usize)
+            .ok_or_else(|| WasmError::Runtime(format!("element segment {} not found", elem_idx)))?;
+        *active = false;
+        Ok(())
+    }
+
+    fn all_const_expr_globals(&self) -> Vec<Option<SharedGlobal>> {
+        let total_globals = self
+            .module
+            .imports
+            .iter()
+            .filter(|import| matches!(import.kind, ImportKind::Global(_)))
+            .count()
+            + self.module.globals.len();
+
+        (0..total_globals)
+            .map(|idx| {
+                self.module.global_at(idx as u32).and_then(|global_type| {
+                    if global_type.mutable {
+                        None
+                    } else {
+                        self.globals.get(idx).cloned()
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Adds import.
@@ -1146,13 +1449,20 @@ impl Instance {
                     )));
                 }
             }
+            (ImportKind::Func(type_idx), Extern::Func(func)) => {
+                let expected = self.module.type_at(*type_idx).ok_or_else(|| {
+                    WasmError::Instantiate(format!("type {} not found", type_idx))
+                })?;
+                if &func.func_type != expected {
+                    return Err(WasmError::Instantiate(format!(
+                        "import {}.{} function type mismatch",
+                        import.module, import.name
+                    )));
+                }
+            }
             (ImportKind::Table(expected), Extern::Table(table)) => {
-                if !table
-                    .lock()
-                    .map_err(poisoned_lock)?
-                    .type_
-                    .matches_required(expected)
-                {
+                let table_guard = table.lock().map_err(poisoned_lock)?;
+                if !table_matches_required(&table_guard, expected) {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} table type mismatch",
                         import.module, import.name
@@ -1161,7 +1471,7 @@ impl Instance {
             }
             (ImportKind::Memory(expected), Extern::Memory(memory)) => {
                 let mut memory = memory.lock().map_err(poisoned_lock)?;
-                if !memory.type_().matches_required(expected) {
+                if !memory_matches_required(&memory, expected) {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} memory type mismatch",
                         import.module, import.name
@@ -1173,6 +1483,17 @@ impl Instance {
                 if global.lock().map_err(poisoned_lock)?.type_ != *expected {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} global type mismatch",
+                        import.module, import.name
+                    )));
+                }
+            }
+            (ImportKind::Tag(type_idx), Extern::Tag(actual)) => {
+                let expected = self.module.type_at(*type_idx).ok_or_else(|| {
+                    WasmError::Instantiate(format!("type {} not found", type_idx))
+                })?;
+                if actual != expected {
+                    return Err(WasmError::Instantiate(format!(
+                        "import {}.{} tag type mismatch",
                         import.module, import.name
                     )));
                 }
@@ -1212,6 +1533,18 @@ impl Instance {
                     let slot = self.func_import_slot(import_idx);
                     self.funcs[slot] = Arc::new(TypedHostFunc::new(func.clone(), expected));
                 }
+                (ImportKind::Func(type_idx), Extern::Func(func)) => {
+                    let expected = self
+                        .module
+                        .type_at(*type_idx)
+                        .ok_or_else(|| {
+                            WasmError::Instantiate(format!("type {} not found", type_idx))
+                        })?
+                        .clone();
+                    let slot = self.func_import_slot(import_idx);
+                    self.funcs[slot] =
+                        Arc::new(TypedHostFunc::new(func.clone().into_host_func(), expected));
+                }
                 (ImportKind::Table(_), Extern::Table(table)) => self.tables.push(table.clone()),
                 (ImportKind::Memory(_), Extern::Memory(memory)) => {
                     self.memories.push(memory.clone())
@@ -1219,6 +1552,7 @@ impl Instance {
                 (ImportKind::Global(_), Extern::Global(global)) => {
                     self.globals.push(global.clone())
                 }
+                (ImportKind::Tag(_), Extern::Tag(_)) => {}
                 _ => {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} kind mismatch",
@@ -1298,61 +1632,148 @@ impl Drop for Instance {
     }
 }
 
-fn evaluate_const_expr(expr: &[u8], globals: &[Option<SharedGlobal>]) -> Result<WasmValue> {
+fn evaluate_const_expr(
+    expr: &[u8],
+    globals: &[Option<SharedGlobal>],
+    func_refs: &[u32],
+) -> Result<WasmValue> {
     let mut reader = BinaryReader::from_slice(expr);
-    let opcode = reader.read_u8().map_err(io_to_load_error)?;
-    let value = match opcode {
-        0x23 => {
-            let idx = reader.read_uleb128().map_err(io_to_load_error)?;
-            globals
-                .get(idx as usize)
-                .and_then(|global| global.as_ref())
-                .ok_or_else(|| {
-                    WasmError::Instantiate(format!(
-                        "global {} is not allowed in constant expressions",
-                        idx
-                    ))
-                })?
-                .lock()
-                .map_err(poisoned_lock)?
-                .get()
-        }
-        0x41 => WasmValue::I32(reader.read_sleb128().map_err(io_to_load_error)?),
-        0x42 => WasmValue::I64(reader.read_sleb128_i64().map_err(io_to_load_error)?),
-        0x43 => WasmValue::F32(reader.read_f32().map_err(io_to_load_error)?),
-        0x44 => WasmValue::F64(reader.read_f64().map_err(io_to_load_error)?),
-        0xD0 => match reader.read_u8().map_err(io_to_load_error)? {
-            0x70 => WasmValue::NullRef(RefType::FuncRef),
-            0x6F => WasmValue::NullRef(RefType::ExternRef),
+    let mut stack = Vec::new();
+
+    loop {
+        let opcode = reader.read_u8().map_err(io_to_load_error)?;
+        match opcode {
+            0x0B => break,
+            0x23 => {
+                let idx = reader.read_uleb128().map_err(io_to_load_error)?;
+                let value = globals
+                    .get(idx as usize)
+                    .and_then(|global| global.as_ref())
+                    .ok_or_else(|| {
+                        WasmError::Instantiate(format!(
+                            "global {} is not allowed in constant expressions",
+                            idx
+                        ))
+                    })?
+                    .lock()
+                    .map_err(poisoned_lock)?
+                    .get();
+                stack.push(value);
+            }
+            0x41 => stack.push(WasmValue::I32(
+                reader.read_sleb128().map_err(io_to_load_error)?,
+            )),
+            0x42 => stack.push(WasmValue::I64(
+                reader.read_sleb128_i64().map_err(io_to_load_error)?,
+            )),
+            0x43 => stack.push(WasmValue::F32(reader.read_f32().map_err(io_to_load_error)?)),
+            0x44 => stack.push(WasmValue::F64(reader.read_f64().map_err(io_to_load_error)?)),
+            0xD0 => stack.push(match reader.read_u8().map_err(io_to_load_error)? {
+                0x70 => WasmValue::NullRef(RefType::FuncRef),
+                0x6F => WasmValue::NullRef(RefType::ExternRef),
+                0x63 | 0x64 => match reader.read_sleb128_i64().map_err(io_to_load_error)? {
+                    -0x10 | -0x14 => WasmValue::NullRef(RefType::FuncRef),
+                    -0x11 | -0x13 => WasmValue::NullRef(RefType::ExternRef),
+                    idx if idx >= 0 => WasmValue::NullRef(RefType::FuncRef),
+                    heap_type => {
+                        return Err(WasmError::Instantiate(format!(
+                            "invalid ref.null heap type: {}",
+                            heap_type
+                        )));
+                    }
+                },
+                byte if byte < 0x40 => WasmValue::NullRef(RefType::FuncRef),
+                value => {
+                    return Err(WasmError::Instantiate(format!(
+                        "invalid ref.null type: {:02x}",
+                        value
+                    )));
+                }
+            }),
+            0xD2 => {
+                let func_idx = reader.read_uleb128().map_err(io_to_load_error)? as usize;
+                let handle = *func_refs.get(func_idx).ok_or_else(|| {
+                    WasmError::Instantiate(format!("function ref {} not found", func_idx))
+                })?;
+                stack.push(WasmValue::native_func_ref(handle));
+            }
+            0x6A => {
+                let rhs = pop_const_i32(&mut stack)?;
+                let lhs = pop_const_i32(&mut stack)?;
+                stack.push(WasmValue::I32(lhs.wrapping_add(rhs)));
+            }
+            0x6B => {
+                let rhs = pop_const_i32(&mut stack)?;
+                let lhs = pop_const_i32(&mut stack)?;
+                stack.push(WasmValue::I32(lhs.wrapping_sub(rhs)));
+            }
+            0x6C => {
+                let rhs = pop_const_i32(&mut stack)?;
+                let lhs = pop_const_i32(&mut stack)?;
+                stack.push(WasmValue::I32(lhs.wrapping_mul(rhs)));
+            }
+            0x7C => {
+                let rhs = pop_const_i64(&mut stack)?;
+                let lhs = pop_const_i64(&mut stack)?;
+                stack.push(WasmValue::I64(lhs.wrapping_add(rhs)));
+            }
+            0x7D => {
+                let rhs = pop_const_i64(&mut stack)?;
+                let lhs = pop_const_i64(&mut stack)?;
+                stack.push(WasmValue::I64(lhs.wrapping_sub(rhs)));
+            }
+            0x7E => {
+                let rhs = pop_const_i64(&mut stack)?;
+                let lhs = pop_const_i64(&mut stack)?;
+                stack.push(WasmValue::I64(lhs.wrapping_mul(rhs)));
+            }
             value => {
                 return Err(WasmError::Instantiate(format!(
-                    "invalid ref.null type: {:02x}",
+                    "unsupported const expr opcode: {:02x}",
                     value
                 )));
             }
-        },
-        0xD2 => WasmValue::FuncRef(reader.read_uleb128().map_err(io_to_load_error)?),
-        value => {
-            return Err(WasmError::Instantiate(format!(
-                "unsupported const expr opcode: {:02x}",
-                value
-            )));
         }
-    };
-
-    let end = reader.read_u8().map_err(io_to_load_error)?;
-    if end != 0x0B {
-        return Err(WasmError::Instantiate(
-            "constant expression missing end opcode".to_string(),
-        ));
     }
+
     if reader.remaining() != 0 {
         return Err(WasmError::Instantiate(
             "constant expression has trailing bytes".to_string(),
         ));
     }
 
-    Ok(value)
+    match stack.as_slice() {
+        [value] => Ok(*value),
+        _ => Err(WasmError::Instantiate(
+            "constant expression must leave exactly one value".to_string(),
+        )),
+    }
+}
+
+fn pop_const_i32(stack: &mut Vec<WasmValue>) -> Result<i32> {
+    match stack.pop() {
+        Some(WasmValue::I32(value)) => Ok(value),
+        Some(value) => Err(WasmError::Instantiate(format!(
+            "constant expression expected i32, got {:?}",
+            value.val_type()
+        ))),
+        None => Err(WasmError::Instantiate(
+            "constant expression stack underflow".to_string(),
+        )),
+    }
+}
+
+fn pop_const_i64(stack: &mut Vec<WasmValue>) -> Result<i64> {
+    match stack.pop() {
+        Some(WasmValue::I64(value)) => Ok(value),
+        Some(value) => Err(WasmError::Instantiate(format!(
+            "constant expression expected i64, got {:?}",
+            value.val_type()
+        ))),
+        None => Err(WasmError::Instantiate(
+            "constant expression stack underflow".to_string(),
+        )),
+    }
 }
 
 fn io_to_load_error(error: std::io::Error) -> WasmError {
@@ -1382,6 +1803,27 @@ fn validate_values(values: &[WasmValue], expected: &[ValType], kind: &str) -> Re
     }
 
     Ok(())
+}
+
+fn table_matches_required(actual: &Table, required: &crate::runtime::TableType) -> bool {
+    actual.type_.elem_type == required.elem_type
+        && (actual.type_.nullable == required.nullable
+            || (!actual.type_.nullable && required.nullable))
+        && actual.size() >= required.limits.min()
+        && match (actual.type_.limits.max(), required.limits.max()) {
+            (_, None) => true,
+            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
+            (None, Some(_)) => false,
+        }
+}
+
+fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryType) -> bool {
+    actual.size() >= required.limits.min()
+        && match (actual.type_().limits.max(), required.limits.max()) {
+            (_, None) => true,
+            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
+            (None, Some(_)) => false,
+        }
 }
 
 fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
