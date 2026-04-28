@@ -197,7 +197,7 @@ impl<R: Read> Read for BinaryReader<R> {
                     *b = byte;
                     count += 1;
                 }
-                Err(e) if count > 0 => return Ok(count),
+                Err(_) if count > 0 => return Ok(count),
                 Err(e) => return Err(e),
             }
         }
