@@ -101,21 +101,17 @@ impl Validator {
     fn validate_imports(&self, module: &Module) -> Result<()> {
         for (i, import) in module.imports.iter().enumerate() {
             match import.kind {
-                ImportKind::Func(type_idx) => {
-                    if type_idx as usize >= module.types.len() {
-                        return Err(WasmError::Validation(format!(
-                            "import {}: invalid function type index",
-                            i
-                        )));
-                    }
+                ImportKind::Func(type_idx) if type_idx as usize >= module.types.len() => {
+                    return Err(WasmError::Validation(format!(
+                        "import {}: invalid function type index",
+                        i
+                    )));
                 }
-                ImportKind::Tag(type_idx) => {
-                    if type_idx as usize >= module.types.len() {
-                        return Err(WasmError::Validation(format!(
-                            "import {}: invalid tag type index",
-                            i
-                        )));
-                    }
+                ImportKind::Tag(type_idx) if type_idx as usize >= module.types.len() => {
+                    return Err(WasmError::Validation(format!(
+                        "import {}: invalid tag type index",
+                        i
+                    )));
                 }
                 _ => {}
             }

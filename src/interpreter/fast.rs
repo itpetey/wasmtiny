@@ -300,15 +300,11 @@ impl FastInterpreter {
                     self.registers[*dst as usize] = WasmValue::I32(0);
                 }
                 IrOpcode::StoreGlobal { src: _, idx: _ } => {}
-                IrOpcode::LoadLocal { dst, idx } => {
-                    if (*idx as usize) < self.registers.len() {
-                        self.registers[*dst as usize] = self.registers[*idx as usize];
-                    }
+                IrOpcode::LoadLocal { dst, idx } if (*idx as usize) < self.registers.len() => {
+                    self.registers[*dst as usize] = self.registers[*idx as usize];
                 }
-                IrOpcode::StoreLocal { src, idx } => {
-                    if (*idx as usize) < self.registers.len() {
-                        self.registers[*idx as usize] = self.registers[*src as usize];
-                    }
+                IrOpcode::StoreLocal { src, idx } if (*idx as usize) < self.registers.len() => {
+                    self.registers[*idx as usize] = self.registers[*src as usize];
                 }
                 IrOpcode::Add { dst, lhs, rhs } => {
                     let a = match &self.registers[*lhs as usize] {
