@@ -89,12 +89,12 @@ impl std::fmt::Debug for Extern {
 /// # Example
 ///
 /// ```
-/// use wasmtiny::runtime::{Store, WasmValue, Result, FunctionType, ValType, NumType, HostFunc};
+/// use wasmtiny::runtime::{WasmValue, Result, FunctionType, ValType, NumType, HostCaller, HostFunc};
 ///
 /// struct Add;
 ///
 /// impl HostFunc for Add {
-///     fn call(&self, _store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+///     fn call(&self, _caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
 ///         let a = args[0].i32()?;
 ///         let b = args[1].i32()?;
 ///         Ok(vec![WasmValue::I32(a + b)])
@@ -111,15 +111,15 @@ impl std::fmt::Debug for Extern {
 /// ```
 pub trait HostFunc: Send + Sync + 'static {
     /// Executes the host function synchronously.
-    fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>>;
+    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>>;
 
     /// Executes the host function and may suspend before completion.
     fn call_with_suspension(
         &self,
-        store: &mut Store,
+        caller: &mut HostCaller<'_>,
         args: &[WasmValue],
     ) -> Result<HostCallOutcome> {
-        self.call(store, args).map(HostCallOutcome::Complete)
+        self.call(caller, args).map(HostCallOutcome::Complete)
     }
 
     /// Returns the declared function signature for this host function.
@@ -143,10 +143,10 @@ pub enum HostCallOutcome {
 
 impl<F> HostFunc for F
 where
-    F: Fn(&mut Store, &[WasmValue]) -> Result<Vec<WasmValue>> + Send + Sync + 'static,
+    F: Fn(&mut HostCaller<'_>, &[WasmValue]) -> Result<Vec<WasmValue>> + Send + Sync + 'static,
 {
-    fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self(store, args)
+    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self(caller, args)
     }
 
     fn function_type(&self) -> Option<&FunctionType> {
@@ -174,6 +174,28 @@ pub(crate) struct GuestFuncTarget {
     pub func_idx: u32,
 }
 
+/// Context for a host function invocation, including the calling instance.
+pub struct HostCaller<'a> {
+    store: &'a mut Store,
+    memories: &'a [SharedMemory],
+}
+
+impl<'a> HostCaller<'a> {
+    pub(crate) fn new(store: &'a mut Store, memories: &'a [SharedMemory]) -> Self {
+        Self { store, memories }
+    }
+
+    /// Returns the caller's linear memory at the given index.
+    pub fn memory(&self, index: u32) -> Option<SharedMemory> {
+        self.memories.get(index as usize).cloned()
+    }
+
+    /// Returns the runtime store backing this host call.
+    pub fn store(&mut self) -> &mut Store {
+        self.store
+    }
+}
+
 struct TypedHostFunc {
     inner: Arc<dyn HostFunc>,
     func_type: FunctionType,
@@ -187,7 +209,7 @@ struct GuestFuncRefHost {
 }
 
 impl HostFunc for GuestFuncRefHost {
-    fn call(&self, _store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+    fn call(&self, _caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         let imports = self
             .imports
             .iter()
@@ -232,16 +254,16 @@ impl TypedHostFunc {
 }
 
 impl HostFunc for TypedHostFunc {
-    fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self.inner.call(store, args)
+    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.inner.call(caller, args)
     }
 
     fn call_with_suspension(
         &self,
-        store: &mut Store,
+        caller: &mut HostCaller<'_>,
         args: &[WasmValue],
     ) -> Result<HostCallOutcome> {
-        self.inner.call_with_suspension(store, args)
+        self.inner.call_with_suspension(caller, args)
     }
 
     fn function_type(&self) -> Option<&FunctionType> {
@@ -268,17 +290,17 @@ impl NativeFuncRef {
     }
 
     /// Invokes the target function.
-    pub fn call(&self, store: &mut Store, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self.func.call(store, args)
+    pub fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.func.call(caller, args)
     }
 
     /// Calls with suspension.
     pub fn call_with_suspension(
         &self,
-        store: &mut Store,
+        caller: &mut HostCaller<'_>,
         args: &[WasmValue],
     ) -> Result<HostCallOutcome> {
-        self.func.call_with_suspension(store, args)
+        self.func.call_with_suspension(caller, args)
     }
 }
 
@@ -626,7 +648,7 @@ impl Instance {
 
         self.funcs = (0..import_func_count)
             .map(|_| {
-                Arc::new(|_: &mut Store, _: &[WasmValue]| {
+                Arc::new(|_: &mut HostCaller<'_>, _: &[WasmValue]| {
                     Err(WasmError::Runtime(
                         "uninitialized host function".to_string(),
                     ))
@@ -770,7 +792,8 @@ impl Instance {
         args: &[WasmValue],
     ) -> Result<Vec<WasmValue>> {
         let mut store = self.store.lock().map_err(poisoned_lock)?;
-        func.call(&mut store, args)
+        let mut caller = HostCaller::new(&mut store, &self.memories);
+        func.call(&mut caller, args)
     }
 
     fn validate_imports_satisfied(&self) -> Result<()> {
@@ -1393,7 +1416,8 @@ impl Instance {
             })?;
             validate_values(args, &func_type.params, "argument")?;
             let mut store = self.store.lock().map_err(poisoned_lock)?;
-            match func.call_with_suspension(&mut store, args)? {
+            let mut caller = HostCaller::new(&mut store, &self.memories);
+            match func.call_with_suspension(&mut caller, args)? {
                 HostCallOutcome::Complete(results) => {
                     validate_values(&results, &func_type.results, "result")?;
                     Ok(HostCallOutcome::Complete(results))
@@ -1857,11 +1881,12 @@ mod tests {
             vec![ValType::Num(crate::runtime::NumType::I32)],
         );
 
-        let func: Box<dyn HostFunc> = Box::new(|_store: &mut Store, args: &[WasmValue]| {
-            let a = args[0].i32()?;
-            let b = args[1].i32()?;
-            Ok(vec![WasmValue::I32(a + b)])
-        });
+        let func: Box<dyn HostFunc> =
+            Box::new(|_caller: &mut HostCaller<'_>, args: &[WasmValue]| {
+                let a = args[0].i32()?;
+                let b = args[1].i32()?;
+                Ok(vec![WasmValue::I32(a + b)])
+            });
 
         let idx = store.register_native(func, func_type);
         assert_eq!(idx, 0);
@@ -2064,7 +2089,7 @@ mod tests {
             &[(
                 "env",
                 "host",
-                Extern::HostFunc(Arc::new(|_: &mut Store, args: &[WasmValue]| {
+                Extern::HostFunc(Arc::new(|_: &mut HostCaller<'_>, args: &[WasmValue]| {
                     Ok(vec![args[0]])
                 })),
             )],
@@ -2093,7 +2118,9 @@ mod tests {
             &[(
                 "env",
                 "host",
-                Extern::HostFunc(Arc::new(|_: &mut Store, _: &[WasmValue]| Ok(vec![]))),
+                Extern::HostFunc(Arc::new(|_: &mut HostCaller<'_>, _: &[WasmValue]| {
+                    Ok(vec![])
+                })),
             )],
         )
         .unwrap();
@@ -2122,7 +2149,9 @@ mod tests {
             &[(
                 "env",
                 "host",
-                Extern::HostFunc(Arc::new(|_: &mut Store, _: &[WasmValue]| Ok(vec![]))),
+                Extern::HostFunc(Arc::new(|_: &mut HostCaller<'_>, _: &[WasmValue]| {
+                    Ok(vec![])
+                })),
             )],
         )
         .unwrap();

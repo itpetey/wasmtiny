@@ -3093,8 +3093,8 @@ fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> 
 mod tests {
     use super::*;
     use crate::runtime::{
-        Extern, Func, FunctionType, HostCallOutcome, HostFunc, Import, ImportKind, Instance,
-        Limits, Local, MemoryType, Module, TableType,
+        Extern, Func, FunctionType, HostCallOutcome, HostCaller, HostFunc, Import, ImportKind,
+        Instance, Limits, Local, MemoryType, Module, TableType,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -3835,7 +3835,7 @@ mod tests {
         impl HostFunc for PendingHost {
             fn call(
                 &self,
-                _store: &mut crate::runtime::Store,
+                _caller: &mut HostCaller<'_>,
                 _args: &[WasmValue],
             ) -> Result<Vec<WasmValue>> {
                 panic!("pending hostcall should not fall back to synchronous completion")
@@ -3843,7 +3843,7 @@ mod tests {
 
             fn call_with_suspension(
                 &self,
-                _store: &mut crate::runtime::Store,
+                _caller: &mut HostCaller<'_>,
                 _args: &[WasmValue],
             ) -> Result<HostCallOutcome> {
                 self.calls.fetch_add(1, AtomicOrdering::SeqCst);

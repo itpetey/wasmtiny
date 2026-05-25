@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use wasmtiny::loader::{Parser, Validator};
 use wasmtiny::runtime::{
-    FunctionType, Global, GlobalType, HostFunc, ImportKind, Limits, Memory, MemoryType, NumType,
-    RefType, Store, Table, TableType, ValType,
+    FunctionType, Global, GlobalType, HostCaller, HostFunc, ImportKind, Limits, Memory, MemoryType,
+    NumType, RefType, Table, TableType, ValType,
 };
 use wasmtiny::{WasmApplication, WasmValue};
 use wast::core::{AbstractHeapType, NanPattern, WastArgCore, WastRetCore};
@@ -499,7 +499,7 @@ struct NoOpHostFunc {
 impl HostFunc for NoOpHostFunc {
     fn call(
         &self,
-        _store: &mut Store,
+        _caller: &mut HostCaller<'_>,
         _args: &[WasmValue],
     ) -> wasmtiny::runtime::Result<Vec<WasmValue>> {
         Ok(Vec::new())

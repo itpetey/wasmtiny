@@ -1,10 +1,10 @@
 use super::loader::AotLoader;
 use crate::interpreter::Interpreter;
 use crate::runtime::{
-    Extern, FunctionType, Global, HostCallOutcome, HostFunc, ImportKind, Instance, InstanceLimits,
-    InstanceMeter, InstanceStats, Memory, Module, ResolvedSharedMemoryMapping, Result,
-    SharedMemoryMapping, SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId, SharedTable,
-    Table, WasmError, WasmValue,
+    Extern, FunctionType, Global, HostCallOutcome, HostCaller, HostFunc, ImportKind, Instance,
+    InstanceLimits, InstanceMeter, InstanceStats, Memory, Module, ResolvedSharedMemoryMapping,
+    Result, SharedMemoryMapping, SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId,
+    SharedTable, Table, WasmError, WasmValue,
 };
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
@@ -27,20 +27,16 @@ impl TypedHostImport {
 }
 
 impl HostFunc for TypedHostImport {
-    fn call(
-        &self,
-        store: &mut crate::runtime::Store,
-        args: &[WasmValue],
-    ) -> Result<Vec<WasmValue>> {
-        self.inner.call(store, args)
+    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.inner.call(caller, args)
     }
 
     fn call_with_suspension(
         &self,
-        store: &mut crate::runtime::Store,
+        caller: &mut HostCaller<'_>,
         args: &[WasmValue],
     ) -> Result<HostCallOutcome> {
-        self.inner.call_with_suspension(store, args)
+        self.inner.call_with_suspension(caller, args)
     }
 
     fn function_type(&self) -> Option<&FunctionType> {
@@ -1677,7 +1673,7 @@ mod tests {
     impl HostFunc for WrongSigHostFunc {
         fn call(
             &self,
-            _store: &mut crate::runtime::Store,
+            _caller: &mut HostCaller<'_>,
             _args: &[WasmValue],
         ) -> Result<Vec<WasmValue>> {
             Ok(vec![WasmValue::I32(0)])
@@ -1697,7 +1693,7 @@ mod tests {
     impl HostFunc for EmptyHostFunc {
         fn call(
             &self,
-            _store: &mut crate::runtime::Store,
+            _caller: &mut HostCaller<'_>,
             _args: &[WasmValue],
         ) -> Result<Vec<WasmValue>> {
             Ok(vec![])
@@ -1714,7 +1710,7 @@ mod tests {
     impl HostFunc for UntypedHostFunc {
         fn call(
             &self,
-            _store: &mut crate::runtime::Store,
+            _caller: &mut HostCaller<'_>,
             _args: &[WasmValue],
         ) -> Result<Vec<WasmValue>> {
             Ok(vec![])
@@ -2752,7 +2748,7 @@ mod tests {
         impl HostFunc for ImportedFunc {
             fn call(
                 &self,
-                _store: &mut crate::runtime::Store,
+                _caller: &mut HostCaller<'_>,
                 _args: &[WasmValue],
             ) -> Result<Vec<WasmValue>> {
                 Ok(vec![WasmValue::I32(7)])

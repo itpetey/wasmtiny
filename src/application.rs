@@ -883,7 +883,7 @@ impl Default for WasmApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{FunctionType, Global, GlobalType, NumType, ValType};
+    use crate::runtime::{FunctionType, Global, GlobalType, HostCaller, NumType, ValType};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -892,11 +892,8 @@ mod tests {
     struct CountingHostFunc;
 
     impl HostFunc for CountingHostFunc {
-        fn call(
-            &self,
-            store: &mut crate::runtime::Store,
-            _args: &[WasmValue],
-        ) -> Result<Vec<WasmValue>> {
+        fn call(&self, caller: &mut HostCaller<'_>, _args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+            let store = caller.store();
             let count = store.get_native_func_count() as i32;
             store.register_native(Box::new(NoopHostFunc), FunctionType::empty());
             Ok(vec![WasmValue::I32(count)])
@@ -916,7 +913,7 @@ mod tests {
     impl HostFunc for NoopHostFunc {
         fn call(
             &self,
-            _store: &mut crate::runtime::Store,
+            _caller: &mut HostCaller<'_>,
             _args: &[WasmValue],
         ) -> Result<Vec<WasmValue>> {
             Ok(vec![])
@@ -935,7 +932,7 @@ mod tests {
     impl HostFunc for StartHostFunc {
         fn call(
             &self,
-            _store: &mut crate::runtime::Store,
+            _caller: &mut HostCaller<'_>,
             _args: &[WasmValue],
         ) -> Result<Vec<WasmValue>> {
             self.calls.fetch_add(1, Ordering::SeqCst);

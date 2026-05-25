@@ -1043,8 +1043,8 @@ mod tests {
     use crate::interpreter::{ControlStack, OperandStack};
     use crate::jit::set_execution_context;
     use crate::runtime::{
-        Func, FunctionType, HostCallOutcome, HostFunc, Import, ImportKind, InstanceLimits, Limits,
-        Module, NumType, RuntimeSuspender, ValType, WasmValue,
+        Func, FunctionType, HostCallOutcome, HostCaller, HostFunc, Import, ImportKind,
+        InstanceLimits, Limits, Module, NumType, RuntimeSuspender, ValType, WasmValue,
     };
     use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -1560,7 +1560,7 @@ mod tests {
         impl HostFunc for PendingHost {
             fn call(
                 &self,
-                _store: &mut crate::runtime::Store,
+                _caller: &mut HostCaller<'_>,
                 _args: &[WasmValue],
             ) -> Result<Vec<WasmValue>> {
                 panic!("pending hostcall should not complete synchronously")
@@ -1568,7 +1568,7 @@ mod tests {
 
             fn call_with_suspension(
                 &self,
-                _store: &mut crate::runtime::Store,
+                _caller: &mut HostCaller<'_>,
                 _args: &[WasmValue],
             ) -> Result<HostCallOutcome> {
                 Ok(HostCallOutcome::Pending {
