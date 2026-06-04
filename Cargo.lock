@@ -520,6 +520,7 @@ dependencies = [
  "byteorder",
  "clap",
  "leb128",
+ "libc",
  "llvm-sys",
  "memchr",
  "parking_lot",

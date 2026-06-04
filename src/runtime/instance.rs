@@ -1,9 +1,9 @@
 use super::{
     ExportKind, FunctionType, Global, ImportKind, InstanceLimits, InstanceMeter, InstanceStats,
-    Memory, Module, RefType, ResolvedSharedMemoryMapping, Result, SharedMemoryMapping,
-    SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId, Table, TrapCode, ValType,
-    WasmError, WasmValue,
+    Memory, Module, RefType, Result, SharedMemoryRegistry, SharedRegionId, Table, TrapCode,
+    ValType, WasmError, WasmValue,
 };
+use crate::memory::RegionProt;
 use crate::loader::BinaryReader;
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
@@ -31,7 +31,8 @@ pub struct Instance {
     pub tables: Vec<SharedTable>,
     /// The global values.
     pub globals: Vec<SharedGlobal>,
-    shared_memory_mappings: HashMap<SharedMemoryMappingId, SharedMemoryMapping>,
+    /// Shared region IDs currently attached to this instance's memory.
+    attached_regions: Vec<SharedRegionId>,
     funcs: Vec<Arc<dyn HostFunc>>,
     exports: HashMap<String, Extern>,
     import_bindings: Vec<Option<Extern>>,
@@ -328,8 +329,23 @@ impl Store {
         }
     }
 
-    pub(crate) fn shared_memory_registry(&self) -> Arc<ParkingMutex<SharedMemoryRegistry>> {
+    /// Returns a clone of the shared memory registry Arc.
+    pub fn shared_memory_registry(&self) -> Arc<ParkingMutex<SharedMemoryRegistry>> {
         self.shared_memory.clone()
+    }
+
+    /// Creates a `Store` backed by an existing shared memory registry.
+    ///
+    /// This allows multiple stores (and their instances) to share the same
+    /// `SharedMemoryRegistry`, making shared regions visible across all of them.
+    pub fn with_shared_registry(
+        registry: Arc<ParkingMutex<SharedMemoryRegistry>>,
+    ) -> Self {
+        Self {
+            instances: Vec::new(),
+            native_funcs: Vec::new(),
+            shared_memory: registry,
+        }
     }
 
     /// Adds instance.
@@ -396,9 +412,9 @@ impl Store {
             .count() as u32
     }
 
-    /// Allocates shared region.
-    pub fn allocate_shared_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
-        self.shared_memory.lock().allocate_region(size, alignment)
+    /// Allocates a shared region without mapping it into any guest memory.
+    pub fn allocate_shared_region(&mut self, size: u32) -> Result<SharedRegionId> {
+        self.shared_memory.lock().allocate_region_standalone(size)
     }
 
     /// Destroys shared region.
@@ -411,135 +427,28 @@ impl Store {
         self.shared_memory.lock().region_len(region_id)
     }
 
-    /// Attaches shared region.
-    pub fn attach_shared_region(
-        &mut self,
-        region_id: SharedRegionId,
-        region_offset: u32,
-        len: u32,
-    ) -> Result<SharedMemoryMapping> {
-        self.shared_memory
-            .lock()
-            .attach_region(region_id, region_offset, len)
-    }
-
-    /// Detaches shared region.
-    pub fn detach_shared_region(&mut self, mapping: SharedMemoryMapping) -> Result<()> {
-        self.shared_memory.lock().detach_region(mapping)
-    }
-
-    /// Reads shared region.
-    pub fn read_shared_region(
-        &self,
-        mapping: SharedMemoryMapping,
-        offset: u32,
-        buf: &mut [u8],
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.read(offset, buf)
-    }
-
-    /// Writes shared region.
+    /// Writes data to a shared region from the host side.
     pub fn write_shared_region(
         &self,
-        mapping: SharedMemoryMapping,
-        offset: u32,
-        buf: &[u8],
+        region_id: SharedRegionId,
+        offset: usize,
+        data: &[u8],
     ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.write(offset, buf)
+        self.shared_memory
+            .lock()
+            .write_to_region(region_id, offset, data)
     }
 
-    /// Reads shared region u8.
-    pub fn read_shared_region_u8(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<u8> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.read_u8(offset)
-    }
-
-    /// Writes shared region u8.
-    pub fn write_shared_region_u8(
+    /// Reads data from a shared region from the host side.
+    pub fn read_shared_region(
         &self,
-        mapping: SharedMemoryMapping,
-        offset: u32,
-        value: u8,
+        region_id: SharedRegionId,
+        offset: usize,
+        buf: &mut [u8],
     ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.write_u8(offset, value)
-    }
-
-    /// Reads shared region i32.
-    pub fn read_shared_region_i32(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<i32> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.read_i32(offset)
-    }
-
-    /// Writes shared region i32.
-    pub fn write_shared_region_i32(
-        &self,
-        mapping: SharedMemoryMapping,
-        offset: u32,
-        value: i32,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.write_i32(offset, value)
-    }
-
-    /// Reads shared region i64.
-    pub fn read_shared_region_i64(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<i64> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.read_i64(offset)
-    }
-
-    /// Writes shared region i64.
-    pub fn write_shared_region_i64(
-        &self,
-        mapping: SharedMemoryMapping,
-        offset: u32,
-        value: i64,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.write_i64(offset, value)
-    }
-
-    /// Reads shared region f32.
-    pub fn read_shared_region_f32(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<f32> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.read_f32(offset)
-    }
-
-    /// Writes shared region f32.
-    pub fn write_shared_region_f32(
-        &self,
-        mapping: SharedMemoryMapping,
-        offset: u32,
-        value: f32,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.write_f32(offset, value)
-    }
-
-    /// Reads shared region f64.
-    pub fn read_shared_region_f64(&self, mapping: SharedMemoryMapping, offset: u32) -> Result<f64> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.read_f64(offset)
-    }
-
-    /// Writes shared region f64.
-    pub fn write_shared_region_f64(
-        &self,
-        mapping: SharedMemoryMapping,
-        offset: u32,
-        value: f64,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping)?;
-        resolved.write_f64(offset, value)
-    }
-
-    fn resolve_shared_memory_mapping(
-        &self,
-        mapping: SharedMemoryMapping,
-    ) -> Result<ResolvedSharedMemoryMapping> {
-        self.shared_memory.lock().resolve_mapping(mapping)
+        self.shared_memory
+            .lock()
+            .read_from_region(region_id, offset, buf)
     }
 }
 
@@ -547,6 +456,11 @@ impl Instance {
     /// Returns the underlying module.
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// Returns the shared memory registry (crate-internal).
+    pub(crate) fn shared_memory_registry(&self) -> Arc<ParkingMutex<SharedMemoryRegistry>> {
+        self.shared_memory.clone()
     }
 
     /// Creates a new `Instance`.
@@ -629,7 +543,7 @@ impl Instance {
             memories: Vec::new(),
             tables: Vec::new(),
             globals: Vec::new(),
-            shared_memory_mappings: HashMap::new(),
+            attached_regions: Vec::new(),
             funcs: Vec::new(),
             exports: HashMap::new(),
             import_bindings: vec![None; import_count],
@@ -1045,9 +959,31 @@ impl Instance {
         self.memories.get(idx as usize)
     }
 
-    /// Allocates shared region.
-    pub fn allocate_shared_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
-        self.shared_memory.lock().allocate_region(size, alignment)
+    /// Allocates a shared region and maps it into this instance's memory.
+    ///
+    /// Returns `(region_id, page_offset)`.
+    pub fn allocate_shared_region(
+        &mut self,
+        size: u32,
+        prot: RegionProt,
+    ) -> Result<(SharedRegionId, u32)> {
+        let memory = self
+            .memories
+            .first()
+            .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?
+            .clone();
+        let mut mem = memory.lock().map_err(poisoned_lock)?;
+        let result = self.shared_memory.lock().allocate_region(&mut mem, size, prot)?;
+        self.attached_regions.push(result.0);
+        Ok(result)
+    }
+
+    /// Allocates a shared region without mapping it into any guest memory.
+    pub fn allocate_shared_region_standalone(
+        &mut self,
+        size: u32,
+    ) -> Result<SharedRegionId> {
+        self.shared_memory.lock().allocate_region_standalone(size)
     }
 
     /// Destroys shared region.
@@ -1060,179 +996,70 @@ impl Instance {
         self.shared_memory.lock().region_len(region_id)
     }
 
-    /// Attaches shared region.
+    /// Attaches an existing shared region to this instance's memory.
+    ///
+    /// Returns the page offset where the region was mapped.
     pub fn attach_shared_region(
         &mut self,
         region_id: SharedRegionId,
-        region_offset: u32,
-        len: u32,
-    ) -> Result<SharedMemoryMappingId> {
-        validate_shared_memory_attachment(
-            self.shared_memory_mappings.values(),
-            region_id,
-            region_offset,
-            len,
-        )?;
-
-        let mapping = self
+        prot: RegionProt,
+        reader_slot: Option<u32>,
+    ) -> Result<u32> {
+        let memory = self
+            .memories
+            .first()
+            .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?
+            .clone();
+        let mut mem = memory.lock().map_err(poisoned_lock)?;
+        let page_offset = self
             .shared_memory
             .lock()
-            .attach_region(region_id, region_offset, len)?;
-        let mapping_id = mapping.mapping_id();
-        self.shared_memory_mappings.insert(mapping_id, mapping);
-        Ok(mapping_id)
+            .attach_region(&mut mem, region_id, prot, reader_slot)?;
+        self.attached_regions.push(region_id);
+        Ok(page_offset)
     }
 
-    /// Attaches shared region whole.
-    pub fn attach_shared_region_whole(
-        &mut self,
-        region_id: SharedRegionId,
-    ) -> Result<SharedMemoryMappingId> {
-        let len = self.shared_region_len(region_id)?;
-        self.attach_shared_region(region_id, 0, len)
-    }
-
-    /// Detaches shared region.
-    pub fn detach_shared_region(&mut self, mapping_id: SharedMemoryMappingId) -> Result<()> {
-        let mapping = *self
-            .shared_memory_mappings
-            .get(&mapping_id)
-            .ok_or_else(|| {
-                WasmError::Runtime(format!(
-                    "shared memory mapping {} is detached or not attached",
-                    mapping_id.raw()
-                ))
-            })?;
-        self.shared_memory.lock().detach_region(mapping)?;
-        self.shared_memory_mappings.remove(&mapping_id);
+    /// Detaches a shared region from this instance's memory.
+    pub fn detach_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
+        if !self.attached_regions.contains(&region_id) {
+            return Err(WasmError::Runtime(format!(
+                "shared region {} is not attached to this instance",
+                region_id.raw()
+            )));
+        }
+        let memory = self
+            .memories
+            .first()
+            .ok_or_else(|| WasmError::Runtime("no memory to detach shared region from".to_string()))?
+            .clone();
+        let mut mem = memory.lock().map_err(poisoned_lock)?;
+        self.shared_memory.lock().detach_region(&mut mem, region_id)?;
+        self.attached_regions.retain(|id| *id != region_id);
         Ok(())
     }
 
-    /// Reads shared region.
-    pub fn read_shared_region(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        buf: &mut [u8],
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read(offset, buf)
-    }
-
-    /// Writes shared region.
+    /// Writes data to a shared region from the host side.
     pub fn write_shared_region(
         &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        buf: &[u8],
+        region_id: SharedRegionId,
+        offset: usize,
+        data: &[u8],
     ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write(offset, buf)
+        self.shared_memory
+            .lock()
+            .write_to_region(region_id, offset, data)
     }
 
-    /// Reads shared region u8.
-    pub fn read_shared_region_u8(
+    /// Reads data from a shared region from the host side.
+    pub fn read_shared_region(
         &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<u8> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_u8(offset)
-    }
-
-    /// Writes shared region u8.
-    pub fn write_shared_region_u8(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: u8,
+        region_id: SharedRegionId,
+        offset: usize,
+        buf: &mut [u8],
     ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_u8(offset, value)
-    }
-
-    /// Reads shared region i32.
-    pub fn read_shared_region_i32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<i32> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_i32(offset)
-    }
-
-    /// Writes shared region i32.
-    pub fn write_shared_region_i32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: i32,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_i32(offset, value)
-    }
-
-    /// Reads shared region i64.
-    pub fn read_shared_region_i64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<i64> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_i64(offset)
-    }
-
-    /// Writes shared region i64.
-    pub fn write_shared_region_i64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: i64,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_i64(offset, value)
-    }
-
-    /// Reads shared region f32.
-    pub fn read_shared_region_f32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<f32> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_f32(offset)
-    }
-
-    /// Writes shared region f32.
-    pub fn write_shared_region_f32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: f32,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_f32(offset, value)
-    }
-
-    /// Reads shared region f64.
-    pub fn read_shared_region_f64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<f64> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_f64(offset)
-    }
-
-    /// Writes shared region f64.
-    pub fn write_shared_region_f64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: f64,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_f64(offset, value)
+        self.shared_memory
+            .lock()
+            .read_from_region(region_id, offset, buf)
     }
 
     /// Returns runtime statistics.
@@ -1604,54 +1431,27 @@ impl Instance {
         })
     }
 
-    fn shared_memory_mapping_or_error(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-    ) -> Result<SharedMemoryMapping> {
-        self.shared_memory_mappings
-            .get(&mapping_id)
-            .copied()
-            .ok_or_else(|| {
-                WasmError::Runtime(format!(
-                    "shared memory mapping {} is detached or not attached",
-                    mapping_id.raw()
-                ))
-            })
+    /// Returns the list of attached region IDs.
+    pub fn attached_regions(&self) -> &[SharedRegionId] {
+        &self.attached_regions
     }
-
-    fn resolve_shared_memory_mapping(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-    ) -> Result<ResolvedSharedMemoryMapping> {
-        let mapping = self.shared_memory_mapping_or_error(mapping_id)?;
-        self.shared_memory.lock().resolve_mapping(mapping)
-    }
-}
-
-fn validate_shared_memory_attachment<'a>(
-    mut mappings: impl Iterator<Item = &'a SharedMemoryMapping>,
-    region_id: SharedRegionId,
-    region_offset: u32,
-    len: u32,
-) -> Result<()> {
-    if mappings.any(|mapping| mapping.overlaps_region_range(region_id, region_offset, len)) {
-        return Err(WasmError::Runtime(
-            "overlapping shared memory attachments are unsupported".to_string(),
-        ));
-    }
-
-    Ok(())
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        if self.shared_memory_mappings.is_empty() {
+        if self.attached_regions.is_empty() {
             return;
         }
 
+        let regions: Vec<SharedRegionId> = self.attached_regions.drain(..).collect();
         let mut shared_memory = self.shared_memory.lock();
-        for mapping in self.shared_memory_mappings.values().copied() {
-            let _ = shared_memory.detach_region(mapping);
+
+        for region_id in regions {
+            if let Some(memory) = self.memories.first() {
+                if let Ok(mut mem) = memory.lock() {
+                    let _ = shared_memory.detach_region(&mut mem, region_id);
+                }
+            }
         }
     }
 }
@@ -1857,6 +1657,7 @@ fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::PAGE_SIZE_BYTES;
     use crate::runtime::{
         Func, GlobalType, Import, Limits, MemoryType, TableType, TrapCode, ValType,
     };
@@ -2252,78 +2053,84 @@ mod tests {
         );
     }
 
+    fn module_with_memory() -> Module {
+        let mut module = Module::new();
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module
+    }
+
     #[test]
     fn test_shared_region_visibility_across_instances() {
+        use crate::memory::RegionProt;
+
         let store = Arc::new(Mutex::new(Store::new()));
-        let module = Arc::new(Module::new());
+        let module = Arc::new(module_with_memory());
         let mut first = Instance::new_with_store(module.clone(), store.clone()).unwrap();
         let mut second = Instance::new_with_store(module, store).unwrap();
 
-        let region_id = first.allocate_shared_region(16, 8).unwrap();
-        let first_mapping = first.attach_shared_region_whole(region_id).unwrap();
-        let second_mapping = second.attach_shared_region(region_id, 0, 16).unwrap();
-
-        first
-            .write_shared_region(first_mapping, 4, &[1, 2, 3, 4])
+        // Allocate region in first instance's memory
+        let (region_id, _first_page_offset) = first
+            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
             .unwrap();
 
+        // Attach to second instance
+        let _second_page_offset = second
+            .attach_shared_region(region_id, RegionProt::ReadWrite, None)
+            .unwrap();
+
+        // Write via host-side API
+        first
+            .write_shared_region(region_id, 4, &[1, 2, 3, 4])
+            .unwrap();
+
+        // Read from second instance via host-side API
         let mut buf = [0u8; 4];
         second
-            .read_shared_region(second_mapping, 4, &mut buf)
+            .read_shared_region(region_id, 4, &mut buf)
             .unwrap();
         assert_eq!(buf, [1, 2, 3, 4]);
 
+        // Write i32 via host-side API
         second
-            .write_shared_region_i32(second_mapping, 0, 99)
+            .write_shared_region(region_id, 0, &99i32.to_le_bytes())
             .unwrap();
-        assert_eq!(first.read_shared_region_i32(first_mapping, 0).unwrap(), 99);
 
-        let mapping = first
-            .shared_memory_mappings
-            .get(&first_mapping)
-            .copied()
+        // Read back from first instance
+        let mut i32_buf = [0u8; 4];
+        first
+            .read_shared_region(region_id, 0, &mut i32_buf)
             .unwrap();
-        assert_eq!(mapping.region_id(), region_id);
-        assert_eq!(mapping.len(), 16);
+        assert_eq!(i32::from_le_bytes(i32_buf), 99);
     }
 
     #[test]
     fn test_shared_region_detach_destroy_and_invalid_access_failures() {
-        let module = Arc::new(Module::new());
+        use crate::memory::RegionProt;
+
+        let module = Arc::new(module_with_memory());
         let mut instance = Instance::new(module).unwrap();
 
-        let region_id = instance.allocate_shared_region(16, 4).unwrap();
-        let mapping_id = instance.attach_shared_region(region_id, 0, 8).unwrap();
+        let (region_id, _page_offset) = instance
+            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+            .unwrap();
 
-        let overlap = instance.attach_shared_region(region_id, 4, 8).unwrap_err();
-        assert!(matches!(
-            overlap,
-            WasmError::Runtime(message)
-                if message.contains("overlapping shared memory attachments")
-        ));
-
-        let out_of_bounds = instance
-            .write_shared_region(mapping_id, 8, &[1])
-            .unwrap_err();
-        assert_eq!(out_of_bounds, WasmError::Trap(TrapCode::MemoryOutOfBounds));
-
+        // Destroy while attached should fail
         let destroy_while_attached = instance.destroy_shared_region(region_id).unwrap_err();
         assert!(matches!(
             destroy_while_attached,
-            WasmError::Runtime(message) if message.contains("attached mappings")
+            WasmError::Runtime(message) if message.contains("attached")
         ));
 
-        instance.detach_shared_region(mapping_id).unwrap();
+        // Detach
+        instance.detach_shared_region(region_id).unwrap();
 
-        let detached_access = instance.read_shared_region_u8(mapping_id, 0).unwrap_err();
-        assert!(matches!(
-            detached_access,
-            WasmError::Runtime(message) if message.contains("detached or not attached")
-        ));
-
+        // Destroy after detach should succeed
         instance.destroy_shared_region(region_id).unwrap();
 
-        let missing_region = instance.attach_shared_region_whole(region_id).unwrap_err();
+        // Attach destroyed region should fail
+        let missing_region = instance
+            .attach_shared_region(region_id, RegionProt::ReadWrite, None)
+            .unwrap_err();
         assert!(matches!(
             missing_region,
             WasmError::Runtime(message) if message.contains("shared region")
@@ -2331,91 +2138,373 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_region_alignment_is_enforced() {
+    fn test_shared_region_standalone_allocation() {
         let mut store = Store::new();
-        let region_id = store.allocate_shared_region(16, 8).unwrap();
+        let region_id = store.allocate_shared_region(PAGE_SIZE_BYTES).unwrap();
 
-        let misaligned_attach = store.attach_shared_region(region_id, 4, 8).unwrap_err();
-        assert!(matches!(
-            misaligned_attach,
-            WasmError::Runtime(message) if message.contains("attachment offset")
-        ));
+        // Write and read via store
+        store.write_shared_region(region_id, 0, &17i32.to_le_bytes()).unwrap();
+        store.write_shared_region(region_id, 4, &23i32.to_le_bytes()).unwrap();
 
-        let mapping = store.attach_shared_region(region_id, 8, 8).unwrap();
-        store.write_shared_region_i32(mapping, 0, 17).unwrap();
-        store.write_shared_region_i32(mapping, 4, 23).unwrap();
-        assert_eq!(
-            store.read_shared_region_i64(mapping, 0).unwrap(),
-            23i64 << 32 | 17i64
-        );
+        let mut buf = [0u8; 8];
+        store.read_shared_region(region_id, 0, &mut buf).unwrap();
+        let val0 = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let val1 = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        assert_eq!(val0, 17);
+        assert_eq!(val1, 23);
     }
 
     #[test]
     fn test_store_shared_region_access_after_detach_fails() {
-        let mut store = Store::new();
-        let region_id = store.allocate_shared_region(8, 4).unwrap();
-        let mapping = store.attach_shared_region(region_id, 0, 8).unwrap();
+        use crate::memory::RegionProt;
 
-        store.write_shared_region_u8(mapping, 0, 5).unwrap();
-        store.detach_shared_region(mapping).unwrap();
+        let store = Arc::new(Mutex::new(Store::new()));
+        let module = Arc::new(module_with_memory());
+        let mut instance = Instance::new_with_store(module, store.clone()).unwrap();
 
-        let detached_read = store.read_shared_region_u8(mapping, 0).unwrap_err();
-        assert!(matches!(
-            detached_read,
-            WasmError::Runtime(message) if message.contains("detached or not attached")
-        ));
+        let region_id = store.lock().unwrap().allocate_shared_region(PAGE_SIZE_BYTES).unwrap();
+        let _page_offset = instance
+            .attach_shared_region(region_id, RegionProt::ReadWrite, None)
+            .unwrap();
 
-        let detached_write = store.write_shared_region_u8(mapping, 0, 9).unwrap_err();
-        assert!(matches!(
-            detached_write,
-            WasmError::Runtime(message) if message.contains("detached or not attached")
-        ));
-    }
+        instance.write_shared_region(region_id, 0, &[5]).unwrap();
+        instance.detach_shared_region(region_id).unwrap();
 
-    #[test]
-    fn test_store_shared_region_double_detach_rejected_while_other_mapping_stays_live() {
-        let mut store = Store::new();
-        let region_id = store.allocate_shared_region(8, 4).unwrap();
-        let first = store.attach_shared_region(region_id, 0, 8).unwrap();
-        let second = store.attach_shared_region(region_id, 0, 8).unwrap();
-
-        store.write_shared_region_u8(second, 0, 11).unwrap();
-        store.detach_shared_region(first).unwrap();
-
-        let double_detach = store.detach_shared_region(first).unwrap_err();
-        assert!(matches!(
-            double_detach,
-            WasmError::Runtime(message) if message.contains("already detached")
-        ));
-
-        let destroy_while_live = store.destroy_shared_region(region_id).unwrap_err();
-        assert!(matches!(
-            destroy_while_live,
-            WasmError::Runtime(message) if message.contains("attached mappings")
-        ));
-
-        assert_eq!(store.read_shared_region_u8(second, 0).unwrap(), 11);
-
-        store.detach_shared_region(second).unwrap();
-        store.destroy_shared_region(region_id).unwrap();
+        // After detach, the region still exists in the store but is not mapped
+        // in this instance. Host-side read/write still works via the store.
+        let mut buf = [0u8; 1];
+        store.lock().unwrap().read_shared_region(region_id, 0, &mut buf).unwrap();
+        assert_eq!(buf[0], 5);
     }
 
     #[test]
     fn test_instance_drop_detaches_shared_regions() {
+        use crate::memory::RegionProt;
+
         let store = Arc::new(Mutex::new(Store::new()));
-        let module = Arc::new(Module::new());
+        let module = Arc::new(module_with_memory());
 
         let region_id = {
             let mut instance = Instance::new_with_store(module, store.clone()).unwrap();
-            let region_id = instance.allocate_shared_region(8, 4).unwrap();
-            let _mapping = instance.attach_shared_region_whole(region_id).unwrap();
+            let (region_id, _page_offset) = instance
+                .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+                .unwrap();
             region_id
         };
 
+        // After instance drop, the region should have no attachments
         store
             .lock()
             .unwrap()
             .destroy_shared_region(region_id)
             .unwrap();
+    }
+
+    #[test]
+    fn test_reader_slot_write_protection() {
+        use crate::memory::RegionProt;
+
+        let store = Arc::new(Mutex::new(Store::new()));
+        let module = Arc::new(module_with_memory());
+        let mut instance = Instance::new_with_store(module, store.clone()).unwrap();
+
+        // Allocate a 2-page shared region standalone
+        let region_id = store
+            .lock()
+            .unwrap()
+            .allocate_shared_region(2 * PAGE_SIZE_BYTES)
+            .unwrap();
+
+        // Attach with ReadOnly protection and reader_slot = 1
+        // This means page 1 is writable, page 0 is read-only
+        let page_offset = instance
+            .attach_shared_region(region_id, RegionProt::ReadOnly, Some(1))
+            .unwrap();
+
+        // Get the memory to test writes
+        let memory = instance.memory(0).unwrap().clone();
+        let mut mem = memory.lock().unwrap();
+
+        // Calculate byte offsets
+        let page0_offset = page_offset * PAGE_SIZE_BYTES;
+        let page1_offset = (page_offset + 1) * PAGE_SIZE_BYTES;
+
+        // Writing to page 1 (reader_slot) should succeed
+        mem.write_u32(page1_offset, 0xDEAD_BEEF).unwrap();
+        assert_eq!(mem.read_u32(page1_offset).unwrap(), 0xDEAD_BEEF);
+
+        // Writing to page 0 (read-only) should fail with MemoryOutOfBounds
+        let result = mem.write_u32(page0_offset, 0xCAFEBABE);
+        assert!(matches!(
+            result,
+            Err(WasmError::Trap(TrapCode::MemoryOutOfBounds))
+        ));
+
+        // Reading from page 0 should still work (PROT_READ)
+        assert_eq!(mem.read_u32(page0_offset).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_snapshot_shared_regions() {
+        use crate::memory::RegionProt;
+        use crate::runtime::snapshot::{capture_snapshot, restore_snapshot};
+
+        let store = Arc::new(Mutex::new(Store::new()));
+        let module = Arc::new(module_with_memory());
+        let mut instance = Instance::new_with_store(module.clone(), store.clone()).unwrap();
+
+        // Allocate and attach a shared region
+        let (region_id, page_offset) = instance
+            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+            .unwrap();
+
+        // Write to owned memory
+        {
+            let memory = instance.memory(0).unwrap().clone();
+            let mut mem = memory.lock().unwrap();
+            mem.write_u32(0, 0x0000_0001).unwrap();
+        }
+
+        // Write to shared memory via host-side API
+        instance
+            .write_shared_region(region_id, 0, &0x0000_0002u32.to_le_bytes())
+            .unwrap();
+
+        // Capture snapshot
+        let snapshot = capture_snapshot(&instance, None).unwrap();
+
+        // Verify snapshot contains owned memory data
+        assert_eq!(snapshot.memory_snapshots.len(), 1);
+        let mem_snapshot = &snapshot.memory_snapshots[0];
+        assert_eq!(mem_snapshot.data.len(), PAGE_SIZE_BYTES as usize);
+
+        // Verify owned data is in snapshot
+        let owned_val = u32::from_le_bytes([
+            mem_snapshot.data[0],
+            mem_snapshot.data[1],
+            mem_snapshot.data[2],
+            mem_snapshot.data[3],
+        ]);
+        assert_eq!(owned_val, 0x0000_0001);
+
+        // Verify shared_mappings is recorded
+        assert_eq!(mem_snapshot.shared_mappings.len(), 1);
+        assert_eq!(mem_snapshot.shared_mappings[0].0, page_offset);
+        assert_eq!(mem_snapshot.shared_mappings[0].1, region_id.raw());
+
+        // Create a new instance and restore the snapshot
+        let mut instance2 = Instance::new_with_store(module.clone(), store.clone()).unwrap();
+        let _suspended = restore_snapshot(&snapshot, module.clone(), &mut instance2).unwrap();
+
+        // Verify owned data is restored
+        {
+            let memory = instance2.memory(0).unwrap().clone();
+            let mem = memory.lock().unwrap();
+            assert_eq!(mem.read_u32(0).unwrap(), 0x0000_0001);
+        }
+
+        // Verify shared region is re-attached: data readable via guest memory.
+        // The snapshot records the original page_offset, but restore computes a
+        // fresh one via map_shared_region. Look up the actual offset on instance2.
+        {
+            let memory = instance2.memory(0).unwrap().clone();
+            let mem = memory.lock().unwrap();
+            let actual_page_offset = mem
+                .shared_ranges()
+                .iter()
+                .find(|r| r.region_id == region_id)
+                .map(|r| r.page_offset)
+                .expect("shared region should be re-attached after restore");
+            let shared_byte_offset = actual_page_offset * PAGE_SIZE_BYTES;
+            let val = mem.read_u32(shared_byte_offset).unwrap();
+            assert_eq!(val, 0x0000_0002,
+                "shared data should be accessible via guest memory after restore");
+        }
+
+        // Also verify through host-side API
+        let mut buf = [0u8; 4];
+        instance2
+            .read_shared_region(region_id, 0, &mut buf)
+            .unwrap();
+        let shared_val = u32::from_le_bytes(buf);
+        assert_eq!(shared_val, 0x0000_0002);
+    }
+
+    #[test]
+    fn test_cross_instance_wait_notify() {
+        use crate::memory::RegionProt;
+        use std::thread;
+        use std::time::Duration;
+
+        let store = Arc::new(Mutex::new(Store::new()));
+        let module = Arc::new(module_with_memory());
+
+        // Create two instances sharing the same store
+        let mut instance1 = Instance::new_with_store(module.clone(), store.clone()).unwrap();
+        let mut instance2 = Instance::new_with_store(module.clone(), store.clone()).unwrap();
+
+        // Allocate a shared region from instance1
+        let (region_id, page_offset) = instance1
+            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+            .unwrap();
+
+        // Attach the same region to instance2
+        let _page_offset2 = instance2
+            .attach_shared_region(region_id, RegionProt::ReadWrite, None)
+            .unwrap();
+
+        // Calculate the byte address in the shared region
+        let shared_addr = page_offset * PAGE_SIZE_BYTES;
+
+        // Write an initial value to the shared memory
+        instance1
+            .write_shared_region(region_id, 0, &42i32.to_le_bytes())
+            .unwrap();
+
+        // Spawn a thread that will notify after a short delay
+        let notify_handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+
+            // Use instance2 which has the shared region attached
+            let memory = instance2.memory(0).unwrap().clone();
+            let mem = memory.lock().unwrap();
+            mem.notify(shared_addr, 1).unwrap();
+        });
+
+        // Wait on the shared address (should be woken by the notify)
+        let result = instance1.wait32(shared_addr, 42, 1000).unwrap();
+
+        // Result should be 0 (woken) not 2 (timeout)
+        assert_eq!(result, 0, "wait32 should have been woken by notify");
+
+        notify_handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_concurrent_writers_with_backoff() {
+        use crate::memory::RegionProt;
+        use std::sync::atomic::{AtomicI32, Ordering};
+        use std::thread;
+
+        let store = Arc::new(Mutex::new(Store::new()));
+        let module = Arc::new(module_with_memory());
+
+        // Create two instances sharing the same store
+        let mut instance1 = Instance::new_with_store(module.clone(), store.clone()).unwrap();
+        let mut instance2 = Instance::new_with_store(module, store.clone()).unwrap();
+
+        // Allocate a shared region
+        let (region_id, _page_offset) = instance1
+            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+            .unwrap();
+
+        // Attach to instance2
+        instance2
+            .attach_shared_region(region_id, RegionProt::ReadWrite, None)
+            .unwrap();
+
+        // Initialize counter to 0
+        instance1
+            .write_shared_region(region_id, 0, &0i32.to_le_bytes())
+            .unwrap();
+
+        let iterations = 100;
+        let counter = Arc::new(AtomicI32::new(0));
+
+        // Spawn two threads that increment the counter with exponential backoff
+        let counter1 = counter.clone();
+        let store1 = store.clone();
+        let handle1 = thread::spawn(move || {
+            let module = Arc::new(module_with_memory());
+            let instance = Instance::new_with_store(module, store1).unwrap();
+
+            for _ in 0..iterations {
+                let mut backoff = 1;
+                loop {
+                    // Read current value
+                    let mut buf = [0u8; 4];
+                    instance
+                        .read_shared_region(region_id, 0, &mut buf)
+                        .unwrap();
+                    let current = i32::from_le_bytes(buf);
+
+                    // Try to increment with CAS
+                    let new_val = current + 1;
+                    if counter1
+                        .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        // Write back to shared memory
+                        instance
+                            .write_shared_region(region_id, 0, &new_val.to_le_bytes())
+                            .unwrap();
+                        break;
+                    }
+
+                    // Exponential backoff
+                    thread::sleep(std::time::Duration::from_micros(backoff));
+                    backoff = (backoff * 2).min(1000);
+                }
+            }
+        });
+
+        let counter2 = counter.clone();
+        let store2 = store.clone();
+        let handle2 = thread::spawn(move || {
+            let module = Arc::new(module_with_memory());
+            let instance = Instance::new_with_store(module, store2).unwrap();
+
+            for _ in 0..iterations {
+                let mut backoff = 1;
+                loop {
+                    // Read current value
+                    let mut buf = [0u8; 4];
+                    instance
+                        .read_shared_region(region_id, 0, &mut buf)
+                        .unwrap();
+                    let current = i32::from_le_bytes(buf);
+
+                    // Try to increment with CAS
+                    let new_val = current + 1;
+                    if counter2
+                        .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        // Write back to shared memory
+                        instance
+                            .write_shared_region(region_id, 0, &new_val.to_le_bytes())
+                            .unwrap();
+                        break;
+                    }
+
+                    // Exponential backoff
+                    thread::sleep(std::time::Duration::from_micros(backoff));
+                    backoff = (backoff * 2).min(1000);
+                }
+            }
+        });
+
+        handle1.join().unwrap();
+        handle2.join().unwrap();
+
+        // Verify final counter value
+        let final_val = counter.load(Ordering::SeqCst);
+        assert_eq!(
+            final_val,
+            iterations * 2,
+            "Counter should be incremented {} times by each thread",
+            iterations
+        );
+
+        // Verify shared memory matches
+        let mut buf = [0u8; 4];
+        instance1
+            .read_shared_region(region_id, 0, &mut buf)
+            .unwrap();
+        let shared_val = i32::from_le_bytes(buf);
+        assert_eq!(
+            shared_val, final_val,
+            "Shared memory should match atomic counter"
+        );
     }
 }

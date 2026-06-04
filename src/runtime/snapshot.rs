@@ -49,8 +49,10 @@ pub struct MemorySnapshot {
     pub index: u32,
     /// Declared type of the captured memory.
     pub memory_type: MemoryType,
-    /// Raw linear-memory bytes.
+    /// Raw owned linear-memory bytes (excludes shared pages).
     pub data: Vec<u8>,
+    /// Shared region mappings to re-attach on restore: (page_offset, region_id).
+    pub shared_mappings: Vec<(u32, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,11 +284,19 @@ pub fn capture_snapshot(
             .lock()
             .map_err(|_| SnapshotError::InvalidSnapshot("failed to lock memory".to_string()))?;
         let memory_type = mem.type_().clone();
+        // Only copy owned pages (not shared region data)
         let data = mem.data().to_vec();
+        // Record shared mappings for re-attachment on restore
+        let shared_mappings: Vec<(u32, u64)> = mem
+            .shared_ranges()
+            .iter()
+            .map(|r| (r.page_offset, r.region_id.raw()))
+            .collect();
         memory_snapshots.push(MemorySnapshot {
             index: idx as u32,
             memory_type,
             data,
+            shared_mappings,
         });
     }
 
@@ -377,7 +387,7 @@ pub fn restore_snapshot(
             .lock()
             .map_err(|_| SnapshotError::InvalidSnapshot("failed to lock memory".to_string()))?;
 
-        let target_bytes = mem.size() as usize * 65536;
+        let target_bytes = mem.owned_len_bytes();
         if target_bytes < memory_snapshot.data.len() {
             return Err(SnapshotError::InvalidSnapshot(
                 "target memory is too small for snapshot data".to_string(),
@@ -391,6 +401,43 @@ pub fn restore_snapshot(
         }
 
         mem.data_mut().copy_from_slice(&memory_snapshot.data);
+
+        // Re-attach shared regions by ID.
+        // If a referenced region no longer exists, restore fails.
+        for &(_page_offset, region_id_raw) in &memory_snapshot.shared_mappings {
+            let region_id = crate::runtime::SharedRegionId::from_raw(region_id_raw);
+
+            // Check if the region still exists in the registry
+            let region = target_instance
+                .shared_memory_registry()
+                .lock()
+                .get_region(region_id)
+                .map_err(|_| {
+                    SnapshotError::InvalidSnapshot(format!(
+                        "shared region {} no longer exists, cannot re-attach",
+                        region_id_raw
+                    ))
+                })?;
+
+            // Re-attach the region at the same page offset
+            // Note: We use ReadWrite protection for restored regions.
+            // The original protection level is not stored in the snapshot.
+            let _actual_offset = mem
+                .map_shared_region(
+                    region.fd(),
+                    region.len(),
+                    region_id,
+                    crate::memory::RegionProt::ReadWrite,
+                    None,
+                    region.waiters_arc(),
+                )
+                .map_err(|e| {
+                    SnapshotError::InvalidSnapshot(format!(
+                        "failed to re-attach shared region {}: {}",
+                        region_id_raw, e
+                    ))
+                })?;
+        }
     }
 
     for global_snapshot in &snapshot.global_snapshots {

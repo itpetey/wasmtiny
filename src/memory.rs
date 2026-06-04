@@ -6,6 +6,12 @@
 //! WebAssembly memories are defined by their page count, where each page is 64 KiB.
 //! The runtime supports both minimum and maximum page limits.
 //!
+//! # Memory Backing
+//!
+//! Guest linear memory is backed by `mmap` with a pre-reserved virtual address range
+//! spanning the maximum allowed pages. Growth is achieved via `mprotect` rather than
+//! reallocation, avoiding pointer invalidation.
+//!
 //! # Memory Operations
 //!
 //! - Create: `Memory::new(memory_type)`
@@ -13,18 +19,51 @@
 //! - Write: `memory.write(offset, data)`
 //! - Grow: `memory.grow(pages)`
 
-use crate::runtime::{InstanceMeter, MemoryType, Result, TrapCode, WasmError};
+use crate::runtime::SharedWaiter;
+use crate::runtime::{InstanceMeter, MemoryType, Result, SharedRegionId, TrapCode, WasmError};
 use parking_lot::{Condvar, Mutex, RwLock};
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 /// Constant `PAGE_SIZE_BYTES`.
 pub const PAGE_SIZE_BYTES: u32 = 65536;
-const MAX_PAGES: u32 = 65536;
+/// Maximum number of pages (65536 pages = 4 GiB).
+pub const MAX_PAGES: u32 = 65536;
+
+/// Protection level for a shared memory region mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionProt {
+    /// Read and write access.
+    ReadWrite,
+    /// Read-only access.
+    ReadOnly,
+}
+
+/// A shared page range mapped into guest linear memory.
+#[derive(Debug, Clone)]
+pub struct SharedRange {
+    /// Offset in guest pages where this shared range starts.
+    pub page_offset: u32,
+    /// The shared region this range maps from.
+    pub region_id: SharedRegionId,
+    /// Length in bytes.
+    pub len: u32,
+    /// Protection level.
+    pub prot: RegionProt,
+    /// Which page within the range is writable by this consumer (if any).
+    pub reader_slot: Option<u32>,
+    /// Shared waiters for atomic wait/notify on addresses within this range.
+    /// This is a reference to the SharedRegion's waiters map.
+    pub(crate) waiters: Arc<RwLock<HashMap<u32, Arc<SharedWaiter>>>>,
+}
 
 /// WebAssembly linear memory.
 ///
 /// A linear memory is a contiguous array of bytes that can be read from and
 /// written to by WebAssembly code. Memory grows in units of 64 KiB pages.
+///
+/// Memory is backed by `mmap` with a pre-reserved virtual address range.
+/// Growth uses `mprotect` to extend the accessible range without reallocation.
 ///
 /// # Example
 ///
@@ -38,19 +77,112 @@ const MAX_PAGES: u32 = 65536;
 /// mem.grow(1).unwrap();
 /// assert_eq!(mem.size(), 2);
 /// ```
-#[derive(Debug, Clone)]
-/// Memory.
+///
+/// # Safety
+///
+/// The `Memory` struct manages `mmap`'d memory. It is `Send` but not `Sync`
+/// (it is always accessed through `Arc<Mutex<Memory>>` in the runtime).
 pub struct Memory {
     mem_type: MemoryType,
-    data: Vec<u8>,
+    /// Base pointer of the mmap'd region.
+    ptr: *mut u8,
+    /// Current valid length in bytes (owned pages only).
+    len: usize,
+    /// Total reserved virtual address range in bytes.
+    capacity: usize,
+    /// Shared page ranges mapped into this memory.
+    shared_ranges: Vec<SharedRange>,
     meters: Vec<Weak<InstanceMeter>>,
     waiters: Arc<RwLock<std::collections::HashMap<u32, Arc<Waiter>>>>,
+}
+
+// SAFETY: Memory manages an mmap'd region that is not aliased.
+// Access is synchronised via the Mutex wrapper in the runtime.
+unsafe impl Send for Memory {}
+
+impl std::fmt::Debug for Memory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Memory")
+            .field("mem_type", &self.mem_type)
+            .field("len", &self.len)
+            .field("capacity", &self.capacity)
+            .field("shared_ranges", &self.shared_ranges.len())
+            .finish()
+    }
+}
+
+impl Clone for Memory {
+    fn clone(&self) -> Self {
+        let new_mem = Memory::try_new(self.mem_type.clone())
+            .expect("cloned memory allocation should succeed");
+
+        // Grow to match the current size
+        let current_pages = self.size();
+        let mut result = new_mem;
+        if current_pages > result.size() {
+            let delta = current_pages - result.size();
+            result.grow(delta).expect("cloned memory grow should succeed");
+        }
+
+        // Copy owned page data
+        if self.len > 0 {
+            // SAFETY: both pointers are valid for self.len bytes and non-overlapping
+            // (they are separate mmap allocations).
+            unsafe {
+                std::ptr::copy_nonoverlapping(self.ptr, result.ptr, self.len);
+            }
+        }
+
+        // Copy shared range metadata (not the actual mappings — those need re-attach)
+        result.shared_ranges = self.shared_ranges.clone();
+        result.meters = self.meters.clone();
+        result
+    }
 }
 
 #[derive(Debug)]
 struct Waiter {
     notified: Mutex<bool>,
     condvar: Condvar,
+}
+
+/// Perform an mmap allocation for the full virtual address range.
+fn mmap_reserve(capacity: usize) -> std::result::Result<*mut u8, WasmError> {
+    // SAFETY: We're reserving virtual address space with PROT_NONE.
+    // This is a standard pattern for pre-reserving VA ranges.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            capacity,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        return Err(WasmError::Instantiate(format!(
+            "mmap failed to reserve {} bytes of virtual address space",
+            capacity
+        )));
+    }
+    Ok(ptr as *mut u8)
+}
+
+/// Make a range of memory accessible with the given protection.
+fn mprotect_range(ptr: *mut u8, len: usize, prot: i32) -> std::result::Result<(), WasmError> {
+    if len == 0 {
+        return Ok(());
+    }
+    // SAFETY: ptr must point to a valid mmap'd region of at least `len` bytes.
+    let ret = unsafe { libc::mprotect(ptr as *mut libc::c_void, len, prot) };
+    if ret != 0 {
+        return Err(WasmError::Runtime(format!(
+            "mprotect failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 impl Memory {
@@ -69,25 +201,51 @@ impl Memory {
             )));
         }
 
-        let byte_len = usize::try_from(min_pages)
-            .ok()
-            .and_then(|pages| pages.checked_mul(PAGE_SIZE_BYTES as usize))
+        let max_pages = mem_type
+            .limits
+            .max()
+            .unwrap_or(MAX_PAGES)
+            .min(MAX_PAGES)
+            .max(min_pages); // Ensure capacity >= min_pages
+
+        let capacity = if max_pages == 0 {
+            // Zero-page memory: still need a valid pointer, use 1 page as minimum capacity
+            PAGE_SIZE_BYTES as usize
+        } else {
+            (max_pages as usize)
+                .checked_mul(PAGE_SIZE_BYTES as usize)
+                .ok_or_else(|| {
+                    WasmError::Instantiate("memory capacity overflow during allocation".to_string())
+                })?
+        };
+
+        let initial_bytes = (min_pages as usize)
+            .checked_mul(PAGE_SIZE_BYTES as usize)
             .ok_or_else(|| {
                 WasmError::Instantiate("memory size overflow during allocation".to_string())
             })?;
 
-        let mut data = Vec::new();
-        data.try_reserve_exact(byte_len).map_err(|_| {
-            WasmError::Instantiate(format!(
-                "unable to reserve {} bytes for linear memory",
-                byte_len
-            ))
-        })?;
-        data.resize(byte_len, 0);
+        // Reserve the full VA range with PROT_NONE
+        let ptr = mmap_reserve(capacity)?;
+
+        // Make initial pages accessible
+        if initial_bytes > 0 {
+            if let Err(e) = mprotect_range(ptr, initial_bytes, libc::PROT_READ | libc::PROT_WRITE)
+            {
+                // Clean up on failure
+                unsafe {
+                    libc::munmap(ptr as *mut libc::c_void, capacity);
+                }
+                return Err(e);
+            }
+        }
 
         Ok(Self {
             mem_type,
-            data,
+            ptr,
+            len: initial_bytes,
+            capacity,
+            shared_ranges: Vec::new(),
             meters: Vec::new(),
             waiters: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
@@ -96,6 +254,44 @@ impl Memory {
     /// Blocks the current thread waiting for the address to be notified.
     /// Returns true if woken, false if timeout.
     pub(crate) fn wait_on(&self, address: u32, timeout_ns: u64) -> bool {
+        // Check if address falls in a shared range
+        if let Some((range, region_offset)) = self.find_shared_range(address) {
+            // Delegate to shared waiters
+            let waiter = {
+                let mut waiters = range.waiters.write();
+                waiters
+                    .entry(region_offset)
+                    .or_insert_with(|| {
+                        Arc::new(SharedWaiter {
+                            notified: Mutex::new(false),
+                            condvar: Condvar::new(),
+                        })
+                    })
+                    .clone()
+            };
+
+            if timeout_ns == 0 {
+                return false;
+            }
+
+            let mut notified = waiter.notified.lock();
+            if *notified {
+                *notified = false;
+                return true;
+            }
+
+            let timeout = std::time::Duration::from_nanos(timeout_ns);
+            let result = waiter.condvar.wait_for(&mut notified, timeout);
+
+            return if result.timed_out() {
+                false
+            } else {
+                *notified = false;
+                true
+            };
+        }
+
+        // Use local waiters for owned memory
         let waiter = {
             let mut waiters = self.waiters.write();
             waiters
@@ -133,10 +329,31 @@ impl Memory {
     /// Notifies waiters at the given address.
     /// Returns the number of waiters notified.
     pub fn notify(&self, address: u32, n: u32) -> Result<u32> {
-        if address as usize + 4 > self.data.len() {
+        let total_len = self.len_bytes();
+        if (address as usize) + 4 > total_len {
             return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
         }
 
+        // Check if address falls in a shared range
+        if let Some((range, region_offset)) = self.find_shared_range(address) {
+            // Delegate to shared waiters
+            let waiters = range.waiters.read();
+            let Some(waiter) = waiters.get(&region_offset) else {
+                return Ok(0);
+            };
+
+            let mut notified = 0;
+            for _ in 0..n {
+                let mut flag = waiter.notified.lock();
+                *flag = true;
+                waiter.condvar.notify_one();
+                notified += 1;
+            }
+
+            return Ok(notified);
+        }
+
+        // Use local waiters for owned memory
         let waiters = self.waiters.read();
         let Some(waiter) = waiters.get(&address) else {
             return Ok(0);
@@ -155,6 +372,19 @@ impl Memory {
 
     /// Returns a waiter reference for the given address (for atomic wait).
     pub(crate) fn get_waiter(&self, address: u32) {
+        // Check if address falls in a shared range
+        if let Some((range, region_offset)) = self.find_shared_range(address) {
+            let mut waiters = range.waiters.write();
+            waiters.entry(region_offset).or_insert_with(|| {
+                Arc::new(SharedWaiter {
+                    notified: Mutex::new(false),
+                    condvar: Condvar::new(),
+                })
+            });
+            return;
+        }
+
+        // Use local waiters for owned memory
         let mut waiters = self.waiters.write();
         waiters.entry(address).or_insert_with(|| {
             Arc::new(Waiter {
@@ -164,9 +394,9 @@ impl Memory {
         });
     }
 
-    /// Returns the size.
+    /// Returns the size in pages (owned pages only).
     pub fn size(&self) -> u32 {
-        (self.data.len() / PAGE_SIZE_BYTES as usize) as u32
+        (self.len / PAGE_SIZE_BYTES as usize) as u32
     }
 
     /// Returns the declared type information.
@@ -174,7 +404,9 @@ impl Memory {
         &self.mem_type
     }
 
-    /// Grows the underlying resource by the requested delta.
+    /// Grows the underlying resource by the requested number of pages.
+    ///
+    /// Uses `mprotect` to extend the accessible range — no reallocation needed.
     pub fn grow(&mut self, delta: u32) -> Result<u32> {
         let old_size = self.size();
         let new_size = old_size.saturating_add(delta);
@@ -198,46 +430,154 @@ impl Memory {
             ));
         }
 
-        let new_byte_len = (new_size * PAGE_SIZE_BYTES) as usize;
-        self.data.resize(new_byte_len, 0);
+        let old_byte_len = self.len;
+        let new_byte_len = (new_size as usize) * PAGE_SIZE_BYTES as usize;
+
+        // mprotect the new range to make it accessible
+        if new_byte_len > old_byte_len {
+            let extra = new_byte_len - old_byte_len;
+            // SAFETY: ptr + old_byte_len is within the reserved VA range
+            let new_range_ptr = unsafe { self.ptr.add(old_byte_len) };
+            mprotect_range(new_range_ptr, extra, libc::PROT_READ | libc::PROT_WRITE)?;
+        }
+
+        self.len = new_byte_len;
         Ok(old_size)
+    }
+
+    /// Returns the total length in bytes including owned and shared pages.
+    pub fn len_bytes(&self) -> usize {
+        let owned = self.len;
+        let shared_end = self
+            .shared_ranges
+            .iter()
+            .map(|r| (r.page_offset as usize) * PAGE_SIZE_BYTES as usize + r.len as usize)
+            .max()
+            .unwrap_or(0);
+        owned.max(shared_end)
+    }
+
+    /// Returns the owned-page length in bytes.
+    pub fn owned_len_bytes(&self) -> usize {
+        self.len
+    }
+
+    /// Returns a const pointer to the base of the memory.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Returns a mutable pointer to the base of the memory.
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr
+    }
+
+    /// Returns the total reserved capacity in bytes.
+    pub fn capacity_bytes(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns a pointer at the given byte offset, bounds-checked against
+    /// the total memory size (owned + shared).
+    fn ptr_at(&self, offset: u32, access_len: usize) -> Result<*const u8> {
+        let total = self.len_bytes();
+        if access_len == 0 {
+            if offset as usize > total {
+                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+            }
+            // SAFETY: offset is within bounds
+            return Ok(unsafe { self.ptr.add(offset as usize) });
+        }
+        let end = (offset as usize)
+            .checked_add(access_len)
+            .ok_or(WasmError::Trap(TrapCode::MemoryOutOfBounds))?;
+        if end > total {
+            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        }
+        // SAFETY: offset is within bounds
+        Ok(unsafe { self.ptr.add(offset as usize) })
+    }
+
+    /// Returns a mutable pointer at the given byte offset, bounds-checked.
+    fn ptr_at_mut(&mut self, offset: u32, access_len: usize) -> Result<*mut u8> {
+        let total = self.len_bytes();
+        if access_len == 0 {
+            if offset as usize > total {
+                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+            }
+            return Ok(unsafe { self.ptr.add(offset as usize) });
+        }
+        let end = (offset as usize)
+            .checked_add(access_len)
+            .ok_or(WasmError::Trap(TrapCode::MemoryOutOfBounds))?;
+        if end > total {
+            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        }
+        Ok(unsafe { self.ptr.add(offset as usize) })
+    }
+
+    /// Checks that no byte in [offset, offset+len) falls in a read-only shared range.
+    pub fn check_writable(&self, offset: u32, len: usize) -> Result<()> {
+        if self.shared_ranges.is_empty() {
+            return Ok(());
+        }
+        let access_start = offset as u64;
+        let access_end = access_start + len as u64;
+
+        for range in &self.shared_ranges {
+            if range.prot != RegionProt::ReadOnly {
+                continue;
+            }
+            let range_start = (range.page_offset as u64) * PAGE_SIZE_BYTES as u64;
+            let range_end = range_start + range.len as u64;
+
+            // Check for overlap
+            if access_start < range_end && range_start < access_end {
+                // There is an overlap with a read-only range.
+                // But if the overlap is entirely within the reader_slot page, allow it.
+                if let Some(slot) = range.reader_slot {
+                    let slot_start =
+                        range_start + (slot as u64) * PAGE_SIZE_BYTES as u64;
+                    let slot_end = slot_start + PAGE_SIZE_BYTES as u64;
+                    if access_start >= slot_start && access_end <= slot_end {
+                        continue;
+                    }
+                }
+                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+            }
+        }
+        Ok(())
     }
 
     /// Reads bytes from the underlying resource.
     pub fn read(&self, offset: u32, buf: &mut [u8]) -> Result<()> {
-        let offset = offset as usize;
+        let ptr = self.ptr_at(offset, buf.len())?;
         if buf.is_empty() {
-            if offset > self.data.len() {
-                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
-            }
             return Ok(());
         }
-        if offset >= self.data.len() {
-            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        // SAFETY: ptr_at has bounds-checked the access.
+        // The source is valid for buf.len() bytes and the pointers don't overlap
+        // (buf is a separate allocation).
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), buf.len());
         }
-        if offset + buf.len() > self.data.len() {
-            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
-        }
-        buf.copy_from_slice(&self.data[offset..offset + buf.len()]);
         Ok(())
     }
 
     /// Writes bytes to the underlying resource.
     pub fn write(&mut self, offset: u32, buf: &[u8]) -> Result<()> {
-        let offset = offset as usize;
         if buf.is_empty() {
-            if offset > self.data.len() {
-                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
-            }
+            // Still bounds-check the offset
+            let _ = self.ptr_at(offset, 0)?;
             return Ok(());
         }
-        if offset >= self.data.len() {
-            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        self.check_writable(offset, buf.len())?;
+        let ptr = self.ptr_at_mut(offset, buf.len())?;
+        // SAFETY: ptr_at_mut has bounds-checked the access.
+        // check_writable verified no read-only overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, buf.len());
         }
-        if offset + buf.len() > self.data.len() {
-            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
-        }
-        self.data[offset..offset + buf.len()].copy_from_slice(buf);
         Ok(())
     }
 
@@ -317,24 +657,222 @@ impl Memory {
         self.write_u64(offset, val.to_bits())
     }
 
-    /// Returns a mutable pointer to the underlying buffer.
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.data.as_mut_ptr()
-    }
-
-    /// Returns the length of the underlying buffer in bytes.
-    pub fn len_bytes(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Returns the underlying data slice.
+    /// Returns the underlying data as a byte slice (owned pages only).
+    ///
+    /// # Safety
+    ///
+    /// The returned slice covers only owned pages. Shared page data is accessible
+    /// at higher offsets but is not included in this slice.
     pub fn data(&self) -> &[u8] {
-        &self.data
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: ptr is valid for self.len bytes (owned pages are PROT_READ | PROT_WRITE).
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
-    /// Returns the underlying data slice mutably.
+    /// Returns the underlying data as a mutable byte slice (owned pages only).
     pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.data[..]
+        if self.len == 0 {
+            return &mut [];
+        }
+        // SAFETY: ptr is valid for self.len bytes and we have exclusive access.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    /// Returns a reference to the shared ranges.
+    pub fn shared_ranges(&self) -> &[SharedRange] {
+        &self.shared_ranges
+    }
+
+    /// Finds the shared range containing the given byte offset, if any.
+    /// Returns the shared range and the byte offset within the region.
+    pub(crate) fn find_shared_range(&self, offset: u32) -> Option<(&SharedRange, u32)> {
+        let page_size = PAGE_SIZE_BYTES;
+        for range in &self.shared_ranges {
+            let range_start = range.page_offset * page_size;
+            let range_end = range_start + range.len;
+            if offset >= range_start && offset < range_end {
+                let region_offset = offset - range_start;
+                return Some((range, region_offset));
+            }
+        }
+        None
+    }
+
+    /// Maps shared pages into the guest address space at the next available offset.
+    ///
+    /// Uses `mmap(MAP_FIXED | MAP_SHARED, region_fd, 0)` to map the same
+    /// physical pages that back the [`SharedRegion`] into this guest's
+    /// reserved virtual address range. Writes through any attached guest are
+    /// immediately visible to all other guests attached to the same region.
+    ///
+    /// Returns the page offset where the shared region was mapped.
+    pub(crate) fn map_shared_region(
+        &mut self,
+        region_fd: i32,
+        region_len: usize,
+        region_id: SharedRegionId,
+        prot: RegionProt,
+        reader_slot: Option<u32>,
+        waiters: Arc<RwLock<HashMap<u32, Arc<SharedWaiter>>>>,
+    ) -> Result<u32> {
+        let page_size = PAGE_SIZE_BYTES as usize;
+
+        // Validate reader_slot before doing any mapping work.
+        if let Some(slot) = reader_slot {
+            let slot_byte_end = (slot as usize + 1) * page_size;
+            if slot_byte_end > region_len {
+                return Err(WasmError::Runtime(format!(
+                    "reader_slot {} (byte range [{}, {})) is out of range \
+                     for shared region of {} bytes",
+                    slot,
+                    slot as usize * page_size,
+                    slot_byte_end,
+                    region_len,
+                )));
+            }
+        }
+
+        // Find the next available page offset above owned pages and any
+        // previously-mapped shared ranges.
+        let owned_pages = self.size();
+        let shared_end_page = self
+            .shared_ranges
+            .iter()
+            .map(|r| {
+                let end_byte =
+                    (r.page_offset as usize) * page_size + r.len as usize;
+                ((end_byte + page_size - 1) / page_size) as u32
+            })
+            .max()
+            .unwrap_or(owned_pages);
+        let page_offset = shared_end_page.max(owned_pages);
+
+        let target_byte_offset = (page_offset as usize) * page_size;
+        let target_ptr = unsafe { self.ptr.add(target_byte_offset) };
+
+        // Check that the target range fits within the pre-reserved capacity.
+        let end_byte = target_byte_offset + region_len;
+        if end_byte > self.capacity {
+            return Err(WasmError::Runtime(
+                "insufficient virtual address space for shared region mapping".to_string(),
+            ));
+        }
+
+        // Map the shared region's physical pages into the guest's address
+        // space. MAP_FIXED replaces the PROT_NONE reservation at this range
+        // with the shared mapping. MAP_SHARED ensures writes are visible to
+        // all other mappings of the same fd.
+        //
+        // SAFETY: target_ptr points into our pre-reserved VA range and
+        // region_len bytes are available. region_fd is a valid shm_open fd
+        // whose backing object is at least region_len bytes.
+        let mapped = unsafe {
+            libc::mmap(
+                target_ptr as *mut libc::c_void,
+                region_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_FIXED | libc::MAP_SHARED,
+                region_fd,
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            return Err(WasmError::Runtime(format!(
+                "mmap(MAP_FIXED | MAP_SHARED) failed for shared region: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Apply per-page protection for reader_slot or read-only mapping.
+        if let Some(slot) = reader_slot {
+            if prot == RegionProt::ReadOnly {
+                // Make all pages read-only first, then punch a writable hole
+                // at the reader's cursor page.
+                mprotect_range(target_ptr, region_len, libc::PROT_READ)?;
+                let slot_offset = (slot as usize) * page_size;
+                let slot_ptr = unsafe { target_ptr.add(slot_offset) };
+                mprotect_range(slot_ptr, page_size, libc::PROT_READ | libc::PROT_WRITE)?;
+            }
+        } else if prot == RegionProt::ReadOnly {
+            mprotect_range(target_ptr, region_len, libc::PROT_READ)?;
+        }
+
+        // Record the mapping.
+        self.shared_ranges.push(SharedRange {
+            page_offset,
+            region_id,
+            len: region_len as u32,
+            prot,
+            reader_slot,
+            waiters,
+        });
+
+        Ok(page_offset)
+    }
+
+    /// Unmaps shared pages from the guest address space for the given region.
+    ///
+    /// Calls `munmap` to release the shared mapping, then re-establishes the
+    /// `PROT_NONE` virtual address reservation so the range remains reserved
+    /// (but inaccessible) in the guest's address space.
+    pub(crate) fn unmap_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
+        let page_size = PAGE_SIZE_BYTES as usize;
+
+        // Find the range to unmap.
+        let range = self
+            .shared_ranges
+            .iter()
+            .find(|r| r.region_id == region_id)
+            .cloned()
+            .ok_or_else(|| {
+                WasmError::Runtime(format!(
+                    "shared region {} not mapped in this memory",
+                    region_id.raw()
+                ))
+            })?;
+
+        let byte_offset = (range.page_offset as usize) * page_size;
+        let target_ptr = unsafe { self.ptr.add(byte_offset) };
+        let region_len = range.len as usize;
+
+        // Unmap the shared pages. This removes the MAP_SHARED mapping so the
+        // guest can no longer access the shared region's physical pages.
+        // SAFETY: target_ptr was previously mapped via mmap(MAP_FIXED) with
+        // region_len bytes.
+        if unsafe { libc::munmap(target_ptr as *mut libc::c_void, region_len) } != 0 {
+            return Err(WasmError::Runtime(format!(
+                "munmap failed for shared region: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Re-establish the PROT_NONE reservation so the VA range stays
+        // reserved (but inaccessible) in the guest's address space.
+        // SAFETY: target_ptr is within our pre-reserved VA range and
+        // region_len bytes are available (the munmap above freed them).
+        let restored = unsafe {
+            libc::mmap(
+                target_ptr as *mut libc::c_void,
+                region_len,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+        if restored == libc::MAP_FAILED {
+            return Err(WasmError::Runtime(format!(
+                "mmap(PROT_NONE) failed to restore VA reservation after unmap: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Remove from tracking.
+        self.shared_ranges.retain(|r| r.region_id != region_id);
+
+        Ok(())
     }
 
     pub(crate) fn attach_meter(&mut self, meter: &Arc<InstanceMeter>) {
@@ -353,6 +891,17 @@ impl Memory {
 
     fn prune_meters(&mut self) {
         self.meters.retain(|meter| meter.strong_count() > 0);
+    }
+}
+
+impl Drop for Memory {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.capacity > 0 {
+            // SAFETY: ptr was allocated via mmap with self.capacity bytes.
+            unsafe {
+                libc::munmap(self.ptr as *mut libc::c_void, self.capacity);
+            }
+        }
     }
 }
 
@@ -398,5 +947,42 @@ mod tests {
 
         mem.read(65536, &mut empty).unwrap();
         mem.write(65536, &[]).unwrap();
+    }
+
+    #[test]
+    fn test_memory_mmap_backed() {
+        let mem = Memory::new(MemoryType::new(Limits::Min(1)));
+        // Verify the pointer is non-null and capacity is set
+        assert!(!mem.as_ptr().is_null());
+        assert!(mem.capacity_bytes() >= PAGE_SIZE_BYTES as usize);
+    }
+
+    #[test]
+    fn test_memory_grow_extends_accessible_range() {
+        let mut mem = Memory::new(MemoryType::new(Limits::Min(1)));
+        assert_eq!(mem.size(), 1);
+        assert_eq!(mem.owned_len_bytes(), PAGE_SIZE_BYTES as usize);
+
+        mem.grow(2).unwrap();
+        assert_eq!(mem.size(), 3);
+        assert_eq!(mem.owned_len_bytes(), 3 * PAGE_SIZE_BYTES as usize);
+
+        // Should be able to read/write in the grown region
+        mem.write_u32(PAGE_SIZE_BYTES + 100, 0xDEAD_BEEF).unwrap();
+        assert_eq!(mem.read_u32(PAGE_SIZE_BYTES + 100).unwrap(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn test_memory_clone_deep_copy() {
+        let mut mem = Memory::new(MemoryType::new(Limits::Min(1)));
+        mem.write_i32(0, 42).unwrap();
+
+        let mut cloned = mem.clone();
+        assert_eq!(cloned.read_i32(0).unwrap(), 42);
+
+        // Modifying the clone should not affect the original
+        cloned.write_i32(0, 99).unwrap();
+        assert_eq!(mem.read_i32(0).unwrap(), 42);
+        assert_eq!(cloned.read_i32(0).unwrap(), 99);
     }
 }

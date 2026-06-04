@@ -2602,7 +2602,9 @@ impl Interpreter {
                 .ok_or_else(|| WasmError::Runtime("no memory".to_string()))?
         };
         let mut memory = memory.lock().map_err(poisoned_lock)?;
-        f(&mut memory)
+        // Wrap memory writes with signal handler to catch SIGSEGV from
+        // writes to read-only shared pages and translate to WASM traps.
+        crate::signal_handler::with_trap_handler(|| f(&mut memory))
     }
 
     fn read_memory_u8(&self, address: u32) -> Result<u8> {

@@ -48,6 +48,8 @@ pub mod loader;
 pub mod memory;
 /// Runtime-related APIs.
 pub mod runtime;
+/// SIGSEGV signal handler for translating page faults to WASM traps.
+pub mod signal_handler;
 
 pub use application::WasmApplication;
 pub use interpreter::SafepointConfig;
@@ -66,8 +68,7 @@ pub use runtime::Module;
 pub use runtime::NumType;
 pub use runtime::RefType;
 pub use runtime::RuntimeSuspender;
-pub use runtime::SharedMemoryMapping;
-pub use runtime::SharedMemoryMappingId;
+pub use memory::RegionProt;
 pub use runtime::SharedRegionId;
 pub use runtime::SuspendedHandle;
 pub use runtime::SuspensionError;

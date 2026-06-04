@@ -16,14 +16,15 @@
 //! ```
 
 use crate::aot_runtime::runtime::{AotExport, AotRuntime};
+use crate::memory::RegionProt;
 use crate::runtime::{
     Extern, FunctionType, Global, GuestFuncBinding, HostFunc, Import, InstanceLimits,
-    InstanceStats, Memory, Result, SharedMemoryMappingId, SharedRegionId, SharedTable, Table,
-    WasmError, WasmValue,
+    InstanceStats, Memory, Result, SharedRegionId, SharedTable, Store, Table, WasmError,
+    WasmValue,
 };
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "llvm-jit")]
 use crate::jit::{LlvmJit, set_execution_context};
@@ -115,6 +116,18 @@ impl WasmApplication {
     pub fn new() -> Self {
         Self {
             runtime: AotRuntime::new(),
+            #[cfg(feature = "llvm-jit")]
+            llvm_jits: HashMap::new(),
+            #[cfg(feature = "llvm-jit")]
+            execution_mode: ExecutionMode::Interpreter,
+        }
+    }
+
+    /// Creates a `WasmApplication` backed by the given store, sharing its
+    /// `SharedMemoryRegistry` with all modules loaded through this application.
+    pub fn with_store(store: Arc<Mutex<Store>>) -> Self {
+        Self {
+            runtime: AotRuntime::with_store(store),
             #[cfg(feature = "llvm-jit")]
             llvm_jits: HashMap::new(),
             #[cfg(feature = "llvm-jit")]
@@ -516,18 +529,33 @@ impl WasmApplication {
         module.register_import(import_module, name, Extern::Table(table))
     }
 
-    /// Allocates shared region.
+    /// Allocates a shared region and maps it into the module's memory.
+    ///
+    /// Returns `(region_id, page_offset)`.
     pub fn allocate_shared_region(
         &mut self,
         module_idx: u32,
         size: u32,
-        alignment: u32,
+        prot: RegionProt,
+    ) -> Result<(SharedRegionId, u32)> {
+        let module = self
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        module.allocate_shared_region(size, prot)
+    }
+
+    /// Allocates a shared region without mapping it into any guest memory.
+    pub fn allocate_shared_region_standalone(
+        &mut self,
+        module_idx: u32,
+        size: u32,
     ) -> Result<SharedRegionId> {
         let module = self
             .runtime
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.allocate_shared_region(size, alignment)
+        module.allocate_shared_region_standalone(size)
     }
 
     /// Destroys shared region.
@@ -552,220 +580,64 @@ impl WasmApplication {
         module.shared_region_len(region_id)
     }
 
-    /// Attaches shared region.
+    /// Attaches an existing shared region to the module's memory.
+    ///
+    /// Returns the page offset where the region was mapped.
     pub fn attach_shared_region(
         &mut self,
         module_idx: u32,
         region_id: SharedRegionId,
-        region_offset: u32,
-        len: u32,
-    ) -> Result<SharedMemoryMappingId> {
+        prot: RegionProt,
+        reader_slot: Option<u32>,
+    ) -> Result<u32> {
         let module = self
             .runtime
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.attach_shared_region(region_id, region_offset, len)
+        module.attach_shared_region(region_id, prot, reader_slot)
     }
 
-    /// Attaches shared region whole.
-    pub fn attach_shared_region_whole(
-        &mut self,
-        module_idx: u32,
-        region_id: SharedRegionId,
-    ) -> Result<SharedMemoryMappingId> {
-        let module = self
-            .runtime
-            .get_module_mut(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.attach_shared_region_whole(region_id)
-    }
-
-    /// Detaches shared region.
+    /// Detaches a shared region from the module's memory.
     pub fn detach_shared_region(
         &mut self,
         module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
+        region_id: SharedRegionId,
     ) -> Result<()> {
         let module = self
             .runtime
             .get_module_mut(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.detach_shared_region(mapping_id)
+        module.detach_shared_region(region_id)
     }
 
-    /// Reads shared region.
+    /// Writes data to a shared region from the host side.
+    pub fn write_shared_region(
+        &self,
+        module_idx: u32,
+        region_id: SharedRegionId,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<()> {
+        let module = self
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
+        module.write_shared_region(region_id, offset, data)
+    }
+
+    /// Reads data from a shared region from the host side.
     pub fn read_shared_region(
         &self,
         module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
+        region_id: SharedRegionId,
+        offset: usize,
         buf: &mut [u8],
     ) -> Result<()> {
         let module = self
             .runtime
             .get_module(module_idx)
             .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.read_shared_region(mapping_id, offset, buf)
-    }
-
-    /// Writes shared region.
-    pub fn write_shared_region(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        buf: &[u8],
-    ) -> Result<()> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.write_shared_region(mapping_id, offset, buf)
-    }
-
-    /// Reads shared region u8.
-    pub fn read_shared_region_u8(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<u8> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.read_shared_region_u8(mapping_id, offset)
-    }
-
-    /// Writes shared region u8.
-    pub fn write_shared_region_u8(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: u8,
-    ) -> Result<()> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.write_shared_region_u8(mapping_id, offset, value)
-    }
-
-    /// Reads shared region i32.
-    pub fn read_shared_region_i32(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<i32> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.read_shared_region_i32(mapping_id, offset)
-    }
-
-    /// Writes shared region i32.
-    pub fn write_shared_region_i32(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: i32,
-    ) -> Result<()> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.write_shared_region_i32(mapping_id, offset, value)
-    }
-
-    /// Reads shared region i64.
-    pub fn read_shared_region_i64(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<i64> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.read_shared_region_i64(mapping_id, offset)
-    }
-
-    /// Writes shared region i64.
-    pub fn write_shared_region_i64(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: i64,
-    ) -> Result<()> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.write_shared_region_i64(mapping_id, offset, value)
-    }
-
-    /// Reads shared region f32.
-    pub fn read_shared_region_f32(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<f32> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.read_shared_region_f32(mapping_id, offset)
-    }
-
-    /// Writes shared region f32.
-    pub fn write_shared_region_f32(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: f32,
-    ) -> Result<()> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.write_shared_region_f32(mapping_id, offset, value)
-    }
-
-    /// Reads shared region f64.
-    pub fn read_shared_region_f64(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<f64> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.read_shared_region_f64(mapping_id, offset)
-    }
-
-    /// Writes shared region f64.
-    pub fn write_shared_region_f64(
-        &self,
-        module_idx: u32,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: f64,
-    ) -> Result<()> {
-        let module = self
-            .runtime
-            .get_module(module_idx)
-            .ok_or_else(|| WasmError::Runtime(format!("module {} not found", module_idx)))?;
-        module.write_shared_region_f64(mapping_id, offset, value)
+        module.read_shared_region(region_id, offset, buf)
     }
 
     /// Calls function.
@@ -977,21 +849,29 @@ mod tests {
 
     #[test]
     fn test_shared_region_application_wrappers() {
+        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+
         let mut app = WasmApplication::new();
-        let wasm_data = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+        // Minimal wasm module with a memory (1 page min)
+        let wasm_data = wat::parse_str("(module (memory 1))").unwrap();
 
         let idx = app.load_module_from_memory(&wasm_data).unwrap();
-        let region_id = app.allocate_shared_region(idx, 16, 8).unwrap();
-        let mapping_id = app.attach_shared_region_whole(idx, region_id).unwrap();
+        app.instantiate(idx).unwrap();
+        let (region_id, _page_offset) = app
+            .allocate_shared_region(idx, PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+            .unwrap();
 
-        app.write_shared_region_i32(idx, mapping_id, 0, 41).unwrap();
-        app.write_shared_region_i32(idx, mapping_id, 4, 59).unwrap();
-        assert_eq!(
-            app.read_shared_region_i64(idx, mapping_id, 0).unwrap(),
-            59i64 << 32 | 41i64
-        );
+        app.write_shared_region(idx, region_id, 0, &41i32.to_le_bytes()).unwrap();
+        app.write_shared_region(idx, region_id, 4, &59i32.to_le_bytes()).unwrap();
 
-        app.detach_shared_region(idx, mapping_id).unwrap();
+        let mut buf = [0u8; 8];
+        app.read_shared_region(idx, region_id, 0, &mut buf).unwrap();
+        let val0 = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let val1 = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        assert_eq!(val0, 41);
+        assert_eq!(val1, 59);
+
+        app.detach_shared_region(idx, region_id).unwrap();
         app.destroy_shared_region(idx, region_id).unwrap();
     }
 

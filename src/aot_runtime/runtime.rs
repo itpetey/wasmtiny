@@ -1,10 +1,10 @@
 use super::loader::AotLoader;
 use crate::interpreter::Interpreter;
+use crate::memory::RegionProt;
 use crate::runtime::{
     Extern, FunctionType, Global, HostCallOutcome, HostCaller, HostFunc, ImportKind, Instance,
-    InstanceLimits, InstanceMeter, InstanceStats, Memory, Module, ResolvedSharedMemoryMapping,
-    Result, SharedMemoryMapping, SharedMemoryMappingId, SharedMemoryRegistry, SharedRegionId,
-    SharedTable, Table, WasmError, WasmValue,
+    InstanceLimits, InstanceMeter, InstanceStats, Memory, Module, Result, SharedMemoryRegistry,
+    SharedRegionId, SharedTable, Table, WasmError, WasmValue,
 };
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
@@ -66,7 +66,7 @@ pub struct AotModule {
     pub tables: Vec<SharedTable>,
     /// Defined globals owned by the module.
     pub globals: Vec<Global>,
-    shared_memory_mappings: HashMap<SharedMemoryMappingId, SharedMemoryMapping>,
+    attached_regions: Vec<SharedRegionId>,
     /// Export map keyed by export name.
     pub exports: HashMap<String, AotExport>,
 }
@@ -152,7 +152,7 @@ impl AotModule {
             memories: Vec::new(),
             tables: Vec::new(),
             globals: Vec::new(),
-            shared_memory_mappings: HashMap::new(),
+            attached_regions: Vec::new(),
             exports: HashMap::new(),
         };
         aot_module.initialise_defined_allocations();
@@ -467,10 +467,31 @@ impl AotModule {
         }
     }
 
-    /// Allocates shared region.
-    pub fn allocate_shared_region(&mut self, size: u32, alignment: u32) -> Result<SharedRegionId> {
+    /// Allocates a shared region and maps it into this module's memory.
+    ///
+    /// Returns `(region_id, page_offset)`.
+    pub fn allocate_shared_region(
+        &mut self,
+        size: u32,
+        prot: RegionProt,
+    ) -> Result<(SharedRegionId, u32)> {
         self.ensure_jit_inactive_for_external_mutation()?;
-        self.shared_memory.lock().allocate_region(size, alignment)
+        let memory = self
+            .memories
+            .first_mut()
+            .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?;
+        let result = self.shared_memory.lock().allocate_region(memory, size, prot)?;
+        self.attached_regions.push(result.0);
+        Ok(result)
+    }
+
+    /// Allocates a shared region without mapping it into any guest memory.
+    pub fn allocate_shared_region_standalone(
+        &mut self,
+        size: u32,
+    ) -> Result<SharedRegionId> {
+        self.ensure_jit_inactive_for_external_mutation()?;
+        self.shared_memory.lock().allocate_region_standalone(size)
     }
 
     /// Destroys shared region.
@@ -484,181 +505,68 @@ impl AotModule {
         self.shared_memory.lock().region_len(region_id)
     }
 
-    /// Attaches shared region.
+    /// Attaches an existing shared region to this module's memory.
+    ///
+    /// Returns the page offset where the region was mapped.
     pub fn attach_shared_region(
         &mut self,
         region_id: SharedRegionId,
-        region_offset: u32,
-        len: u32,
-    ) -> Result<SharedMemoryMappingId> {
+        prot: RegionProt,
+        reader_slot: Option<u32>,
+    ) -> Result<u32> {
         self.ensure_jit_inactive_for_external_mutation()?;
-        validate_shared_memory_attachment(
-            self.shared_memory_mappings.values(),
-            region_id,
-            region_offset,
-            len,
-        )?;
-
-        let mapping = self
+        let memory = self
+            .memories
+            .first_mut()
+            .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?;
+        let page_offset = self
             .shared_memory
             .lock()
-            .attach_region(region_id, region_offset, len)?;
-        let mapping_id = mapping.mapping_id();
-        self.shared_memory_mappings.insert(mapping_id, mapping);
-        Ok(mapping_id)
+            .attach_region(memory, region_id, prot, reader_slot)?;
+        self.attached_regions.push(region_id);
+        Ok(page_offset)
     }
 
-    /// Attaches shared region whole.
-    pub fn attach_shared_region_whole(
-        &mut self,
-        region_id: SharedRegionId,
-    ) -> Result<SharedMemoryMappingId> {
-        let len = self.shared_region_len(region_id)?;
-        self.attach_shared_region(region_id, 0, len)
-    }
-
-    /// Detaches shared region.
-    pub fn detach_shared_region(&mut self, mapping_id: SharedMemoryMappingId) -> Result<()> {
+    /// Detaches a shared region from this module's memory.
+    pub fn detach_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
         self.ensure_jit_inactive_for_external_mutation()?;
-        let mapping = *self
-            .shared_memory_mappings
-            .get(&mapping_id)
-            .ok_or_else(|| {
-                WasmError::Runtime(format!(
-                    "shared memory mapping {} is detached or not attached",
-                    mapping_id.raw()
-                ))
-            })?;
-        self.shared_memory.lock().detach_region(mapping)?;
-        self.shared_memory_mappings.remove(&mapping_id);
+        if !self.attached_regions.contains(&region_id) {
+            return Err(WasmError::Runtime(format!(
+                "shared region {} is not attached to this module",
+                region_id.raw()
+            )));
+        }
+        let memory = self
+            .memories
+            .first_mut()
+            .ok_or_else(|| WasmError::Runtime("no memory to detach shared region from".to_string()))?;
+        self.shared_memory.lock().detach_region(memory, region_id)?;
+        self.attached_regions.retain(|id| *id != region_id);
         Ok(())
     }
 
-    /// Reads shared region.
-    pub fn read_shared_region(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        buf: &mut [u8],
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read(offset, buf)
-    }
-
-    /// Writes shared region.
+    /// Writes data to a shared region from the host side.
     pub fn write_shared_region(
         &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        buf: &[u8],
+        region_id: SharedRegionId,
+        offset: usize,
+        data: &[u8],
     ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write(offset, buf)
+        self.shared_memory
+            .lock()
+            .write_to_region(region_id, offset, data)
     }
 
-    /// Reads shared region u8.
-    pub fn read_shared_region_u8(
+    /// Reads data from a shared region from the host side.
+    pub fn read_shared_region(
         &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<u8> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_u8(offset)
-    }
-
-    /// Writes shared region u8.
-    pub fn write_shared_region_u8(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: u8,
+        region_id: SharedRegionId,
+        offset: usize,
+        buf: &mut [u8],
     ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_u8(offset, value)
-    }
-
-    /// Reads shared region i32.
-    pub fn read_shared_region_i32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<i32> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_i32(offset)
-    }
-
-    /// Writes shared region i32.
-    pub fn write_shared_region_i32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: i32,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_i32(offset, value)
-    }
-
-    /// Reads shared region i64.
-    pub fn read_shared_region_i64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<i64> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_i64(offset)
-    }
-
-    /// Writes shared region i64.
-    pub fn write_shared_region_i64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: i64,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_i64(offset, value)
-    }
-
-    /// Reads shared region f32.
-    pub fn read_shared_region_f32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<f32> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_f32(offset)
-    }
-
-    /// Writes shared region f32.
-    pub fn write_shared_region_f32(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: f32,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_f32(offset, value)
-    }
-
-    /// Reads shared region f64.
-    pub fn read_shared_region_f64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-    ) -> Result<f64> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.read_f64(offset)
-    }
-
-    /// Writes shared region f64.
-    pub fn write_shared_region_f64(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-        offset: u32,
-        value: f64,
-    ) -> Result<()> {
-        let resolved = self.resolve_shared_memory_mapping(mapping_id)?;
-        resolved.write_f64(offset, value)
+        self.shared_memory
+            .lock()
+            .read_from_region(region_id, offset, buf)
     }
 
     /// Returns or updates memory context.
@@ -1138,29 +1046,6 @@ impl AotModule {
         Ok(())
     }
 
-    fn shared_memory_mapping_or_error(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-    ) -> Result<SharedMemoryMapping> {
-        self.shared_memory_mappings
-            .get(&mapping_id)
-            .copied()
-            .ok_or_else(|| {
-                WasmError::Runtime(format!(
-                    "shared memory mapping {} is detached or not attached",
-                    mapping_id.raw()
-                ))
-            })
-    }
-
-    fn resolve_shared_memory_mapping(
-        &self,
-        mapping_id: SharedMemoryMappingId,
-    ) -> Result<ResolvedSharedMemoryMapping> {
-        let mapping = self.shared_memory_mapping_or_error(mapping_id)?;
-        self.shared_memory.lock().resolve_mapping(mapping)
-    }
-
     fn validate_import_binding(
         &self,
         import_idx: usize,
@@ -1278,13 +1163,17 @@ impl Drop for AotModule {
             panic!("dropping an AOT module with an active JIT execution context is unsupported");
         }
 
-        if self.shared_memory_mappings.is_empty() {
+        if self.attached_regions.is_empty() {
             return;
         }
 
+        let regions: Vec<SharedRegionId> = self.attached_regions.drain(..).collect();
         let mut shared_memory = self.shared_memory.lock();
-        for mapping in self.shared_memory_mappings.values().copied() {
-            let _ = shared_memory.detach_region(mapping);
+
+        for region_id in regions {
+            if let Some(memory) = self.memories.first_mut() {
+                let _ = shared_memory.detach_region(memory, region_id);
+            }
         }
     }
 }
@@ -1302,6 +1191,15 @@ impl AotRuntime {
         let shared_store = Arc::new(Mutex::new(crate::runtime::Store::new()));
         Self {
             loader: AotLoader::with_store(shared_store),
+            modules: Vec::new(),
+        }
+    }
+
+    /// Creates an `AotRuntime` backed by the given store, sharing its
+    /// `SharedMemoryRegistry` with all modules loaded through this runtime.
+    pub fn with_store(store: Arc<Mutex<crate::runtime::Store>>) -> Self {
+        Self {
+            loader: AotLoader::with_store(store),
             modules: Vec::new(),
         }
     }
@@ -1636,20 +1534,7 @@ fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryTyp
         }
 }
 
-fn validate_shared_memory_attachment<'a>(
-    mut mappings: impl Iterator<Item = &'a SharedMemoryMapping>,
-    region_id: SharedRegionId,
-    region_offset: u32,
-    len: u32,
-) -> Result<()> {
-    if mappings.any(|mapping| mapping.overlaps_region_range(region_id, region_offset, len)) {
-        return Err(WasmError::Runtime(
-            "overlapping shared memory attachments are unsupported".to_string(),
-        ));
-    }
 
-    Ok(())
-}
 
 /// Creates aot module from wasm.
 pub fn create_aot_module_from_wasm(module: &Module) -> AotModule {
@@ -2140,13 +2025,24 @@ mod tests {
         assert_eq!(runtime.get_global_value(0, 0).unwrap(), WasmValue::I32(7));
     }
 
+    fn module_with_memory() -> Module {
+        let mut module = Module::new();
+        module.memories.push(crate::runtime::MemoryType::new(
+            crate::runtime::Limits::Min(1),
+        ));
+        module
+    }
+
     #[test]
     fn test_aot_module_drop_detaches_shared_regions() {
+        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+
         let (shared_memory, region_id) = {
-            let mut module = AotModule::from_module(&Module::new());
+            let mut module = AotModule::from_module(&module_with_memory());
             let shared_memory = module.shared_memory.clone();
-            let region_id = module.allocate_shared_region(8, 4).unwrap();
-            let _mapping = module.attach_shared_region_whole(region_id).unwrap();
+            let (region_id, _page_offset) = module
+                .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+                .unwrap();
             (shared_memory, region_id)
         };
 
@@ -2155,61 +2051,72 @@ mod tests {
 
     #[test]
     fn test_aot_shared_region_access_detach_and_alignment_failures() {
-        let mut module = AotModule::from_module(&Module::new());
-        let region_id = module.allocate_shared_region(16, 8).unwrap();
+        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
 
-        let misaligned_attach = module.attach_shared_region(region_id, 4, 8).unwrap_err();
-        assert!(matches!(
-            misaligned_attach,
-            WasmError::Runtime(message) if message.contains("attachment offset")
-        ));
+        let mut module = AotModule::from_module(&module_with_memory());
+        let (region_id, _page_offset) = module
+            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+            .unwrap();
 
-        let mapping_id = module.attach_shared_region(region_id, 8, 8).unwrap();
-        module.write_shared_region_i32(mapping_id, 0, 21).unwrap();
-        module.write_shared_region_i32(mapping_id, 4, 31).unwrap();
-        assert_eq!(module.read_shared_region_i32(mapping_id, 0).unwrap(), 21);
-        assert_eq!(
-            module.read_shared_region_i64(mapping_id, 0).unwrap(),
-            31i64 << 32 | 21i64
-        );
+        // Write and read via host-side API
+        module.write_shared_region(region_id, 0, &21i32.to_le_bytes()).unwrap();
+        module.write_shared_region(region_id, 4, &31i32.to_le_bytes()).unwrap();
 
-        module.detach_shared_region(mapping_id).unwrap();
-        let detached_read = module.read_shared_region_i32(mapping_id, 0).unwrap_err();
-        assert!(matches!(
-            detached_read,
-            WasmError::Runtime(message) if message.contains("detached or not attached")
-        ));
+        let mut buf = [0u8; 4];
+        module.read_shared_region(region_id, 0, &mut buf).unwrap();
+        assert_eq!(i32::from_le_bytes(buf), 21);
+
+        let mut buf8 = [0u8; 8];
+        module.read_shared_region(region_id, 0, &mut buf8).unwrap();
+        let val0 = i32::from_le_bytes([buf8[0], buf8[1], buf8[2], buf8[3]]);
+        let val1 = i32::from_le_bytes([buf8[4], buf8[5], buf8[6], buf8[7]]);
+        assert_eq!(val0, 21);
+        assert_eq!(val1, 31);
+
+        module.detach_shared_region(region_id).unwrap();
+
+        // After detach, host-side access to the region still works (region exists)
+        let mut buf = [0u8; 4];
+        module.read_shared_region(region_id, 0, &mut buf).unwrap();
+        assert_eq!(i32::from_le_bytes(buf), 21);
 
         module.destroy_shared_region(region_id).unwrap();
     }
 
     #[test]
     fn test_aot_shared_region_visibility_across_modules() {
+        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+
         let store = Arc::new(Mutex::new(crate::runtime::Store::new()));
-        let mut first = AotModule::from_module_with_store(&Module::new(), store.clone()).unwrap();
-        let mut second = AotModule::from_module_with_store(&Module::new(), store).unwrap();
+        let mut first =
+            AotModule::from_module_with_store(&module_with_memory(), store.clone()).unwrap();
+        let mut second =
+            AotModule::from_module_with_store(&module_with_memory(), store).unwrap();
 
-        let region_id = first.allocate_shared_region(16, 4).unwrap();
-        let first_mapping = first.attach_shared_region_whole(region_id).unwrap();
-        let second_mapping = second.attach_shared_region(region_id, 0, 16).unwrap();
+        let (region_id, _first_page_offset) = first
+            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
+            .unwrap();
+        let _second_page_offset = second
+            .attach_shared_region(region_id, RegionProt::ReadWrite, None)
+            .unwrap();
 
-        first.write_shared_region_i32(first_mapping, 0, 33).unwrap();
-        assert_eq!(
-            second.read_shared_region_i32(second_mapping, 0).unwrap(),
-            33
-        );
+        first.write_shared_region(region_id, 0, &33i32.to_le_bytes()).unwrap();
+
+        let mut buf = [0u8; 4];
+        second.read_shared_region(region_id, 0, &mut buf).unwrap();
+        assert_eq!(i32::from_le_bytes(buf), 33);
 
         second
-            .write_shared_region(second_mapping, 4, &[1, 2, 3, 4])
+            .write_shared_region(region_id, 4, &[1, 2, 3, 4])
             .unwrap();
         let mut buf = [0u8; 4];
         first
-            .read_shared_region(first_mapping, 4, &mut buf)
+            .read_shared_region(region_id, 4, &mut buf)
             .unwrap();
         assert_eq!(buf, [1, 2, 3, 4]);
 
-        first.detach_shared_region(first_mapping).unwrap();
-        second.detach_shared_region(second_mapping).unwrap();
+        first.detach_shared_region(region_id).unwrap();
+        second.detach_shared_region(region_id).unwrap();
         first.destroy_shared_region(region_id).unwrap();
     }
 
