@@ -19,8 +19,7 @@ use crate::aot_runtime::runtime::{AotExport, AotRuntime};
 use crate::memory::RegionProt;
 use crate::runtime::{
     Extern, FunctionType, Global, GuestFuncBinding, HostFunc, Import, InstanceLimits,
-    InstanceStats, Memory, Result, SharedRegionId, SharedTable, Store, Table, WasmError,
-    WasmValue,
+    InstanceStats, Memory, Result, SharedRegionId, SharedTable, Store, Table, WasmError, WasmValue,
 };
 use std::fs;
 use std::path::Path;
@@ -849,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_shared_region_application_wrappers() {
-        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+        use crate::memory::{PAGE_SIZE_BYTES, RegionProt};
 
         let mut app = WasmApplication::new();
         // Minimal wasm module with a memory (1 page min)
@@ -861,8 +860,10 @@ mod tests {
             .allocate_shared_region(idx, PAGE_SIZE_BYTES, RegionProt::ReadWrite)
             .unwrap();
 
-        app.write_shared_region(idx, region_id, 0, &41i32.to_le_bytes()).unwrap();
-        app.write_shared_region(idx, region_id, 4, &59i32.to_le_bytes()).unwrap();
+        app.write_shared_region(idx, region_id, 0, &41i32.to_le_bytes())
+            .unwrap();
+        app.write_shared_region(idx, region_id, 4, &59i32.to_le_bytes())
+            .unwrap();
 
         let mut buf = [0u8; 8];
         app.read_shared_region(idx, region_id, 0, &mut buf).unwrap();

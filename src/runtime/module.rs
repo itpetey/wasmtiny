@@ -1,9 +1,18 @@
 use super::{ExportType, FunctionType, GlobalType, Import, ImportKind, MemoryType, TableType};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MODULE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 /// Parsed WebAssembly module.
 pub struct Module {
+    /// Stable identity assigned at construction; preserved by `Clone`.
+    ///
+    /// Modules are deep-cloned liberally by the runtime (per-invoke module
+    /// `Arc`s, guest-native targets), so pointer equality cannot be used to
+    /// test module identity.
+    pub id: u64,
     /// Function signatures declared in the type section.
     pub types: Vec<FunctionType>,
     /// Functions defined by the module.
@@ -124,6 +133,7 @@ impl Module {
     /// Creates a new `Module`.
     pub fn new() -> Self {
         Self {
+            id: NEXT_MODULE_ID.fetch_add(1, Ordering::Relaxed),
             types: Vec::new(),
             funcs: Vec::new(),
             tables: Vec::new(),

@@ -678,28 +678,16 @@ impl Validator {
                     ValType::Num(NumType::I64),
                     ValType::Num(NumType::I64),
                 )?,
-                0x7C..=0x85 => self.validate_binary_numeric(
+                // i64 arithmetic and bitwise ops (0x7C..=0x85) and i64
+                // shifts/rotates (0x86..=0x8A) all take [i64, i64] operands:
+                // the shift/rotate count is also an i64 per the WASM spec.
+                0x7C..=0x8A => self.validate_binary_numeric(
                     func_idx,
                     &mut type_stack,
                     control_frames.last().unwrap(),
                     ValType::Num(NumType::I64),
                     ValType::Num(NumType::I64),
                 )?,
-                0x86..=0x8A => {
-                    self.pop_type(
-                        func_idx,
-                        &mut type_stack,
-                        control_frames.last().unwrap(),
-                        ValType::Num(NumType::I32),
-                    )?;
-                    self.pop_type(
-                        func_idx,
-                        &mut type_stack,
-                        control_frames.last().unwrap(),
-                        ValType::Num(NumType::I64),
-                    )?;
-                    type_stack.push(ValType::Num(NumType::I64));
-                }
                 0x8B..=0x91 => self.validate_unary_numeric(
                     func_idx,
                     &mut type_stack,
@@ -945,6 +933,56 @@ impl Validator {
                                     func_idx
                                 )));
                             }
+                            for _ in 0..3 {
+                                self.pop_type(
+                                    func_idx,
+                                    &mut type_stack,
+                                    control_frames.last().unwrap(),
+                                    ValType::Num(NumType::I32),
+                                )?;
+                            }
+                        }
+                        8 => {
+                            let data_idx = Self::read_uleb(code, &mut cursor)?;
+                            let _memory_idx = Self::read_uleb(code, &mut cursor)?;
+                            if module.data.get(data_idx as usize).is_none() {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} uses invalid data segment {}",
+                                    func_idx, data_idx
+                                )));
+                            }
+                            for _ in 0..3 {
+                                self.pop_type(
+                                    func_idx,
+                                    &mut type_stack,
+                                    control_frames.last().unwrap(),
+                                    ValType::Num(NumType::I32),
+                                )?;
+                            }
+                        }
+                        9 => {
+                            let data_idx = Self::read_uleb(code, &mut cursor)?;
+                            if module.data.get(data_idx as usize).is_none() {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} uses invalid data segment {}",
+                                    func_idx, data_idx
+                                )));
+                            }
+                        }
+                        10 => {
+                            let _dst_memory = Self::read_uleb(code, &mut cursor)?;
+                            let _src_memory = Self::read_uleb(code, &mut cursor)?;
+                            for _ in 0..3 {
+                                self.pop_type(
+                                    func_idx,
+                                    &mut type_stack,
+                                    control_frames.last().unwrap(),
+                                    ValType::Num(NumType::I32),
+                                )?;
+                            }
+                        }
+                        11 => {
+                            let _memory_idx = Self::read_uleb(code, &mut cursor)?;
                             for _ in 0..3 {
                                 self.pop_type(
                                     func_idx,
@@ -2189,13 +2227,66 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_bulk_memory_instruction() {
+    fn test_validate_accepts_bulk_memory_instruction() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            // i32.const 0 × 3; memory.copy 0 0; end
+            body: vec![
+                0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xFC, 0x0A, 0x00, 0x00, 0x0B,
+            ],
+        });
+
+        let validator = Validator::new();
+        assert!(validator.validate(&module).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_memory_copy_with_empty_stack() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0xFC, 0x0A, 0x00, 0x00, 0x0B],
+        });
+
+        let validator = Validator::new();
+        assert!(validator.validate(&module).is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_i64_shift_with_i64_count() {
         let mut module = Module::new();
         module.types.push(FunctionType::new(vec![], vec![]));
         module.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0xFC, 0x0A, 0x00, 0x00, 0x0B],
+            // i64.const 32; i64.const 1; i64.shr_u; drop; end
+            // (the shift count is an i64 operand per the WASM spec)
+            body: vec![0x42, 0x20, 0x42, 0x01, 0x88, 0x1A, 0x0B],
+        });
+
+        let validator = Validator::new();
+        assert!(validator.validate(&module).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_memory_init_with_invalid_data_segment() {
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            // i32.const 0 × 3; memory.init 0 0; end — no data segments declared
+            body: vec![
+                0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xFC, 0x08, 0x00, 0x00, 0x0B,
+            ],
         });
 
         let validator = Validator::new();

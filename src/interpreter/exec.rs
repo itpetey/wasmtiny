@@ -495,7 +495,11 @@ impl Interpreter {
                         return Ok(results);
                     }
                 }
-                0x0F => return self.return_from_function(),
+                0x0F => {
+                    if let Some(results) = self.return_from_function()? {
+                        return Ok(results);
+                    }
+                }
                 _ => self.execute_opcode(module, opcode)?,
             }
         }
@@ -1203,29 +1207,31 @@ impl Interpreter {
                 let a = self.operand_stack.pop_i64()?;
                 self.operand_stack.push(WasmValue::I64(a ^ b))
             }
+            // i64 shifts/rotates take the shift count as an i64 operand
+            // (per the WASM spec); Rust's wrapping_* ops apply the mod-64 mask.
             0x86 => {
-                let b = self.operand_stack.pop_i32()? as u32;
+                let b = self.operand_stack.pop_i64()? as u32;
                 let a = self.operand_stack.pop_i64()?;
                 self.operand_stack.push(WasmValue::I64(a.wrapping_shl(b)))
             }
             0x87 => {
-                let b = self.operand_stack.pop_i32()? as u32;
+                let b = self.operand_stack.pop_i64()? as u32;
                 let a = self.operand_stack.pop_i64()?;
                 self.operand_stack.push(WasmValue::I64(a.wrapping_shr(b)))
             }
             0x88 => {
-                let b = self.operand_stack.pop_i32()? as u32;
+                let b = self.operand_stack.pop_i64()? as u32;
                 let a = self.operand_stack.pop_i64()? as u64;
                 self.operand_stack
                     .push(WasmValue::I64(a.wrapping_shr(b) as i64))
             }
             0x89 => {
-                let b = self.operand_stack.pop_i32()? as u32;
+                let b = self.operand_stack.pop_i64()? as u32;
                 let a = self.operand_stack.pop_i64()?;
                 self.operand_stack.push(WasmValue::I64(a.rotate_left(b)))
             }
             0x8A => {
-                let b = self.operand_stack.pop_i32()? as u32;
+                let b = self.operand_stack.pop_i64()? as u32;
                 let a = self.operand_stack.pop_i64()?;
                 self.operand_stack.push(WasmValue::I64(a.rotate_right(b)))
             }
@@ -1499,6 +1505,7 @@ impl Interpreter {
                 let subopcode = self.read_var_u32_immediate()?;
                 match subopcode {
                     0..=7 => self.execute_numeric_extended_opcode(subopcode),
+                    8..=11 => self.execute_memory_extended_opcode(subopcode),
                     12 | 13 => self.execute_table_extended_opcode(subopcode),
                     _ => Err(WasmError::Runtime(format!(
                         "unsupported numeric extended opcode: {:02x}",
@@ -1933,7 +1940,7 @@ impl Interpreter {
                     instance.native_func_ref_parts(native_idx)?
                 };
                 if let Some(target) = guest_target {
-                    if std::ptr::eq(target.module.as_ref(), module) {
+                    if target.module.id == module.id {
                         let target_type =
                             target.module.func_type(target.func_idx).ok_or_else(|| {
                                 WasmError::Validation(format!(
@@ -2127,7 +2134,11 @@ impl Interpreter {
         }
     }
 
-    fn return_from_function(&mut self) -> Result<Vec<WasmValue>> {
+    fn return_from_function(&mut self) -> Result<Option<Vec<WasmValue>>> {
+        // `return` exits the innermost function: collect its result values
+        // from the top of the operand stack, unwind all frames up to and
+        // including the function frame, and resume the caller. When no caller
+        // remains, execution is complete.
         let function_frame = self
             .control_stack
             .frames()
@@ -2147,9 +2158,23 @@ impl Interpreter {
         }
         results.reverse();
         self.operand_stack.truncate(function_frame.height);
-        self.control_stack.clear();
-        self.locals.clear();
-        Ok(results)
+
+        while let Some(frame) = self.control_stack.pop_frame() {
+            if matches!(frame.kind, FrameKind::Function) {
+                break;
+            }
+        }
+
+        if let Some(parent) = self.control_stack.last_mut() {
+            for value in &results {
+                self.operand_stack.push(*value)?;
+            }
+            self.locals = parent.locals.clone();
+            Ok(None)
+        } else {
+            self.locals.clear();
+            Ok(Some(results))
+        }
     }
 
     fn branch(&mut self, depth: u32) -> Result<Option<Vec<WasmValue>>> {
@@ -2308,6 +2333,55 @@ impl Interpreter {
             }
             _ => Err(WasmError::Runtime(format!(
                 "unsupported table extended opcode: {:02x}",
+                subopcode
+            ))),
+        }
+    }
+
+    /// Executes bulk-memory instructions (0xFC 8..=11): `memory.init`,
+    /// `data.drop`, `memory.copy`, and `memory.fill`.
+    fn execute_memory_extended_opcode(&mut self, subopcode: u32) -> Result<()> {
+        match subopcode {
+            8 => {
+                let data_idx = self.read_var_u32_immediate()?;
+                let memory_idx = self.read_var_u32_immediate()?;
+                let len = self.operand_stack.pop_i32()? as u32;
+                let src = self.operand_stack.pop_i32()? as u32;
+                let dst = self.operand_stack.pop_i32()? as u32;
+                self.instance_ref()?
+                    .lock()
+                    .map_err(poisoned_lock)?
+                    .memory_init(data_idx, memory_idx, dst, src, len)
+            }
+            9 => {
+                let data_idx = self.read_var_u32_immediate()?;
+                self.instance_ref()?
+                    .lock()
+                    .map_err(poisoned_lock)?
+                    .data_drop(data_idx)
+            }
+            10 => {
+                let _dst_memory = self.read_var_u32_immediate()?;
+                let _src_memory = self.read_var_u32_immediate()?;
+                let len = self.operand_stack.pop_i32()? as u32;
+                let src = self.operand_stack.pop_i32()? as u32;
+                let dst = self.operand_stack.pop_i32()? as u32;
+                // memmove semantics: stage through a temporary buffer so
+                // overlapping ranges copy as-if-via-scratch.
+                let mut buf = vec![0u8; len as usize];
+                self.with_memory(|memory| memory.read(src, &mut buf))?;
+                self.with_memory_mut(|memory| memory.write(dst, &buf))
+            }
+            11 => {
+                let _memory_idx = self.read_var_u32_immediate()?;
+                let len = self.operand_stack.pop_i32()? as u32;
+                let value = self.operand_stack.pop_i32()? as u8;
+                let dst = self.operand_stack.pop_i32()? as u32;
+                let buf = vec![value; len as usize];
+                self.with_memory_mut(|memory| memory.write(dst, &buf))
+            }
+            _ => Err(WasmError::Runtime(format!(
+                "unsupported memory extended opcode: {:02x}",
                 subopcode
             ))),
         }
@@ -2852,6 +2926,11 @@ impl Interpreter {
                 let subopcode = Self::read_uleb(code, cursor)?;
                 match subopcode {
                     0..=7 => Ok(()),
+                    8 | 10 => {
+                        Self::skip_uleb(code, cursor)?;
+                        Self::skip_uleb(code, cursor)
+                    }
+                    9 | 11 => Self::skip_uleb(code, cursor),
                     12 => {
                         Self::skip_uleb(code, cursor)?;
                         Self::skip_uleb(code, cursor)
@@ -3095,8 +3174,8 @@ fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> 
 mod tests {
     use super::*;
     use crate::runtime::{
-        Extern, Func, FunctionType, HostCallOutcome, HostCaller, HostFunc, Import, ImportKind,
-        Instance, Limits, Local, MemoryType, Module, TableType,
+        DataKind, DataSegment, Extern, Func, FunctionType, HostCallOutcome, HostCaller, HostFunc,
+        Import, ImportKind, Instance, Limits, Local, MemoryType, Module, TableType,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -3974,6 +4053,216 @@ mod tests {
         let returned = result.unwrap();
         assert_eq!(returned.len(), 1);
         assert_eq!(returned[0], WasmValue::I32(10));
+    }
+
+    #[test]
+    fn test_return_in_nested_call_resumes_caller() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(
+            vec![],
+            vec![crate::runtime::ValType::Num(crate::runtime::NumType::I32)],
+        ));
+        // func 0: call func 1; i32.const 1; i32.add; end
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x10, 0x01, 0x41, 0x01, 0x6A, 0x0B],
+        });
+        // func 1: i32.const 41; return; end
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x41, 0x29, 0x0F, 0x0B],
+        });
+
+        let module = Arc::new(module);
+        let mut interp = Interpreter::new();
+        let result = interp.execute_function(&module, 0, &[]);
+        assert_eq!(result.unwrap(), vec![WasmValue::I32(42)]);
+    }
+
+    #[test]
+    fn test_return_from_inside_block_resumes_caller() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(
+            vec![],
+            vec![crate::runtime::ValType::Num(crate::runtime::NumType::I32)],
+        ));
+        // func 0: call func 1; i32.const 1; i32.add; end
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x10, 0x01, 0x41, 0x01, 0x6A, 0x0B],
+        });
+        // func 1: block { i32.const 41; return }; unreachable
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            body: vec![0x02, 0x40, 0x41, 0x29, 0x0F, 0x0B, 0x00, 0x0B],
+        });
+
+        let module = Arc::new(module);
+        let mut interp = Interpreter::new();
+        let result = interp.execute_function(&module, 0, &[]);
+        assert_eq!(result.unwrap(), vec![WasmValue::I32(42)]);
+    }
+
+    #[test]
+    fn test_memory_fill() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            // i32.const 0 (dst); i32.const 5 (val); i32.const 4 (len); memory.fill 0
+            body: vec![0x41, 0x00, 0x41, 0x05, 0x41, 0x04, 0xFC, 0x0B, 0x00, 0x0B],
+        });
+
+        let module = Arc::new(module);
+        let instance = Arc::new(Mutex::new(Instance::new(module.clone()).unwrap()));
+
+        let mut interp = Interpreter::with_instance(instance.clone());
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(result.is_ok());
+
+        let memory = instance.lock().unwrap().memories[0].clone();
+        let mut buf = [0u8; 4];
+        memory.lock().unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(buf, [5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn test_memory_copy() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            // i32.const 4 (dst); i32.const 0 (src); i32.const 4 (len); memory.copy 0 0
+            body: vec![
+                0x41, 0x04, 0x41, 0x00, 0x41, 0x04, 0xFC, 0x0A, 0x00, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let instance = Arc::new(Mutex::new(Instance::new(module.clone()).unwrap()));
+        let memory = instance.lock().unwrap().memories[0].clone();
+        memory.lock().unwrap().write(0, &[1, 2, 3, 4]).unwrap();
+
+        let mut interp = Interpreter::with_instance(instance.clone());
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(result.is_ok());
+
+        let mut buf = [0u8; 4];
+        memory.lock().unwrap().read(4, &mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_memory_copy_overlapping_uses_memmove_semantics() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            // dst=1, src=0, len=4: overlapping forward copy
+            body: vec![
+                0x41, 0x01, 0x41, 0x00, 0x41, 0x04, 0xFC, 0x0A, 0x00, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let instance = Arc::new(Mutex::new(Instance::new(module.clone()).unwrap()));
+        let memory = instance.lock().unwrap().memories[0].clone();
+        memory.lock().unwrap().write(0, &[1, 2, 3, 4]).unwrap();
+
+        let mut interp = Interpreter::with_instance(instance.clone());
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(result.is_ok());
+
+        let mut buf = [0u8; 5];
+        memory.lock().unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(buf, [1, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_memory_copy_out_of_bounds_traps() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            // dst=65533, src=0, len=4 → one byte past the 64 KiB page
+            body: vec![
+                0x41, 0xFD, 0xFF, 0x03, 0x41, 0x00, 0x41, 0x04, 0xFC, 0x0A, 0x00, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let instance = Arc::new(Mutex::new(Instance::new(module.clone()).unwrap()));
+
+        let mut interp = Interpreter::with_instance(instance);
+        let result = interp.execute_function(&module, 0, &[]);
+        assert!(matches!(
+            result,
+            Err(WasmError::Trap(TrapCode::MemoryOutOfBounds))
+        ));
+    }
+
+    #[test]
+    fn test_memory_init_and_data_drop() {
+        use std::sync::Arc;
+
+        let mut module = Module::new();
+        module.types.push(FunctionType::new(vec![], vec![]));
+        module.memories.push(MemoryType::new(Limits::Min(1)));
+        module.data.push(DataSegment {
+            kind: DataKind::Passive,
+            init: vec![9, 8, 7],
+        });
+        module.funcs.push(Func {
+            type_idx: 0,
+            locals: vec![],
+            // memory.init 0 0 (dst=0, src=0, len=3); data.drop 0;
+            // memory.init 0 0 again (len=1 → traps, segment dropped)
+            body: vec![
+                0x41, 0x00, 0x41, 0x00, 0x41, 0x03, 0xFC, 0x08, 0x00, 0x00, 0xFC, 0x09, 0x00, 0x41,
+                0x00, 0x41, 0x00, 0x41, 0x01, 0xFC, 0x08, 0x00, 0x00, 0x0B,
+            ],
+        });
+
+        let module = Arc::new(module);
+        let instance = Arc::new(Mutex::new(Instance::new(module.clone()).unwrap()));
+        let memory = instance.lock().unwrap().memories[0].clone();
+
+        let mut interp = Interpreter::with_instance(instance.clone());
+        let result = interp.execute_function(&module, 0, &[]);
+
+        // The second memory.init (after data.drop) must trap.
+        assert!(matches!(
+            result,
+            Err(WasmError::Trap(TrapCode::MemoryOutOfBounds))
+        ));
+        // The first memory.init succeeded before the drop.
+        let mut buf = [0u8; 3];
+        memory.lock().unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(buf, [9, 8, 7]);
     }
 
     #[test]

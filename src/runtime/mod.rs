@@ -37,8 +37,8 @@ pub use instance::{
 pub(crate) use metering::InstanceMeter;
 pub use metering::{InstanceLimits, InstanceStats};
 pub use module::{DataKind, DataSegment, ElemKind, ElemSegment, Func, Local, Module};
-pub use shared_memory::{SharedMemoryRegistry, SharedRegion, SharedRegionId};
 pub(crate) use shared_memory::SharedWaiter;
+pub use shared_memory::{SharedMemoryRegistry, SharedRegion, SharedRegionId};
 pub use snapshot::{
     Result as SnapshotResult, SNAPSHOT_FORMAT_VERSION, SnapshotError, SnapshotPayload,
     capture_snapshot, restore_snapshot, validate_snapshot_compatibility,

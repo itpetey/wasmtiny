@@ -53,6 +53,7 @@ pub mod signal_handler;
 
 pub use application::WasmApplication;
 pub use interpreter::SafepointConfig;
+pub use memory::RegionProt;
 pub use runtime::ExportType;
 pub use runtime::FunctionType;
 pub use runtime::Global;
@@ -68,7 +69,6 @@ pub use runtime::Module;
 pub use runtime::NumType;
 pub use runtime::RefType;
 pub use runtime::RuntimeSuspender;
-pub use memory::RegionProt;
 pub use runtime::SharedRegionId;
 pub use runtime::SuspendedHandle;
 pub use runtime::SuspensionError;

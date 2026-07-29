@@ -3,8 +3,8 @@ use super::{
     Memory, Module, RefType, Result, SharedMemoryRegistry, SharedRegionId, Table, TrapCode,
     ValType, WasmError, WasmValue,
 };
-use crate::memory::RegionProt;
 use crate::loader::BinaryReader;
+use crate::memory::RegionProt;
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,7 @@ pub struct Instance {
     exports: HashMap<String, Extern>,
     import_bindings: Vec<Option<Extern>>,
     elem_segments_active: Vec<bool>,
+    data_segments_active: Vec<bool>,
     func_ref_handles: Vec<u32>,
 }
 
@@ -338,9 +339,7 @@ impl Store {
     ///
     /// This allows multiple stores (and their instances) to share the same
     /// `SharedMemoryRegistry`, making shared regions visible across all of them.
-    pub fn with_shared_registry(
-        registry: Arc<ParkingMutex<SharedMemoryRegistry>>,
-    ) -> Self {
+    pub fn with_shared_registry(registry: Arc<ParkingMutex<SharedMemoryRegistry>>) -> Self {
         Self {
             instances: Vec::new(),
             native_funcs: Vec::new(),
@@ -535,6 +534,13 @@ impl Instance {
             .iter()
             .map(|segment| matches!(segment.kind, super::ElemKind::Passive))
             .collect();
+        // Passive data segments are available to `memory.init` until dropped.
+        // Active segments are applied at instantiation and count as dropped.
+        let data_segments_active = module
+            .data
+            .iter()
+            .map(|segment| matches!(segment.kind, super::DataKind::Passive))
+            .collect();
         Self {
             module,
             store,
@@ -548,6 +554,7 @@ impl Instance {
             exports: HashMap::new(),
             import_bindings: vec![None; import_count],
             elem_segments_active,
+            data_segments_active,
             func_ref_handles: Vec::new(),
         }
     }
@@ -885,6 +892,62 @@ impl Instance {
         Ok(())
     }
 
+    /// Applies `memory.init`: copies `len` bytes from a passive data segment
+    /// into memory at `dst`, trapping on out-of-bounds access.
+    pub fn memory_init(
+        &mut self,
+        data_idx: u32,
+        memory_idx: u32,
+        dst: u32,
+        src: u32,
+        len: u32,
+    ) -> Result<()> {
+        let segment =
+            self.module.data.get(data_idx as usize).ok_or_else(|| {
+                WasmError::Runtime(format!("data segment {} not found", data_idx))
+            })?;
+        let available = self
+            .data_segments_active
+            .get(data_idx as usize)
+            .copied()
+            .unwrap_or(false);
+        let segment_len = if available {
+            segment.init.len() as u32
+        } else {
+            0
+        };
+
+        let src_end = src
+            .checked_add(len)
+            .ok_or(WasmError::Trap(TrapCode::MemoryOutOfBounds))?;
+        if src_end > segment_len {
+            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        }
+
+        let bytes = if available {
+            segment.init[src as usize..src_end as usize].to_vec()
+        } else {
+            Vec::new()
+        };
+        let memory = self
+            .memories
+            .get(memory_idx as usize)
+            .ok_or_else(|| WasmError::Runtime(format!("memory {} not found", memory_idx)))?
+            .clone();
+        memory.lock().map_err(poisoned_lock)?.write(dst, &bytes)
+    }
+
+    /// Drops a passive data segment (`data.drop`); subsequent `memory.init`
+    /// calls treat it as empty.
+    pub fn data_drop(&mut self, data_idx: u32) -> Result<()> {
+        let active = self
+            .data_segments_active
+            .get_mut(data_idx as usize)
+            .ok_or_else(|| WasmError::Runtime(format!("data segment {} not found", data_idx)))?;
+        *active = false;
+        Ok(())
+    }
+
     fn all_const_expr_globals(&self) -> Vec<Option<SharedGlobal>> {
         let total_globals = self
             .module
@@ -973,16 +1036,16 @@ impl Instance {
             .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?
             .clone();
         let mut mem = memory.lock().map_err(poisoned_lock)?;
-        let result = self.shared_memory.lock().allocate_region(&mut mem, size, prot)?;
+        let result = self
+            .shared_memory
+            .lock()
+            .allocate_region(&mut mem, size, prot)?;
         self.attached_regions.push(result.0);
         Ok(result)
     }
 
     /// Allocates a shared region without mapping it into any guest memory.
-    pub fn allocate_shared_region_standalone(
-        &mut self,
-        size: u32,
-    ) -> Result<SharedRegionId> {
+    pub fn allocate_shared_region_standalone(&mut self, size: u32) -> Result<SharedRegionId> {
         self.shared_memory.lock().allocate_region_standalone(size)
     }
 
@@ -1011,10 +1074,10 @@ impl Instance {
             .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?
             .clone();
         let mut mem = memory.lock().map_err(poisoned_lock)?;
-        let page_offset = self
-            .shared_memory
-            .lock()
-            .attach_region(&mut mem, region_id, prot, reader_slot)?;
+        let page_offset =
+            self.shared_memory
+                .lock()
+                .attach_region(&mut mem, region_id, prot, reader_slot)?;
         self.attached_regions.push(region_id);
         Ok(page_offset)
     }
@@ -1030,10 +1093,14 @@ impl Instance {
         let memory = self
             .memories
             .first()
-            .ok_or_else(|| WasmError::Runtime("no memory to detach shared region from".to_string()))?
+            .ok_or_else(|| {
+                WasmError::Runtime("no memory to detach shared region from".to_string())
+            })?
             .clone();
         let mut mem = memory.lock().map_err(poisoned_lock)?;
-        self.shared_memory.lock().detach_region(&mut mem, region_id)?;
+        self.shared_memory
+            .lock()
+            .detach_region(&mut mem, region_id)?;
         self.attached_regions.retain(|id| *id != region_id);
         Ok(())
     }
@@ -2085,9 +2152,7 @@ mod tests {
 
         // Read from second instance via host-side API
         let mut buf = [0u8; 4];
-        second
-            .read_shared_region(region_id, 4, &mut buf)
-            .unwrap();
+        second.read_shared_region(region_id, 4, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4]);
 
         // Write i32 via host-side API
@@ -2143,8 +2208,12 @@ mod tests {
         let region_id = store.allocate_shared_region(PAGE_SIZE_BYTES).unwrap();
 
         // Write and read via store
-        store.write_shared_region(region_id, 0, &17i32.to_le_bytes()).unwrap();
-        store.write_shared_region(region_id, 4, &23i32.to_le_bytes()).unwrap();
+        store
+            .write_shared_region(region_id, 0, &17i32.to_le_bytes())
+            .unwrap();
+        store
+            .write_shared_region(region_id, 4, &23i32.to_le_bytes())
+            .unwrap();
 
         let mut buf = [0u8; 8];
         store.read_shared_region(region_id, 0, &mut buf).unwrap();
@@ -2162,7 +2231,11 @@ mod tests {
         let module = Arc::new(module_with_memory());
         let mut instance = Instance::new_with_store(module, store.clone()).unwrap();
 
-        let region_id = store.lock().unwrap().allocate_shared_region(PAGE_SIZE_BYTES).unwrap();
+        let region_id = store
+            .lock()
+            .unwrap()
+            .allocate_shared_region(PAGE_SIZE_BYTES)
+            .unwrap();
         let _page_offset = instance
             .attach_shared_region(region_id, RegionProt::ReadWrite, None)
             .unwrap();
@@ -2173,7 +2246,11 @@ mod tests {
         // After detach, the region still exists in the store but is not mapped
         // in this instance. Host-side read/write still works via the store.
         let mut buf = [0u8; 1];
-        store.lock().unwrap().read_shared_region(region_id, 0, &mut buf).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .read_shared_region(region_id, 0, &mut buf)
+            .unwrap();
         assert_eq!(buf[0], 5);
     }
 
@@ -2317,8 +2394,10 @@ mod tests {
                 .expect("shared region should be re-attached after restore");
             let shared_byte_offset = actual_page_offset * PAGE_SIZE_BYTES;
             let val = mem.read_u32(shared_byte_offset).unwrap();
-            assert_eq!(val, 0x0000_0002,
-                "shared data should be accessible via guest memory after restore");
+            assert_eq!(
+                val, 0x0000_0002,
+                "shared data should be accessible via guest memory after restore"
+            );
         }
 
         // Also verify through host-side API
@@ -2423,9 +2502,7 @@ mod tests {
                 loop {
                     // Read current value
                     let mut buf = [0u8; 4];
-                    instance
-                        .read_shared_region(region_id, 0, &mut buf)
-                        .unwrap();
+                    instance.read_shared_region(region_id, 0, &mut buf).unwrap();
                     let current = i32::from_le_bytes(buf);
 
                     // Try to increment with CAS
@@ -2459,9 +2536,7 @@ mod tests {
                 loop {
                     // Read current value
                     let mut buf = [0u8; 4];
-                    instance
-                        .read_shared_region(region_id, 0, &mut buf)
-                        .unwrap();
+                    instance.read_shared_region(region_id, 0, &mut buf).unwrap();
                     let current = i32::from_le_bytes(buf);
 
                     // Try to increment with CAS

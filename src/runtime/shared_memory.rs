@@ -1,4 +1,4 @@
-use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+use crate::memory::{PAGE_SIZE_BYTES, RegionProt};
 use crate::runtime::{Memory, Result, WasmError};
 use parking_lot::{Condvar, Mutex as ParkingMutex, RwLock};
 use std::collections::HashMap;
@@ -66,7 +66,10 @@ impl std::fmt::Debug for SharedRegion {
         f.debug_struct("SharedRegion")
             .field("len", &self.len)
             .field("fd", &self.fd)
-            .field("attachment_count", &self.attachment_count.load(Ordering::SeqCst))
+            .field(
+                "attachment_count",
+                &self.attachment_count.load(Ordering::SeqCst),
+            )
             .finish()
     }
 }
@@ -89,9 +92,8 @@ impl SharedRegion {
         // Generate a unique name for the POSIX shared memory object.
         let id = NEXT_SHM_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!("/wasmtiny_shm_{}", id);
-        let c_name = CString::new(name.as_bytes()).map_err(|_| {
-            WasmError::Runtime("failed to create shm name".to_string())
-        })?;
+        let c_name = CString::new(name.as_bytes())
+            .map_err(|_| WasmError::Runtime("failed to create shm name".to_string()))?;
 
         // Create the shared memory object.
         // SAFETY: c_name is a valid C string. O_CREAT | O_RDWR with mode 0600.
@@ -119,7 +121,9 @@ impl SharedRegion {
         // SAFETY: fd is a valid open file descriptor.
         if unsafe { libc::ftruncate(fd, len as libc::off_t) } != 0 {
             let err = std::io::Error::last_os_error();
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             return Err(WasmError::Runtime(format!(
                 "ftruncate failed for shared region: {}",
                 err
@@ -140,7 +144,9 @@ impl SharedRegion {
         };
         if ptr == libc::MAP_FAILED {
             let err = std::io::Error::last_os_error();
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             return Err(WasmError::Runtime(format!(
                 "mmap failed for shared region: {}",
                 err
@@ -299,10 +305,7 @@ impl SharedMemoryRegistry {
 
     /// Allocates a region without mapping it into any guest memory.
     /// Used for creating regions that will be attached later.
-    pub fn allocate_region_standalone(
-        &mut self,
-        size: u32,
-    ) -> Result<SharedRegionId> {
+    pub fn allocate_region_standalone(&mut self, size: u32) -> Result<SharedRegionId> {
         if size == 0 {
             return Err(WasmError::Runtime(
                 "shared region size must be greater than zero".to_string(),
@@ -381,11 +384,7 @@ impl SharedMemoryRegistry {
     ///
     /// Unmaps the region's pages from the guest's address space and restores
     /// the virtual address reservation to `PROT_NONE`.
-    pub fn detach_region(
-        &mut self,
-        memory: &mut Memory,
-        region_id: SharedRegionId,
-    ) -> Result<()> {
+    pub fn detach_region(&mut self, memory: &mut Memory, region_id: SharedRegionId) -> Result<()> {
         let region = self.region(region_id)?;
 
         memory.unmap_shared_region(region_id)?;
@@ -413,11 +412,7 @@ impl SharedMemoryRegistry {
         }
         // SAFETY: offset and length are bounds-checked above; ptr is valid.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                region.ptr.add(offset),
-                data.len(),
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr(), region.ptr.add(offset), data.len());
         }
         Ok(())
     }
@@ -439,11 +434,7 @@ impl SharedMemoryRegistry {
         }
         // SAFETY: offset and length are bounds-checked above; ptr is valid.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                region.ptr.add(offset),
-                buf.as_mut_ptr(),
-                buf.len(),
-            );
+            std::ptr::copy_nonoverlapping(region.ptr.add(offset), buf.as_mut_ptr(), buf.len());
         }
         Ok(())
     }

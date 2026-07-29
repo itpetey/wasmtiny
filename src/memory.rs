@@ -121,7 +121,9 @@ impl Clone for Memory {
         let mut result = new_mem;
         if current_pages > result.size() {
             let delta = current_pages - result.size();
-            result.grow(delta).expect("cloned memory grow should succeed");
+            result
+                .grow(delta)
+                .expect("cloned memory grow should succeed");
         }
 
         // Copy owned page data
@@ -230,8 +232,7 @@ impl Memory {
 
         // Make initial pages accessible
         if initial_bytes > 0 {
-            if let Err(e) = mprotect_range(ptr, initial_bytes, libc::PROT_READ | libc::PROT_WRITE)
-            {
+            if let Err(e) = mprotect_range(ptr, initial_bytes, libc::PROT_READ | libc::PROT_WRITE) {
                 // Clean up on failure
                 unsafe {
                     libc::munmap(ptr as *mut libc::c_void, capacity);
@@ -536,8 +537,7 @@ impl Memory {
                 // There is an overlap with a read-only range.
                 // But if the overlap is entirely within the reader_slot page, allow it.
                 if let Some(slot) = range.reader_slot {
-                    let slot_start =
-                        range_start + (slot as u64) * PAGE_SIZE_BYTES as u64;
+                    let slot_start = range_start + (slot as u64) * PAGE_SIZE_BYTES as u64;
                     let slot_end = slot_start + PAGE_SIZE_BYTES as u64;
                     if access_start >= slot_start && access_end <= slot_end {
                         continue;
@@ -741,8 +741,7 @@ impl Memory {
             .shared_ranges
             .iter()
             .map(|r| {
-                let end_byte =
-                    (r.page_offset as usize) * page_size + r.len as usize;
+                let end_byte = (r.page_offset as usize) * page_size + r.len as usize;
                 ((end_byte + page_size - 1) / page_size) as u32
             })
             .max()

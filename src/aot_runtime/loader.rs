@@ -64,16 +64,7 @@ impl AotLoader {
         let mut aot_module = AotModule::from_module_with_store(module, store.clone())?;
         if module.imports.is_empty() {
             let instance = Instance::new_with_store(Arc::new(module.clone()), store)?;
-            aot_module.memories = instance
-                .memories
-                .iter()
-                .map(|memory| {
-                    memory
-                        .lock()
-                        .map_err(poisoned_lock)
-                        .map(|memory| memory.clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
+            aot_module.memories = instance.memories.to_vec();
             aot_module.tables = instance.tables.to_vec();
             aot_module.globals = instance
                 .globals

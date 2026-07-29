@@ -106,9 +106,7 @@ extern "C" fn sigsegv_handler(
     let _fault_addr = unsafe { (*info).si_addr() as usize };
 
     // Check if we have a jump buffer set up
-    let should_longjmp = JUMP_BUFFER.with(|buf| {
-        buf.borrow().is_some()
-    });
+    let should_longjmp = JUMP_BUFFER.with(|buf| buf.borrow().is_some());
 
     if should_longjmp {
         let in_handler = IN_TRAP_HANDLER.with(|flag| *flag.borrow());
@@ -164,9 +162,7 @@ where
     let mut jmp_buf = Box::new(JmpBuf::default());
 
     // setjmp returns 0 on initial call, non-zero on longjmp
-    let setjmp_result = unsafe {
-        setjmp(jmp_buf.as_mut() as *mut JmpBuf)
-    };
+    let setjmp_result = unsafe { setjmp(jmp_buf.as_mut() as *mut JmpBuf) };
 
     if setjmp_result != 0 {
         // We got here via longjmp from the signal handler
@@ -217,9 +213,8 @@ mod tests {
 
     #[test]
     fn test_with_trap_handler_error_propagation() {
-        let result: Result<i32, WasmError> = with_trap_handler(|| {
-            Err(WasmError::Runtime("test error".to_string()))
-        });
+        let result: Result<i32, WasmError> =
+            with_trap_handler(|| Err(WasmError::Runtime("test error".to_string())));
         assert!(matches!(result, Err(WasmError::Runtime(_))));
     }
 

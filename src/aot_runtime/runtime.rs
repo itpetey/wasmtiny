@@ -3,8 +3,8 @@ use crate::interpreter::Interpreter;
 use crate::memory::RegionProt;
 use crate::runtime::{
     Extern, FunctionType, Global, HostCallOutcome, HostCaller, HostFunc, ImportKind, Instance,
-    InstanceLimits, InstanceMeter, InstanceStats, Memory, Module, Result, SharedMemoryRegistry,
-    SharedRegionId, SharedTable, Table, WasmError, WasmValue,
+    InstanceLimits, InstanceMeter, InstanceStats, Memory, Module, Result, SharedMemory,
+    SharedMemoryRegistry, SharedRegionId, SharedTable, Table, WasmError, WasmValue,
 };
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
@@ -60,8 +60,12 @@ pub struct AotModule {
     jit_execution_active: Arc<AtomicBool>,
     /// Registered native helper functions callable by the module.
     pub native_functions: Vec<NativeFunc>,
-    /// Defined memories owned by the module.
-    pub memories: Vec<Memory>,
+    /// Defined memories shared with every instance created from this module.
+    ///
+    /// The same `SharedMemory` is installed into each per-invocation
+    /// `Instance`, so `memory.grow` and shared-region mappings performed
+    /// during one invocation remain visible to subsequent invocations.
+    pub memories: Vec<SharedMemory>,
     /// Defined tables owned by the module.
     pub tables: Vec<SharedTable>,
     /// Defined globals owned by the module.
@@ -223,20 +227,21 @@ impl AotModule {
             .filter(|import| matches!(import.kind, ImportKind::Func(_)))
             .count() as u32;
         let imports = self.ordered_imports();
-        let instance = Arc::new(Mutex::new(Instance::with_imports_and_store(
-            Arc::new(self.module.clone()),
-            &imports,
-            self.store.clone(),
-        )?));
+        let instance: Arc<Mutex<Instance>> =
+            Arc::new(Mutex::new(Instance::with_imports_and_store(
+                Arc::new(self.module.clone()),
+                &imports,
+                self.store.clone(),
+            )?));
         {
             let mut instance_guard = instance.lock().map_err(poisoned_lock)?;
             instance_guard.set_meter(self.meter.clone())?;
             for (offset, memory) in self.memories.iter().cloned().enumerate() {
                 let target = imported_memories + offset;
                 if target >= instance_guard.memories.len() {
-                    instance_guard.memories.push(Arc::new(Mutex::new(memory)));
+                    instance_guard.memories.push(memory);
                 } else {
-                    instance_guard.memories[target] = Arc::new(Mutex::new(memory));
+                    instance_guard.memories[target] = memory;
                 }
             }
             for (offset, table) in self.tables.iter().cloned().enumerate() {
@@ -448,9 +453,9 @@ impl AotModule {
         self.custom_memories = true;
         memory.attach_meter(&self.meter);
         if self.memories.is_empty() {
-            self.memories.push(memory);
+            self.memories.push(Arc::new(Mutex::new(memory)));
         } else {
-            self.memories[0] = memory;
+            self.memories[0] = Arc::new(Mutex::new(memory));
         }
     }
 
@@ -463,7 +468,9 @@ impl AotModule {
             self.imported_memory(0)
                 .and_then(|memory| memory.lock().ok().map(|memory| memory.clone()))
         } else {
-            self.memories.first().cloned()
+            self.memories
+                .first()
+                .and_then(|memory| memory.lock().ok().map(|memory| memory.clone()))
         }
     }
 
@@ -476,20 +483,20 @@ impl AotModule {
         prot: RegionProt,
     ) -> Result<(SharedRegionId, u32)> {
         self.ensure_jit_inactive_for_external_mutation()?;
-        let memory = self
-            .memories
-            .first_mut()
-            .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?;
-        let result = self.shared_memory.lock().allocate_region(memory, size, prot)?;
+        let memory = self.memories.first().ok_or_else(|| {
+            WasmError::Runtime("no memory to attach shared region to".to_string())
+        })?;
+        let mut memory = memory.lock().map_err(poisoned_lock)?;
+        let result = self
+            .shared_memory
+            .lock()
+            .allocate_region(&mut memory, size, prot)?;
         self.attached_regions.push(result.0);
         Ok(result)
     }
 
     /// Allocates a shared region without mapping it into any guest memory.
-    pub fn allocate_shared_region_standalone(
-        &mut self,
-        size: u32,
-    ) -> Result<SharedRegionId> {
+    pub fn allocate_shared_region_standalone(&mut self, size: u32) -> Result<SharedRegionId> {
         self.ensure_jit_inactive_for_external_mutation()?;
         self.shared_memory.lock().allocate_region_standalone(size)
     }
@@ -515,14 +522,14 @@ impl AotModule {
         reader_slot: Option<u32>,
     ) -> Result<u32> {
         self.ensure_jit_inactive_for_external_mutation()?;
-        let memory = self
-            .memories
-            .first_mut()
-            .ok_or_else(|| WasmError::Runtime("no memory to attach shared region to".to_string()))?;
-        let page_offset = self
-            .shared_memory
-            .lock()
-            .attach_region(memory, region_id, prot, reader_slot)?;
+        let memory = self.memories.first().ok_or_else(|| {
+            WasmError::Runtime("no memory to attach shared region to".to_string())
+        })?;
+        let mut memory = memory.lock().map_err(poisoned_lock)?;
+        let page_offset =
+            self.shared_memory
+                .lock()
+                .attach_region(&mut memory, region_id, prot, reader_slot)?;
         self.attached_regions.push(region_id);
         Ok(page_offset)
     }
@@ -536,11 +543,13 @@ impl AotModule {
                 region_id.raw()
             )));
         }
-        let memory = self
-            .memories
-            .first_mut()
-            .ok_or_else(|| WasmError::Runtime("no memory to detach shared region from".to_string()))?;
-        self.shared_memory.lock().detach_region(memory, region_id)?;
+        let memory = self.memories.first().ok_or_else(|| {
+            WasmError::Runtime("no memory to detach shared region from".to_string())
+        })?;
+        let mut memory = memory.lock().map_err(poisoned_lock)?;
+        self.shared_memory
+            .lock()
+            .detach_region(&mut memory, region_id)?;
         self.attached_regions.retain(|id| *id != region_id);
         Ok(())
     }
@@ -574,9 +583,12 @@ impl AotModule {
         if self.import_counts().0 > 0 {
             None
         } else {
-            self.memories
-                .first_mut()
-                .map(|memory| (memory.as_mut_ptr(), memory.len_bytes()))
+            self.memories.first().and_then(|memory| {
+                memory
+                    .lock()
+                    .ok()
+                    .map(|memory| (memory.as_ptr() as *mut u8, memory.len_bytes()))
+            })
         }
     }
 
@@ -703,8 +715,10 @@ impl AotModule {
 
         let imported_memories = self.import_counts().0 as u32;
         self.memories
-            .get_mut((memory_idx - imported_memories) as usize)
+            .get((memory_idx - imported_memories) as usize)
             .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?
+            .lock()
+            .map_err(poisoned_lock)?
             .grow(delta)
     }
 
@@ -737,8 +751,10 @@ impl AotModule {
         let local_idx = (memory_idx - imported_memories) as usize;
         match self
             .memories
-            .get_mut(local_idx)
+            .get(local_idx)
             .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?
+            .lock()
+            .map_err(poisoned_lock)?
             .grow(delta)
         {
             Ok(old_size) => Ok(old_size as i32),
@@ -760,7 +776,7 @@ impl AotModule {
 
         self.memories
             .get((memory_idx - imported_memories) as usize)
-            .map(|memory| memory.size() as i32)
+            .and_then(|memory| memory.lock().ok().map(|memory| memory.size() as i32))
             .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))
     }
 
@@ -794,7 +810,8 @@ impl AotModule {
         })?;
 
         self.memories.iter().try_fold(imported, |acc, memory| {
-            acc.checked_add(memory.size())
+            let pages = memory.lock().map_err(poisoned_lock)?.size();
+            acc.checked_add(pages)
                 .ok_or_else(|| WasmError::Runtime("memory page count overflowed".to_string()))
         })
     }
@@ -821,11 +838,9 @@ impl AotModule {
     fn initialise_defined_allocations(&mut self) {
         if self.memories.is_empty() {
             self.memories.extend(
-                self.module
-                    .memories
-                    .iter()
-                    .cloned()
-                    .map(crate::memory::Memory::new),
+                self.module.memories.iter().cloned().map(|memory_type| {
+                    Arc::new(Mutex::new(crate::memory::Memory::new(memory_type)))
+                }),
             );
         }
         if self.tables.is_empty() {
@@ -885,17 +900,14 @@ impl AotModule {
         instance.set_meter(self.meter.clone())?;
 
         if !self.custom_memories {
+            // Share (rather than deep-copy) the defined memories so that
+            // growth and shared-region mappings persist across invocations.
             self.memories = instance
                 .memories
                 .iter()
                 .skip(imported_memories)
-                .map(|memory| {
-                    memory
-                        .lock()
-                        .map_err(poisoned_lock)
-                        .map(|memory| memory.clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .cloned()
+                .collect();
         }
         if !self.custom_tables {
             self.tables = instance
@@ -930,17 +942,14 @@ impl AotModule {
         imported_globals: usize,
     ) -> Result<()> {
         let instance_guard = instance.lock().map_err(poisoned_lock)?;
+        // The instance shares this module's `SharedMemory` handles, so the
+        // sync only needs to adopt the same handles (no deep copy).
         self.memories = instance_guard
             .memories
             .iter()
             .skip(imported_memories)
-            .map(|memory| {
-                memory
-                    .lock()
-                    .map_err(poisoned_lock)
-                    .map(|memory| memory.clone())
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .cloned()
+            .collect();
         self.tables = instance_guard
             .tables
             .iter()
@@ -1171,8 +1180,10 @@ impl Drop for AotModule {
         let mut shared_memory = self.shared_memory.lock();
 
         for region_id in regions {
-            if let Some(memory) = self.memories.first_mut() {
-                let _ = shared_memory.detach_region(memory, region_id);
+            if let Some(memory) = self.memories.first()
+                && let Ok(mut memory) = memory.lock()
+            {
+                let _ = shared_memory.detach_region(&mut memory, region_id);
             }
         }
     }
@@ -1533,8 +1544,6 @@ fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryTyp
             (None, Some(_)) => false,
         }
 }
-
-
 
 /// Creates aot module from wasm.
 pub fn create_aot_module_from_wasm(module: &Module) -> AotModule {
@@ -2035,7 +2044,7 @@ mod tests {
 
     #[test]
     fn test_aot_module_drop_detaches_shared_regions() {
-        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+        use crate::memory::{PAGE_SIZE_BYTES, RegionProt};
 
         let (shared_memory, region_id) = {
             let mut module = AotModule::from_module(&module_with_memory());
@@ -2051,7 +2060,7 @@ mod tests {
 
     #[test]
     fn test_aot_shared_region_access_detach_and_alignment_failures() {
-        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+        use crate::memory::{PAGE_SIZE_BYTES, RegionProt};
 
         let mut module = AotModule::from_module(&module_with_memory());
         let (region_id, _page_offset) = module
@@ -2059,8 +2068,12 @@ mod tests {
             .unwrap();
 
         // Write and read via host-side API
-        module.write_shared_region(region_id, 0, &21i32.to_le_bytes()).unwrap();
-        module.write_shared_region(region_id, 4, &31i32.to_le_bytes()).unwrap();
+        module
+            .write_shared_region(region_id, 0, &21i32.to_le_bytes())
+            .unwrap();
+        module
+            .write_shared_region(region_id, 4, &31i32.to_le_bytes())
+            .unwrap();
 
         let mut buf = [0u8; 4];
         module.read_shared_region(region_id, 0, &mut buf).unwrap();
@@ -2085,13 +2098,12 @@ mod tests {
 
     #[test]
     fn test_aot_shared_region_visibility_across_modules() {
-        use crate::memory::{RegionProt, PAGE_SIZE_BYTES};
+        use crate::memory::{PAGE_SIZE_BYTES, RegionProt};
 
         let store = Arc::new(Mutex::new(crate::runtime::Store::new()));
         let mut first =
             AotModule::from_module_with_store(&module_with_memory(), store.clone()).unwrap();
-        let mut second =
-            AotModule::from_module_with_store(&module_with_memory(), store).unwrap();
+        let mut second = AotModule::from_module_with_store(&module_with_memory(), store).unwrap();
 
         let (region_id, _first_page_offset) = first
             .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
@@ -2100,7 +2112,9 @@ mod tests {
             .attach_shared_region(region_id, RegionProt::ReadWrite, None)
             .unwrap();
 
-        first.write_shared_region(region_id, 0, &33i32.to_le_bytes()).unwrap();
+        first
+            .write_shared_region(region_id, 0, &33i32.to_le_bytes())
+            .unwrap();
 
         let mut buf = [0u8; 4];
         second.read_shared_region(region_id, 0, &mut buf).unwrap();
@@ -2110,9 +2124,7 @@ mod tests {
             .write_shared_region(region_id, 4, &[1, 2, 3, 4])
             .unwrap();
         let mut buf = [0u8; 4];
-        first
-            .read_shared_region(region_id, 4, &mut buf)
-            .unwrap();
+        first.read_shared_region(region_id, 4, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4]);
 
         first.detach_shared_region(region_id).unwrap();
@@ -2280,12 +2292,18 @@ mod tests {
             crate::runtime::Limits::Min(1),
         ));
         second.write_u8(1, 5).unwrap();
-        aot_module.memories = vec![first, second];
+        aot_module.memories = vec![
+            std::sync::Arc::new(std::sync::Mutex::new(first)),
+            std::sync::Arc::new(std::sync::Mutex::new(second)),
+        ];
 
         aot_module.invoke_function(0, &[]).unwrap();
 
         assert_eq!(aot_module.memories.len(), 2);
-        assert_eq!(aot_module.memories[1].read_u8(1).unwrap(), 5);
+        assert_eq!(
+            aot_module.memories[1].lock().unwrap().read_u8(1).unwrap(),
+            5
+        );
     }
 
     #[test]
