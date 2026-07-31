@@ -45,6 +45,6 @@
   - fmt: passes ✓
   - test: all 352 tests pass ✓
   - clippy: 7 pre-existing warnings in `src/` (out of scope per "No `src/` changes")
-- [ ] 6.2 Fresh-clone simulation (`git clone` to a temp dir, no submodule flags) → `cargo test` green
-- [ ] 6.3 New CI workflow passes on GitHub for the PR
+- [x] 6.2 Fresh-clone simulation (`git clone` to a temp dir, no submodule flags) → `cargo test` green
+- [x] 6.3 New CI workflow passes on GitHub for the PR
 - [x] 6.4 Confirm with maintainer: delete the four stale in-flight WAMR-era openspec changes (`implement-wasm-simd`, `implement-wasm-memory64`, `rewrite-wamr-documentation`, `migrate-to-rust-examples`); if confirmed, delete them here
