@@ -1,15 +1,3 @@
-/// Export type descriptor.
-///
-/// Describes an exported WebAssembly entity with its name and kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Export type.
-pub struct ExportType {
-    /// The name of the export.
-    pub name: String,
-    /// The kind of the export (function, table, memory, global, or tag).
-    pub kind: ExportKind,
-}
-
 /// The kind of an export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Export kind.
@@ -24,6 +12,18 @@ pub enum ExportKind {
     Global(u32),
     /// A tag export (index into tag section).
     Tag(u32),
+}
+
+/// Export type descriptor.
+///
+/// Describes an exported WebAssembly entity with its name and kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Export type.
+pub struct ExportType {
+    /// The name of the export.
+    pub name: String,
+    /// The kind of the export (function, table, memory, global, or tag).
+    pub kind: ExportKind,
 }
 
 impl ExportType {

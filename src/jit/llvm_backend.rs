@@ -1,21 +1,24 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::runtime::{
-    FunctionType, JitState, Module, NumType, Result, SuspendedHandle, SuspensionKind,
-    SuspensionState, ValType, WasmError, WasmValue,
+use std::{
+    collections::HashMap,
+    collections::hash_map::DefaultHasher,
+    ffi::CString,
+    hash::{Hash, Hasher},
+    ptr,
+    sync::OnceLock,
+    sync::atomic::{AtomicU64, Ordering},
+    thread::ThreadId,
 };
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::ffi::CString;
-use std::hash::{Hash, Hasher};
-use std::ptr;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread::ThreadId;
 
-static NEXT_JIT_ID: AtomicU64 = AtomicU64::new(1);
-static LLVM_INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
-
+#[cfg(feature = "llvm-jit")]
+use super::llvm_runtime::{
+    clear_execution_context_for_owner, clear_trap, configure_safepoints,
+    current_execution_context_id, current_execution_module_fingerprint,
+    current_execution_owner_jit_id, has_execution_context, set_execution_context_pinned_for_owner,
+    take_runtime_error, take_suspended_handle, take_trap,
+};
+use super::wasm_to_llvm::WasmToLlvmTranslator;
 #[cfg(feature = "llvm-jit")]
 use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
 #[cfg(feature = "llvm-jit")]
@@ -41,19 +44,13 @@ use llvm_sys::target::{
     LLVM_InitializeNativeAsmParser, LLVM_InitializeNativeAsmPrinter, LLVM_InitializeNativeTarget,
 };
 
-#[cfg(feature = "llvm-jit")]
-use super::llvm_runtime::{
-    clear_execution_context_for_owner, clear_trap, configure_safepoints,
-    current_execution_context_id, current_execution_module_fingerprint,
-    current_execution_owner_jit_id, has_execution_context, set_execution_context_pinned_for_owner,
-    take_runtime_error, take_suspended_handle, take_trap,
+use crate::runtime::{
+    FunctionType, JitState, Module, NumType, Result, SuspendedHandle, SuspensionKind,
+    SuspensionState, ValType, WasmError, WasmValue,
 };
-use super::wasm_to_llvm::WasmToLlvmTranslator;
 
-struct CompiledFunction {
-    entry_point: *const u8,
-    func_type: FunctionType,
-}
+static LLVM_INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+static NEXT_JIT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// LLVM-based JIT compiler for WebAssembly modules.
 ///
@@ -94,10 +91,9 @@ pub struct LlvmJit {
     last_execution_thread: Option<ThreadId>,
 }
 
-fn module_fingerprint(module: &Module) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    format!("{:?}", module).hash(&mut hasher);
-    hasher.finish()
+struct CompiledFunction {
+    entry_point: *const u8,
+    func_type: FunctionType,
 }
 
 /// A compiled WASM function ready for execution.
@@ -1034,6 +1030,12 @@ impl Drop for LlvmJit {
 #[cfg(not(feature = "llvm-jit"))]
 impl Drop for LlvmJit {
     fn drop(&mut self) {}
+}
+
+fn module_fingerprint(module: &Module) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{:?}", module).hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(all(test, feature = "llvm-jit"))]

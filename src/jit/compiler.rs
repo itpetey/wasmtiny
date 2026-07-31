@@ -1,111 +1,116 @@
+use std::{
+    collections::{HashMap, VecDeque},
+    hash::{Hash, Hasher},
+};
+
 use crate::jit::emitter::{Address, Condition, Emitter, Reg};
 use crate::jit::regalloc::LinearScanAllocator;
 #[cfg(test)]
 use crate::runtime::WasmValue;
 use crate::runtime::{Module, Result, WasmError};
-use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
 
-const WASM_UNREACHABLE: u8 = 0x00;
-const WASM_NOP: u8 = 0x01;
+/// Constant `HOT_THRESHOLD`.
+pub const HOT_THRESHOLD: u64 = 1000;
 #[allow(dead_code)]
 const WASM_BLOCK: u8 = 0x02;
-#[allow(dead_code)]
-const WASM_LOOP: u8 = 0x03;
-#[allow(dead_code)]
-const WASM_IF: u8 = 0x04;
-#[allow(dead_code)]
-const WASM_ELSE: u8 = 0x05;
-#[allow(dead_code)]
-const WASM_END: u8 = 0x0B;
 #[allow(dead_code)]
 const WASM_BR: u8 = 0x0C;
 #[allow(dead_code)]
 const WASM_BR_IF: u8 = 0x0D;
 #[allow(dead_code)]
 const WASM_BR_TABLE: u8 = 0x0E;
-const WASM_RETURN: u8 = 0x0F;
 #[allow(dead_code)]
 const WASM_CALL: u8 = 0x10;
 #[allow(dead_code)]
 const WASM_CALL_INDIRECT: u8 = 0x11;
 const WASM_DROP: u8 = 0x1A;
 #[allow(dead_code)]
-const WASM_SELECT: u8 = 0x1B;
-const WASM_LOCAL_GET: u8 = 0x20;
-const WASM_LOCAL_SET: u8 = 0x21;
-const WASM_LOCAL_TEE: u8 = 0x22;
+const WASM_ELSE: u8 = 0x05;
+#[allow(dead_code)]
+const WASM_END: u8 = 0x0B;
+#[allow(dead_code)]
+const WASM_F32_LOAD: u8 = 0x2A;
+#[allow(dead_code)]
+const WASM_F32_STORE: u8 = 0x38;
+#[allow(dead_code)]
+const WASM_F64_LOAD: u8 = 0x2B;
+#[allow(dead_code)]
+const WASM_F64_STORE: u8 = 0x39;
 #[allow(dead_code)]
 const WASM_GLOBAL_GET: u8 = 0x23;
 #[allow(dead_code)]
 const WASM_GLOBAL_SET: u8 = 0x24;
-const WASM_I32_LOAD: u8 = 0x28;
-const WASM_I64_LOAD: u8 = 0x29;
-#[allow(dead_code)]
-const WASM_F32_LOAD: u8 = 0x2A;
-#[allow(dead_code)]
-const WASM_F64_LOAD: u8 = 0x2B;
-const WASM_I32_STORE: u8 = 0x36;
-const WASM_I64_STORE: u8 = 0x37;
-#[allow(dead_code)]
-const WASM_F32_STORE: u8 = 0x38;
-#[allow(dead_code)]
-const WASM_F64_STORE: u8 = 0x39;
-const WASM_I32_CONST: u8 = 0x41;
-#[allow(dead_code)]
-const WASM_I64_CONST: u8 = 0x42;
 const WASM_I32_ADD: u8 = 0x6A;
-const WASM_I32_SUB: u8 = 0x6B;
-const WASM_I32_MUL: u8 = 0x6C;
+const WASM_I32_AND: u8 = 0x71;
+const WASM_I32_CONST: u8 = 0x41;
 const WASM_I32_DIV_S: u8 = 0x6D;
 const WASM_I32_DIV_U: u8 = 0x6E;
-const WASM_I32_REM_S: u8 = 0x6F;
-const WASM_I32_REM_U: u8 = 0x70;
-const WASM_I32_AND: u8 = 0x71;
-const WASM_I32_OR: u8 = 0x72;
-const WASM_I32_XOR: u8 = 0x73;
-const WASM_I32_SHL: u8 = 0x74;
-const WASM_I32_SHR_S: u8 = 0x75;
-const WASM_I32_SHR_U: u8 = 0x76;
-#[allow(dead_code)]
-const WASM_I32_ROTL: u8 = 0x79;
-#[allow(dead_code)]
-const WASM_I32_ROTR: u8 = 0x7A;
-const WASM_I32_EQZ: u8 = 0x45;
 const WASM_I32_EQ: u8 = 0x46;
-const WASM_I32_NE: u8 = 0x47;
-const WASM_I32_LT_S: u8 = 0x48;
-const WASM_I32_LT_U: u8 = 0x49;
+const WASM_I32_EQZ: u8 = 0x45;
+const WASM_I32_GE_S: u8 = 0x4E;
+const WASM_I32_GE_U: u8 = 0x4F;
 const WASM_I32_GT_S: u8 = 0x4A;
 const WASM_I32_GT_U: u8 = 0x4B;
 const WASM_I32_LE_S: u8 = 0x4C;
 const WASM_I32_LE_U: u8 = 0x4D;
-const WASM_I32_GE_S: u8 = 0x4E;
-const WASM_I32_GE_U: u8 = 0x4F;
-const WASM_I64_EQZ: u8 = 0x50;
+const WASM_I32_LOAD: u8 = 0x28;
+const WASM_I32_LT_S: u8 = 0x48;
+const WASM_I32_LT_U: u8 = 0x49;
+const WASM_I32_MUL: u8 = 0x6C;
+const WASM_I32_NE: u8 = 0x47;
+const WASM_I32_OR: u8 = 0x72;
+const WASM_I32_REM_S: u8 = 0x6F;
+const WASM_I32_REM_U: u8 = 0x70;
+#[allow(dead_code)]
+const WASM_I32_ROTL: u8 = 0x79;
+#[allow(dead_code)]
+const WASM_I32_ROTR: u8 = 0x7A;
+const WASM_I32_SHL: u8 = 0x74;
+const WASM_I32_SHR_S: u8 = 0x75;
+const WASM_I32_SHR_U: u8 = 0x76;
+const WASM_I32_STORE: u8 = 0x36;
+const WASM_I32_SUB: u8 = 0x6B;
+const WASM_I32_XOR: u8 = 0x73;
+const WASM_I64_ADD: u8 = 0x7C;
+const WASM_I64_AND: u8 = 0x83;
+#[allow(dead_code)]
+const WASM_I64_CONST: u8 = 0x42;
+const WASM_I64_DIV_S: u8 = 0x7F;
+const WASM_I64_DIV_U: u8 = 0x80;
 const WASM_I64_EQ: u8 = 0x51;
-const WASM_I64_NE: u8 = 0x52;
-const WASM_I64_LT_S: u8 = 0x53;
-const WASM_I64_LT_U: u8 = 0x54;
+const WASM_I64_EQZ: u8 = 0x50;
+const WASM_I64_GE_S: u8 = 0x59;
+const WASM_I64_GE_U: u8 = 0x5A;
 const WASM_I64_GT_S: u8 = 0x55;
 const WASM_I64_GT_U: u8 = 0x56;
 const WASM_I64_LE_S: u8 = 0x57;
 const WASM_I64_LE_U: u8 = 0x58;
-const WASM_I64_GE_S: u8 = 0x59;
-const WASM_I64_GE_U: u8 = 0x5A;
-const WASM_I64_ADD: u8 = 0x7C;
-const WASM_I64_SUB: u8 = 0x7D;
+const WASM_I64_LOAD: u8 = 0x29;
+const WASM_I64_LT_S: u8 = 0x53;
+const WASM_I64_LT_U: u8 = 0x54;
 const WASM_I64_MUL: u8 = 0x7E;
-const WASM_I64_DIV_S: u8 = 0x7F;
-const WASM_I64_DIV_U: u8 = 0x80;
+const WASM_I64_NE: u8 = 0x52;
+const WASM_I64_OR: u8 = 0x84;
 const WASM_I64_REM_S: u8 = 0x81;
 const WASM_I64_REM_U: u8 = 0x82;
-const WASM_I64_AND: u8 = 0x83;
-const WASM_I64_OR: u8 = 0x84;
-const WASM_I64_XOR: u8 = 0x85;
 const WASM_I64_SHL: u8 = 0x86;
 const WASM_I64_SHR_S: u8 = 0x87;
 const WASM_I64_SHR_U: u8 = 0x88;
+const WASM_I64_STORE: u8 = 0x37;
+const WASM_I64_SUB: u8 = 0x7D;
+const WASM_I64_XOR: u8 = 0x85;
+#[allow(dead_code)]
+const WASM_IF: u8 = 0x04;
+const WASM_LOCAL_GET: u8 = 0x20;
+const WASM_LOCAL_SET: u8 = 0x21;
+const WASM_LOCAL_TEE: u8 = 0x22;
+#[allow(dead_code)]
+const WASM_LOOP: u8 = 0x03;
+const WASM_NOP: u8 = 0x01;
+const WASM_RETURN: u8 = 0x0F;
+#[allow(dead_code)]
+const WASM_SELECT: u8 = 0x1B;
+const WASM_UNREACHABLE: u8 = 0x00;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 /// JIT compilation tier.
@@ -125,17 +130,6 @@ pub struct CompiledFunction {
     pub tier: CompilationTier,
     /// Generated machine-code bytes.
     pub code: Vec<u8>,
-}
-
-/// WebAssembly JIT compiler.
-pub struct JitCompiler {
-    code_cache: HashMap<u64, CompiledFunction>,
-    compilation_tier: CompilationTier,
-    call_counts: HashMap<u64, u64>,
-    osr_queue: OsrQueue,
-    osr_compilation_queue: OsrCompilationQueue,
-    osr_enabled: bool,
-    memory_size: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -163,6 +157,369 @@ struct PatchSite {
     x64_pos: usize,
     target_block_id: usize,
     is_rel8: bool,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+/// A value carried through an on-stack replacement transition.
+pub enum OsrValue {
+    /// A 32-bit integer value.
+    I32(i32),
+    /// A 64-bit integer value.
+    I64(i64),
+    /// A 32-bit floating-point value.
+    F32(f32),
+    /// A 64-bit floating-point value.
+    F64(f64),
+    /// A nullable reference encoded as an optional raw handle.
+    Ref(Option<u64>),
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+/// Control-frame metadata captured for on-stack replacement.
+pub struct OsrControlFrame {
+    /// Encoded block type for the frame.
+    pub block_type: u32,
+    /// Start program-counter offset for the frame.
+    pub start_pc: u32,
+    /// End program-counter offset for the frame.
+    pub end_pc: u32,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+/// Captured frame metadata used for on-stack replacement.
+pub struct OsrFrameMetadata {
+    /// Function index associated with the captured frame.
+    pub func_idx: u64,
+    /// Program-counter offset within the function.
+    pub pc: u32,
+    /// The local values.
+    pub locals: Vec<OsrValue>,
+    /// Operand-stack values captured at the transition point.
+    pub operand_stack: Vec<OsrValue>,
+    /// Control-flow frames captured at the transition point.
+    pub control_frames: Vec<OsrControlFrame>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+/// Lifecycle state for an OSR candidate.
+pub enum OsrState {
+    /// The function is queued but not yet being compiled.
+    Pending,
+    /// An optimised version is currently being compiled.
+    Compiling,
+    /// An optimised version is ready for transition.
+    Ready,
+    /// Execution is actively transitioning into optimised code.
+    Transitioning,
+}
+
+#[allow(dead_code)]
+/// Runtime state tracked for a function considered for OSR.
+pub struct OsrContext {
+    /// Function index associated with the context.
+    pub func_idx: u64,
+    /// Number of observed calls for the function.
+    pub call_count: u64,
+    /// Current OSR state for the function.
+    pub state: OsrState,
+    /// Captured frame metadata, when available.
+    pub frame_metadata: Option<OsrFrameMetadata>,
+}
+
+/// Osr queue.
+pub struct OsrQueue {
+    queue: VecDeque<u64>,
+}
+
+#[derive(Clone)]
+/// A queued request to compile an OSR target.
+pub struct OsrCompilationTask {
+    /// Function index to compile.
+    pub func_idx: u64,
+    /// Module identifier used to resolve the function.
+    pub module_id: u64,
+    /// Scheduling priority for the task.
+    pub priority: u32,
+}
+
+/// Osr compilation queue.
+pub struct OsrCompilationQueue {
+    tasks: Vec<OsrCompilationTask>,
+}
+
+/// WebAssembly JIT compiler.
+pub struct JitCompiler {
+    code_cache: HashMap<u64, CompiledFunction>,
+    compilation_tier: CompilationTier,
+    call_counts: HashMap<u64, u64>,
+    osr_queue: OsrQueue,
+    osr_compilation_queue: OsrCompilationQueue,
+    osr_enabled: bool,
+    memory_size: u32,
+}
+
+#[derive(Clone, Debug)]
+/// An entry point into optimised code for a specific program-counter offset.
+pub struct OsrEntryPoint {
+    /// WebAssembly program-counter offset for the transition site.
+    pub pc_offset: u32,
+    /// Native target address for the transition.
+    pub target_address: u64,
+}
+
+#[allow(dead_code)]
+/// Transition stub used to enter optimised code during OSR.
+pub struct OsrTrampoline {
+    /// Source compilation tier for the transition.
+    pub from_tier: CompilationTier,
+    /// Destination compilation tier for the transition.
+    pub to_tier: CompilationTier,
+    /// The encoded bytes.
+    pub code: Vec<u8>,
+    /// OSR entry points available in the generated code.
+    pub entry_points: Vec<OsrEntryPoint>,
+}
+
+#[allow(dead_code)]
+/// Osr jump buffer.
+pub struct OsrJumpBuffer {
+    /// The local values.
+    pub locals: Vec<OsrValue>,
+    /// Operand-stack values captured for the jump.
+    pub operand_stack: Vec<OsrValue>,
+    /// Program-counter offset to resume from.
+    pub pc: u32,
+    /// Function index associated with the buffer.
+    pub func_idx: u64,
+}
+
+#[cfg(test)]
+/// Jit runtime.
+pub struct JitRuntime {
+    compiler: JitCompiler,
+    compiled_code: HashMap<u64, Vec<u8>>,
+}
+
+#[allow(dead_code)]
+impl OsrValue {
+    /// Converts a WebAssembly value into its OSR representation.
+    pub fn from_wasm_value(wasm: crate::runtime::WasmValue) -> Self {
+        match wasm {
+            crate::runtime::WasmValue::I32(v) => OsrValue::I32(v),
+            crate::runtime::WasmValue::I64(v) => OsrValue::I64(v),
+            crate::runtime::WasmValue::F32(v) => OsrValue::F32(v),
+            crate::runtime::WasmValue::F64(v) => OsrValue::F64(v),
+            crate::runtime::WasmValue::FuncRef(idx) => OsrValue::Ref(Some(idx as u64)),
+            crate::runtime::WasmValue::ExternRef(idx) => OsrValue::Ref(Some(idx as u64)),
+            crate::runtime::WasmValue::NullRef(_) => OsrValue::Ref(None),
+        }
+    }
+
+    /// Converts this OSR value back into a WebAssembly value.
+    pub fn to_wasm_value(&self) -> crate::runtime::WasmValue {
+        match self {
+            OsrValue::I32(v) => crate::runtime::WasmValue::I32(*v),
+            OsrValue::I64(v) => crate::runtime::WasmValue::I64(*v),
+            OsrValue::F32(v) => crate::runtime::WasmValue::F32(*v),
+            OsrValue::F64(v) => crate::runtime::WasmValue::F64(*v),
+            OsrValue::Ref(idx) => crate::runtime::WasmValue::FuncRef(idx.unwrap_or(0) as u32),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl OsrFrameMetadata {
+    /// Creates a new `OsrFrameMetadata`.
+    pub fn new(func_idx: u64, pc: u32) -> Self {
+        Self {
+            func_idx,
+            pc,
+            locals: Vec::new(),
+            operand_stack: Vec::new(),
+            control_frames: Vec::new(),
+        }
+    }
+
+    /// Returns this value configured with locals.
+    pub fn with_locals(mut self, locals: Vec<OsrValue>) -> Self {
+        self.locals = locals;
+        self
+    }
+
+    /// Returns this value configured with operand stack.
+    pub fn with_operand_stack(mut self, stack: Vec<OsrValue>) -> Self {
+        self.operand_stack = stack;
+        self
+    }
+
+    /// Returns this value configured with control frames.
+    pub fn with_control_frames(mut self, frames: Vec<OsrControlFrame>) -> Self {
+        self.control_frames = frames;
+        self
+    }
+
+    /// Copies captured local values into the target storage.
+    pub fn transfer_locals(&self, target: &mut [OsrValue]) {
+        for (i, val) in self.locals.iter().enumerate() {
+            if i < target.len() {
+                target[i] = val.clone();
+            }
+        }
+    }
+
+    /// Copies captured stack values into the target storage.
+    pub fn transfer_stack(&self, target: &mut Vec<OsrValue>) {
+        target.clear();
+        target.extend_from_slice(&self.operand_stack);
+    }
+}
+
+#[allow(dead_code)]
+impl OsrContext {
+    /// Creates a new `OsrContext`.
+    pub fn new(func_idx: u64, call_count: u64) -> Self {
+        Self {
+            func_idx,
+            call_count,
+            state: OsrState::Pending,
+            frame_metadata: None,
+        }
+    }
+
+    /// Returns this value configured with metadata.
+    pub fn with_metadata(mut self, metadata: OsrFrameMetadata) -> Self {
+        self.frame_metadata = Some(metadata);
+        self
+    }
+
+    /// Extracts captured local values.
+    pub fn extract_locals(&self) -> Vec<OsrValue> {
+        self.frame_metadata
+            .as_ref()
+            .map(|m| m.locals.clone())
+            .unwrap_or_default()
+    }
+
+    /// Extracts the captured operand stack.
+    pub fn extract_operand_stack(&self) -> Vec<OsrValue> {
+        self.frame_metadata
+            .as_ref()
+            .map(|m| m.operand_stack.clone())
+            .unwrap_or_default()
+    }
+
+    /// Extracts the captured control frames.
+    pub fn extract_control_frames(&self) -> Vec<OsrControlFrame> {
+        self.frame_metadata
+            .as_ref()
+            .map(|m| m.control_frames.clone())
+            .unwrap_or_default()
+    }
+
+    /// Sets state.
+    pub fn set_state(&mut self, state: OsrState) {
+        self.state = state;
+    }
+
+    /// Marks the transition as ready.
+    pub fn mark_ready(&mut self) {
+        self.state = OsrState::Ready;
+    }
+
+    /// Marks the transition as in progress.
+    pub fn mark_transitioning(&mut self) {
+        self.state = OsrState::Transitioning;
+    }
+}
+
+#[allow(dead_code)]
+impl OsrQueue {
+    /// Creates a new `OsrQueue`.
+    pub fn new() -> Self {
+        Self {
+            queue: VecDeque::new(),
+        }
+    }
+
+    /// Pushes a value onto the stack.
+    pub fn push(&mut self, func_idx: u64) {
+        if !self.queue.contains(&func_idx) {
+            self.queue.push_back(func_idx);
+        }
+    }
+
+    /// Pops and returns the top value, if present.
+    pub fn pop(&mut self) -> Option<u64> {
+        self.queue.pop_front()
+    }
+
+    /// Returns whether the collection contains the given item.
+    pub fn contains(&self, func_idx: u64) -> bool {
+        self.queue.contains(&func_idx)
+    }
+
+    /// Returns the length.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Returns `true` if this value is empty.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
+
+impl Default for OsrQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(dead_code)]
+impl OsrCompilationQueue {
+    /// Creates a new `OsrCompilationQueue`.
+    pub fn new() -> Self {
+        Self { tasks: Vec::new() }
+    }
+
+    /// Pushes a value onto the stack.
+    pub fn push(&mut self, task: OsrCompilationTask) {
+        let pos = self
+            .tasks
+            .iter()
+            .position(|t| t.priority > task.priority)
+            .unwrap_or(self.tasks.len());
+        self.tasks.insert(pos, task);
+    }
+
+    /// Pops and returns the top value, if present.
+    pub fn pop(&mut self) -> Option<OsrCompilationTask> {
+        if self.tasks.is_empty() {
+            None
+        } else {
+            Some(self.tasks.remove(0))
+        }
+    }
+
+    /// Returns the length.
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Returns `true` if this value is empty.
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
+impl Default for OsrCompilationQueue {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[allow(clippy::new_without_default)]
@@ -1335,341 +1692,6 @@ impl JitCompiler {
     }
 }
 
-/// Constant `HOT_THRESHOLD`.
-pub const HOT_THRESHOLD: u64 = 1000;
-
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-/// Captured frame metadata used for on-stack replacement.
-pub struct OsrFrameMetadata {
-    /// Function index associated with the captured frame.
-    pub func_idx: u64,
-    /// Program-counter offset within the function.
-    pub pc: u32,
-    /// The local values.
-    pub locals: Vec<OsrValue>,
-    /// Operand-stack values captured at the transition point.
-    pub operand_stack: Vec<OsrValue>,
-    /// Control-flow frames captured at the transition point.
-    pub control_frames: Vec<OsrControlFrame>,
-}
-
-#[allow(dead_code)]
-impl OsrFrameMetadata {
-    /// Creates a new `OsrFrameMetadata`.
-    pub fn new(func_idx: u64, pc: u32) -> Self {
-        Self {
-            func_idx,
-            pc,
-            locals: Vec::new(),
-            operand_stack: Vec::new(),
-            control_frames: Vec::new(),
-        }
-    }
-
-    /// Returns this value configured with locals.
-    pub fn with_locals(mut self, locals: Vec<OsrValue>) -> Self {
-        self.locals = locals;
-        self
-    }
-
-    /// Returns this value configured with operand stack.
-    pub fn with_operand_stack(mut self, stack: Vec<OsrValue>) -> Self {
-        self.operand_stack = stack;
-        self
-    }
-
-    /// Returns this value configured with control frames.
-    pub fn with_control_frames(mut self, frames: Vec<OsrControlFrame>) -> Self {
-        self.control_frames = frames;
-        self
-    }
-
-    /// Copies captured local values into the target storage.
-    pub fn transfer_locals(&self, target: &mut [OsrValue]) {
-        for (i, val) in self.locals.iter().enumerate() {
-            if i < target.len() {
-                target[i] = val.clone();
-            }
-        }
-    }
-
-    /// Copies captured stack values into the target storage.
-    pub fn transfer_stack(&self, target: &mut Vec<OsrValue>) {
-        target.clear();
-        target.extend_from_slice(&self.operand_stack);
-    }
-}
-
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-/// A value carried through an on-stack replacement transition.
-pub enum OsrValue {
-    /// A 32-bit integer value.
-    I32(i32),
-    /// A 64-bit integer value.
-    I64(i64),
-    /// A 32-bit floating-point value.
-    F32(f32),
-    /// A 64-bit floating-point value.
-    F64(f64),
-    /// A nullable reference encoded as an optional raw handle.
-    Ref(Option<u64>),
-}
-
-#[allow(dead_code)]
-impl OsrValue {
-    /// Converts a WebAssembly value into its OSR representation.
-    pub fn from_wasm_value(wasm: crate::runtime::WasmValue) -> Self {
-        match wasm {
-            crate::runtime::WasmValue::I32(v) => OsrValue::I32(v),
-            crate::runtime::WasmValue::I64(v) => OsrValue::I64(v),
-            crate::runtime::WasmValue::F32(v) => OsrValue::F32(v),
-            crate::runtime::WasmValue::F64(v) => OsrValue::F64(v),
-            crate::runtime::WasmValue::FuncRef(idx) => OsrValue::Ref(Some(idx as u64)),
-            crate::runtime::WasmValue::ExternRef(idx) => OsrValue::Ref(Some(idx as u64)),
-            crate::runtime::WasmValue::NullRef(_) => OsrValue::Ref(None),
-        }
-    }
-
-    /// Converts this OSR value back into a WebAssembly value.
-    pub fn to_wasm_value(&self) -> crate::runtime::WasmValue {
-        match self {
-            OsrValue::I32(v) => crate::runtime::WasmValue::I32(*v),
-            OsrValue::I64(v) => crate::runtime::WasmValue::I64(*v),
-            OsrValue::F32(v) => crate::runtime::WasmValue::F32(*v),
-            OsrValue::F64(v) => crate::runtime::WasmValue::F64(*v),
-            OsrValue::Ref(idx) => crate::runtime::WasmValue::FuncRef(idx.unwrap_or(0) as u32),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-/// Control-frame metadata captured for on-stack replacement.
-pub struct OsrControlFrame {
-    /// Encoded block type for the frame.
-    pub block_type: u32,
-    /// Start program-counter offset for the frame.
-    pub start_pc: u32,
-    /// End program-counter offset for the frame.
-    pub end_pc: u32,
-}
-
-#[allow(dead_code)]
-/// Runtime state tracked for a function considered for OSR.
-pub struct OsrContext {
-    /// Function index associated with the context.
-    pub func_idx: u64,
-    /// Number of observed calls for the function.
-    pub call_count: u64,
-    /// Current OSR state for the function.
-    pub state: OsrState,
-    /// Captured frame metadata, when available.
-    pub frame_metadata: Option<OsrFrameMetadata>,
-}
-
-#[allow(dead_code)]
-impl OsrContext {
-    /// Creates a new `OsrContext`.
-    pub fn new(func_idx: u64, call_count: u64) -> Self {
-        Self {
-            func_idx,
-            call_count,
-            state: OsrState::Pending,
-            frame_metadata: None,
-        }
-    }
-
-    /// Returns this value configured with metadata.
-    pub fn with_metadata(mut self, metadata: OsrFrameMetadata) -> Self {
-        self.frame_metadata = Some(metadata);
-        self
-    }
-
-    /// Extracts captured local values.
-    pub fn extract_locals(&self) -> Vec<OsrValue> {
-        self.frame_metadata
-            .as_ref()
-            .map(|m| m.locals.clone())
-            .unwrap_or_default()
-    }
-
-    /// Extracts the captured operand stack.
-    pub fn extract_operand_stack(&self) -> Vec<OsrValue> {
-        self.frame_metadata
-            .as_ref()
-            .map(|m| m.operand_stack.clone())
-            .unwrap_or_default()
-    }
-
-    /// Extracts the captured control frames.
-    pub fn extract_control_frames(&self) -> Vec<OsrControlFrame> {
-        self.frame_metadata
-            .as_ref()
-            .map(|m| m.control_frames.clone())
-            .unwrap_or_default()
-    }
-
-    /// Sets state.
-    pub fn set_state(&mut self, state: OsrState) {
-        self.state = state;
-    }
-
-    /// Marks the transition as ready.
-    pub fn mark_ready(&mut self) {
-        self.state = OsrState::Ready;
-    }
-
-    /// Marks the transition as in progress.
-    pub fn mark_transitioning(&mut self) {
-        self.state = OsrState::Transitioning;
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
-/// Lifecycle state for an OSR candidate.
-pub enum OsrState {
-    /// The function is queued but not yet being compiled.
-    Pending,
-    /// An optimised version is currently being compiled.
-    Compiling,
-    /// An optimised version is ready for transition.
-    Ready,
-    /// Execution is actively transitioning into optimised code.
-    Transitioning,
-}
-
-/// Osr queue.
-pub struct OsrQueue {
-    queue: VecDeque<u64>,
-}
-
-#[allow(dead_code)]
-impl OsrQueue {
-    /// Creates a new `OsrQueue`.
-    pub fn new() -> Self {
-        Self {
-            queue: VecDeque::new(),
-        }
-    }
-
-    /// Pushes a value onto the stack.
-    pub fn push(&mut self, func_idx: u64) {
-        if !self.queue.contains(&func_idx) {
-            self.queue.push_back(func_idx);
-        }
-    }
-
-    /// Pops and returns the top value, if present.
-    pub fn pop(&mut self) -> Option<u64> {
-        self.queue.pop_front()
-    }
-
-    /// Returns whether the collection contains the given item.
-    pub fn contains(&self, func_idx: u64) -> bool {
-        self.queue.contains(&func_idx)
-    }
-
-    /// Returns the length.
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    /// Returns `true` if this value is empty.
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-}
-
-impl Default for OsrQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Clone)]
-/// A queued request to compile an OSR target.
-pub struct OsrCompilationTask {
-    /// Function index to compile.
-    pub func_idx: u64,
-    /// Module identifier used to resolve the function.
-    pub module_id: u64,
-    /// Scheduling priority for the task.
-    pub priority: u32,
-}
-
-/// Osr compilation queue.
-pub struct OsrCompilationQueue {
-    tasks: Vec<OsrCompilationTask>,
-}
-
-#[allow(dead_code)]
-impl OsrCompilationQueue {
-    /// Creates a new `OsrCompilationQueue`.
-    pub fn new() -> Self {
-        Self { tasks: Vec::new() }
-    }
-
-    /// Pushes a value onto the stack.
-    pub fn push(&mut self, task: OsrCompilationTask) {
-        let pos = self
-            .tasks
-            .iter()
-            .position(|t| t.priority > task.priority)
-            .unwrap_or(self.tasks.len());
-        self.tasks.insert(pos, task);
-    }
-
-    /// Pops and returns the top value, if present.
-    pub fn pop(&mut self) -> Option<OsrCompilationTask> {
-        if self.tasks.is_empty() {
-            None
-        } else {
-            Some(self.tasks.remove(0))
-        }
-    }
-
-    /// Returns the length.
-    pub fn len(&self) -> usize {
-        self.tasks.len()
-    }
-
-    /// Returns `true` if this value is empty.
-    pub fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
-    }
-}
-
-impl Default for OsrCompilationQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-/// Transition stub used to enter optimised code during OSR.
-pub struct OsrTrampoline {
-    /// Source compilation tier for the transition.
-    pub from_tier: CompilationTier,
-    /// Destination compilation tier for the transition.
-    pub to_tier: CompilationTier,
-    /// The encoded bytes.
-    pub code: Vec<u8>,
-    /// OSR entry points available in the generated code.
-    pub entry_points: Vec<OsrEntryPoint>,
-}
-
-#[derive(Clone, Debug)]
-/// An entry point into optimised code for a specific program-counter offset.
-pub struct OsrEntryPoint {
-    /// WebAssembly program-counter offset for the transition site.
-    pub pc_offset: u32,
-    /// Native target address for the transition.
-    pub target_address: u64,
-}
-
 #[allow(dead_code)]
 impl OsrTrampoline {
     /// Creates a new `OsrTrampoline`.
@@ -1706,19 +1728,6 @@ impl OsrTrampoline {
         }
         Ok(())
     }
-}
-
-#[allow(dead_code)]
-/// Osr jump buffer.
-pub struct OsrJumpBuffer {
-    /// The local values.
-    pub locals: Vec<OsrValue>,
-    /// Operand-stack values captured for the jump.
-    pub operand_stack: Vec<OsrValue>,
-    /// Program-counter offset to resume from.
-    pub pc: u32,
-    /// Function index associated with the buffer.
-    pub func_idx: u64,
 }
 
 #[allow(dead_code)]
@@ -1762,13 +1771,6 @@ impl Default for OsrJumpBuffer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[cfg(test)]
-/// Jit runtime.
-pub struct JitRuntime {
-    compiler: JitCompiler,
-    compiled_code: HashMap<u64, Vec<u8>>,
 }
 
 #[cfg(test)]

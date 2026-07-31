@@ -188,6 +188,13 @@ impl<R: Read> BinaryReader<R> {
     }
 }
 
+impl BinaryReader<std::io::Cursor<&[u8]>> {
+    /// Creates a reader over the given byte slice.
+    pub fn from_slice(data: &[u8]) -> Self {
+        Self::from_data(data.to_vec())
+    }
+}
+
 impl<R: Read> Read for BinaryReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let mut count = 0;
@@ -209,13 +216,6 @@ impl<R: Read> Read for BinaryReader<R> {
             *b = self.read_byte()?;
         }
         Ok(())
-    }
-}
-
-impl BinaryReader<std::io::Cursor<&[u8]>> {
-    /// Creates a reader over the given byte slice.
-    pub fn from_slice(data: &[u8]) -> Self {
-        Self::from_data(data.to_vec())
     }
 }
 

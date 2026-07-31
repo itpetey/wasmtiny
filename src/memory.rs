@@ -19,16 +19,22 @@
 //! - Write: `memory.write(offset, data)`
 //! - Grow: `memory.grow(pages)`
 
-use crate::runtime::SharedWaiter;
-use crate::runtime::{InstanceMeter, MemoryType, Result, SharedRegionId, TrapCode, WasmError};
-use parking_lot::{Condvar, Mutex, RwLock};
-use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
 
-/// Constant `PAGE_SIZE_BYTES`.
-pub const PAGE_SIZE_BYTES: u32 = 65536;
+use parking_lot::{Condvar, Mutex, RwLock};
+
+use crate::{
+    runtime::SharedWaiter,
+    runtime::{InstanceMeter, MemoryType, Result, SharedRegionId, TrapCode, WasmError},
+};
+
 /// Maximum number of pages (65536 pages = 4 GiB).
 pub const MAX_PAGES: u32 = 65536;
+/// Constant `PAGE_SIZE_BYTES`.
+pub const PAGE_SIZE_BYTES: u32 = 65536;
 
 /// Protection level for a shared memory region mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,95 +102,10 @@ pub struct Memory {
     waiters: Arc<RwLock<std::collections::HashMap<u32, Arc<Waiter>>>>,
 }
 
-// SAFETY: Memory manages an mmap'd region that is not aliased.
-// Access is synchronised via the Mutex wrapper in the runtime.
-unsafe impl Send for Memory {}
-
-impl std::fmt::Debug for Memory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Memory")
-            .field("mem_type", &self.mem_type)
-            .field("len", &self.len)
-            .field("capacity", &self.capacity)
-            .field("shared_ranges", &self.shared_ranges.len())
-            .finish()
-    }
-}
-
-impl Clone for Memory {
-    fn clone(&self) -> Self {
-        let new_mem = Memory::try_new(self.mem_type.clone())
-            .expect("cloned memory allocation should succeed");
-
-        // Grow to match the current size
-        let current_pages = self.size();
-        let mut result = new_mem;
-        if current_pages > result.size() {
-            let delta = current_pages - result.size();
-            result
-                .grow(delta)
-                .expect("cloned memory grow should succeed");
-        }
-
-        // Copy owned page data
-        if self.len > 0 {
-            // SAFETY: both pointers are valid for self.len bytes and non-overlapping
-            // (they are separate mmap allocations).
-            unsafe {
-                std::ptr::copy_nonoverlapping(self.ptr, result.ptr, self.len);
-            }
-        }
-
-        // Copy shared range metadata (not the actual mappings — those need re-attach)
-        result.shared_ranges = self.shared_ranges.clone();
-        result.meters = self.meters.clone();
-        result
-    }
-}
-
 #[derive(Debug)]
 struct Waiter {
     notified: Mutex<bool>,
     condvar: Condvar,
-}
-
-/// Perform an mmap allocation for the full virtual address range.
-fn mmap_reserve(capacity: usize) -> std::result::Result<*mut u8, WasmError> {
-    // SAFETY: We're reserving virtual address space with PROT_NONE.
-    // This is a standard pattern for pre-reserving VA ranges.
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            capacity,
-            libc::PROT_NONE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        )
-    };
-    if ptr == libc::MAP_FAILED {
-        return Err(WasmError::Instantiate(format!(
-            "mmap failed to reserve {} bytes of virtual address space",
-            capacity
-        )));
-    }
-    Ok(ptr as *mut u8)
-}
-
-/// Make a range of memory accessible with the given protection.
-fn mprotect_range(ptr: *mut u8, len: usize, prot: i32) -> std::result::Result<(), WasmError> {
-    if len == 0 {
-        return Ok(());
-    }
-    // SAFETY: ptr must point to a valid mmap'd region of at least `len` bytes.
-    let ret = unsafe { libc::mprotect(ptr as *mut libc::c_void, len, prot) };
-    if ret != 0 {
-        return Err(WasmError::Runtime(format!(
-            "mprotect failed: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
 }
 
 impl Memory {
@@ -232,13 +153,14 @@ impl Memory {
 
         // Make initial pages accessible
         if initial_bytes > 0
-            && let Err(e) = mprotect_range(ptr, initial_bytes, libc::PROT_READ | libc::PROT_WRITE) {
-                // Clean up on failure
-                unsafe {
-                    libc::munmap(ptr as *mut libc::c_void, capacity);
-                }
-                return Err(e);
+            && let Err(e) = mprotect_range(ptr, initial_bytes, libc::PROT_READ | libc::PROT_WRITE)
+        {
+            // Clean up on failure
+            unsafe {
+                libc::munmap(ptr as *mut libc::c_void, capacity);
             }
+            return Err(e);
+        }
 
         Ok(Self {
             mem_type,
@@ -892,6 +814,52 @@ impl Memory {
     }
 }
 
+// SAFETY: Memory manages an mmap'd region that is not aliased.
+// Access is synchronised via the Mutex wrapper in the runtime.
+unsafe impl Send for Memory {}
+
+impl std::fmt::Debug for Memory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Memory")
+            .field("mem_type", &self.mem_type)
+            .field("len", &self.len)
+            .field("capacity", &self.capacity)
+            .field("shared_ranges", &self.shared_ranges.len())
+            .finish()
+    }
+}
+
+impl Clone for Memory {
+    fn clone(&self) -> Self {
+        let new_mem = Memory::try_new(self.mem_type.clone())
+            .expect("cloned memory allocation should succeed");
+
+        // Grow to match the current size
+        let current_pages = self.size();
+        let mut result = new_mem;
+        if current_pages > result.size() {
+            let delta = current_pages - result.size();
+            result
+                .grow(delta)
+                .expect("cloned memory grow should succeed");
+        }
+
+        // Copy owned page data
+        if self.len > 0 {
+            // SAFETY: both pointers are valid for self.len bytes and non-overlapping
+            // (they are separate mmap allocations).
+            unsafe {
+                std::ptr::copy_nonoverlapping(self.ptr, result.ptr, self.len);
+            }
+        }
+
+        // Copy shared range metadata (not the actual mappings — those need re-attach)
+        result.shared_ranges = self.shared_ranges.clone();
+        result.meters = self.meters.clone();
+        result
+    }
+}
+
 impl Drop for Memory {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.capacity > 0 {
@@ -901,6 +869,45 @@ impl Drop for Memory {
             }
         }
     }
+}
+
+/// Perform an mmap allocation for the full virtual address range.
+fn mmap_reserve(capacity: usize) -> std::result::Result<*mut u8, WasmError> {
+    // SAFETY: We're reserving virtual address space with PROT_NONE.
+    // This is a standard pattern for pre-reserving VA ranges.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            capacity,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        return Err(WasmError::Instantiate(format!(
+            "mmap failed to reserve {} bytes of virtual address space",
+            capacity
+        )));
+    }
+    Ok(ptr as *mut u8)
+}
+
+/// Make a range of memory accessible with the given protection.
+fn mprotect_range(ptr: *mut u8, len: usize, prot: i32) -> std::result::Result<(), WasmError> {
+    if len == 0 {
+        return Ok(());
+    }
+    // SAFETY: ptr must point to a valid mmap'd region of at least `len` bytes.
+    let ret = unsafe { libc::mprotect(ptr as *mut libc::c_void, len, prot) };
+    if ret != 0 {
+        return Err(WasmError::Runtime(format!(
+            "mprotect failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

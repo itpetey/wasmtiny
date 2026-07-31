@@ -1,17 +1,24 @@
-use super::loader::AotLoader;
-use crate::interpreter::Interpreter;
-use crate::memory::RegionProt;
-use crate::runtime::{
-    Extern, FunctionType, Global, HostCallOutcome, HostCaller, HostFunc, ImportKind, Instance,
-    InstanceLimits, InstanceMeter, InstanceStats, Memory, Module, Result, SharedMemory,
-    SharedMemoryRegistry, SharedRegionId, SharedTable, Table, WasmError, WasmValue,
-};
-use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
 #[cfg(feature = "llvm-jit")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use super::loader::AotLoader;
+use parking_lot::Mutex as ParkingMutex;
+
+use crate::{
+    interpreter::Interpreter,
+    memory::RegionProt,
+    runtime::{
+        Extern, FunctionType, Global, HostCallOutcome, HostCaller, HostFunc, ImportKind, Instance,
+        InstanceLimits, InstanceMeter, InstanceStats, Memory, Module, Result, SharedMemory,
+        SharedMemoryRegistry, SharedRegionId, SharedTable, Table, WasmError, WasmValue,
+    },
+};
+
+/// Type alias for `NativeFunc`.
+pub type NativeFunc = Box<dyn Fn(&[WasmValue]) -> Result<Vec<WasmValue>> + Send + Sync>;
 
 static NEXT_AOT_MODULE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -20,28 +27,19 @@ struct TypedHostImport {
     func_type: FunctionType,
 }
 
-impl TypedHostImport {
-    fn new(inner: Arc<dyn HostFunc>, func_type: FunctionType) -> Self {
-        Self { inner, func_type }
-    }
-}
-
-impl HostFunc for TypedHostImport {
-    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self.inner.call(caller, args)
-    }
-
-    fn call_with_suspension(
-        &self,
-        caller: &mut HostCaller<'_>,
-        args: &[WasmValue],
-    ) -> Result<HostCallOutcome> {
-        self.inner.call_with_suspension(caller, args)
-    }
-
-    fn function_type(&self) -> Option<&FunctionType> {
-        Some(&self.func_type)
-    }
+#[derive(Debug, Clone)]
+/// Export exposed by an ahead-of-time module.
+pub enum AotExport {
+    /// A function export identified by function index.
+    Function(u32),
+    /// A table export identified by table index.
+    Table(u32),
+    /// A memory export identified by memory index.
+    Memory(u32),
+    /// A global export identified by global index.
+    Global(u32),
+    /// A tag export identified by tag index.
+    Tag(u32),
 }
 
 /// Ahead-of-time module state.
@@ -75,42 +73,35 @@ pub struct AotModule {
     pub exports: HashMap<String, AotExport>,
 }
 
-impl std::fmt::Debug for AotModule {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AotModule")
-            .field(
-                "imports",
-                &self
-                    .imports
-                    .iter()
-                    .filter(|binding| binding.is_some())
-                    .count(),
-            )
-            .field("native_functions", &self.native_functions.len())
-            .field("memories", &self.memories.len())
-            .field("tables", &self.tables)
-            .field("globals", &self.globals)
-            .field("exports", &self.exports)
-            .finish()
+/// Ahead-of-time runtime manager.
+pub struct AotRuntime {
+    loader: AotLoader,
+    /// Modules currently loaded into the runtime.
+    pub modules: Vec<Box<AotModule>>,
+}
+
+impl TypedHostImport {
+    fn new(inner: Arc<dyn HostFunc>, func_type: FunctionType) -> Self {
+        Self { inner, func_type }
     }
 }
 
-/// Type alias for `NativeFunc`.
-pub type NativeFunc = Box<dyn Fn(&[WasmValue]) -> Result<Vec<WasmValue>> + Send + Sync>;
+impl HostFunc for TypedHostImport {
+    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.inner.call(caller, args)
+    }
 
-#[derive(Debug, Clone)]
-/// Export exposed by an ahead-of-time module.
-pub enum AotExport {
-    /// A function export identified by function index.
-    Function(u32),
-    /// A table export identified by table index.
-    Table(u32),
-    /// A memory export identified by memory index.
-    Memory(u32),
-    /// A global export identified by global index.
-    Global(u32),
-    /// A tag export identified by tag index.
-    Tag(u32),
+    fn call_with_suspension(
+        &self,
+        caller: &mut HostCaller<'_>,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
+        self.inner.call_with_suspension(caller, args)
+    }
+
+    fn function_type(&self) -> Option<&FunctionType> {
+        Some(&self.func_type)
+    }
 }
 
 impl AotModule {
@@ -1165,6 +1156,26 @@ impl AotModule {
     }
 }
 
+impl std::fmt::Debug for AotModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AotModule")
+            .field(
+                "imports",
+                &self
+                    .imports
+                    .iter()
+                    .filter(|binding| binding.is_some())
+                    .count(),
+            )
+            .field("native_functions", &self.native_functions.len())
+            .field("memories", &self.memories.len())
+            .field("tables", &self.tables)
+            .field("globals", &self.globals)
+            .field("exports", &self.exports)
+            .finish()
+    }
+}
+
 impl Drop for AotModule {
     fn drop(&mut self) {
         #[cfg(feature = "llvm-jit")]
@@ -1187,13 +1198,6 @@ impl Drop for AotModule {
             }
         }
     }
-}
-
-/// Ahead-of-time runtime manager.
-pub struct AotRuntime {
-    loader: AotLoader,
-    /// Modules currently loaded into the runtime.
-    pub modules: Vec<Box<AotModule>>,
 }
 
 impl AotRuntime {
@@ -1398,6 +1402,17 @@ impl Default for AotRuntime {
     }
 }
 
+/// Creates aot module from wasm.
+pub fn create_aot_module_from_wasm(module: &Module) -> AotModule {
+    AotModule::from_module(module)
+}
+
+/// Validates aot data.
+pub fn validate_aot_data(data: &[u8]) -> Result<()> {
+    let loader = AotLoader::new();
+    loader.validate(data)
+}
+
 fn evaluate_const_expr_with_globals(expr: &[u8], globals: &[Option<Global>]) -> Result<WasmValue> {
     let mut reader = crate::loader::BinaryReader::from_slice(expr);
     let mut stack = Vec::new();
@@ -1494,6 +1509,19 @@ fn evaluate_const_expr_with_globals(expr: &[u8], globals: &[Option<Global>]) -> 
     }
 }
 
+fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryType) -> bool {
+    actual.size() >= required.limits.min()
+        && match (actual.type_().limits.max(), required.limits.max()) {
+            (_, None) => true,
+            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
+            (None, Some(_)) => false,
+        }
+}
+
+fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
+    WasmError::Runtime("instance lock poisoned".to_string())
+}
+
 fn pop_i32_const(stack: &mut Vec<WasmValue>) -> Result<i32> {
     match stack.pop() {
         Some(WasmValue::I32(value)) => Ok(value),
@@ -1520,10 +1548,6 @@ fn pop_i64_const(stack: &mut Vec<WasmValue>) -> Result<i64> {
     }
 }
 
-fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
-    WasmError::Runtime("instance lock poisoned".to_string())
-}
-
 fn table_matches_required(actual: &Table, required: &crate::runtime::TableType) -> bool {
     actual.type_.elem_type == required.elem_type
         && (actual.type_.nullable == required.nullable
@@ -1534,26 +1558,6 @@ fn table_matches_required(actual: &Table, required: &crate::runtime::TableType) 
             (Some(actual_max), Some(required_max)) => actual_max <= required_max,
             (None, Some(_)) => false,
         }
-}
-
-fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryType) -> bool {
-    actual.size() >= required.limits.min()
-        && match (actual.type_().limits.max(), required.limits.max()) {
-            (_, None) => true,
-            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
-            (None, Some(_)) => false,
-        }
-}
-
-/// Creates aot module from wasm.
-pub fn create_aot_module_from_wasm(module: &Module) -> AotModule {
-    AotModule::from_module(module)
-}
-
-/// Validates aot data.
-pub fn validate_aot_data(data: &[u8]) -> Result<()> {
-    let loader = AotLoader::new();
-    loader.validate(data)
 }
 
 #[cfg(test)]

@@ -1,14 +1,19 @@
-use crate::interpreter::{ControlFrame, ControlStack, FrameKind, OperandStack};
-use crate::runtime::{
-    FunctionType, HostCallOutcome, Instance, Module, NumType, RefType, Result, RuntimeSuspender,
-    SuspendedHandle, SuspensionKind, TrapCode, ValType, WasmError, WasmValue,
+use std::{
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{Arc, Mutex},
+    thread::ThreadId,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::ThreadId;
 
+use crate::{
+    interpreter::{ControlFrame, ControlStack, FrameKind, OperandStack},
+    runtime::{
+        FunctionType, HostCallOutcome, Instance, Module, NumType, RefType, Result,
+        RuntimeSuspender, SuspendedHandle, SuspensionKind, TrapCode, ValType, WasmError, WasmValue,
+    },
+};
+
+const MAX_CALL_DEPTH: usize = 1024;
 const MAX_STACK_SIZE: usize = 16384;
-
 static NEXT_INTERPRETER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Configuration for interpreter safepoints.
@@ -20,6 +25,40 @@ static NEXT_INTERPRETER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct SafepointConfig {
     check_interval: u32,
     enabled: Arc<AtomicBool>,
+}
+
+struct ControlSplit {
+    then_body: Vec<u8>,
+    else_body: Option<Vec<u8>>,
+    after_end: usize,
+}
+
+struct BlockSignature {
+    param_count: usize,
+    result_count: usize,
+}
+
+/// WebAssembly interpreter state and execution engine.
+pub struct Interpreter {
+    /// The operand stack for WebAssembly values.
+    pub operand_stack: OperandStack,
+    /// The control flow stack (for blocks, loops, functions).
+    pub control_stack: ControlStack,
+    /// The WebAssembly instance being executed.
+    pub instance: Option<Arc<Mutex<Instance>>>,
+    /// Local variables for the current function.
+    pub locals: Vec<WasmValue>,
+    safepoint_config: SafepointConfig,
+    instruction_count: u32,
+    suspender: Option<RuntimeSuspender>,
+    suspended_handle: Option<SuspendedHandle>,
+    active_suspension_id: Option<u64>,
+    safepoint_armed: bool,
+    resume_skip_pc: Option<usize>,
+    interpreter_id: u64,
+    suspension_epoch: u64,
+    needs_resume: bool,
+    execution_thread: Option<ThreadId>,
 }
 
 impl SafepointConfig {
@@ -58,42 +97,6 @@ impl Default for SafepointConfig {
         Self::new(false)
     }
 }
-
-struct ControlSplit {
-    then_body: Vec<u8>,
-    else_body: Option<Vec<u8>>,
-    after_end: usize,
-}
-
-struct BlockSignature {
-    param_count: usize,
-    result_count: usize,
-}
-
-/// WebAssembly interpreter state and execution engine.
-pub struct Interpreter {
-    /// The operand stack for WebAssembly values.
-    pub operand_stack: OperandStack,
-    /// The control flow stack (for blocks, loops, functions).
-    pub control_stack: ControlStack,
-    /// The WebAssembly instance being executed.
-    pub instance: Option<Arc<Mutex<Instance>>>,
-    /// Local variables for the current function.
-    pub locals: Vec<WasmValue>,
-    safepoint_config: SafepointConfig,
-    instruction_count: u32,
-    suspender: Option<RuntimeSuspender>,
-    suspended_handle: Option<SuspendedHandle>,
-    active_suspension_id: Option<u64>,
-    safepoint_armed: bool,
-    resume_skip_pc: Option<usize>,
-    interpreter_id: u64,
-    suspension_epoch: u64,
-    needs_resume: bool,
-    execution_thread: Option<ThreadId>,
-}
-
-const MAX_CALL_DEPTH: usize = 1024;
 
 impl Interpreter {
     /// Creates a new `Interpreter`.

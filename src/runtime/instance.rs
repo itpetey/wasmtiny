@@ -1,87 +1,23 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use super::{
     ExportKind, FunctionType, Global, ImportKind, InstanceLimits, InstanceMeter, InstanceStats,
     Memory, Module, RefType, Result, SharedMemoryRegistry, SharedRegionId, Table, TrapCode,
     ValType, WasmError, WasmValue,
 };
-use crate::loader::BinaryReader;
-use crate::memory::RegionProt;
 use parking_lot::Mutex as ParkingMutex;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
+use crate::{loader::BinaryReader, memory::RegionProt};
+
+/// Type alias for a shared (thread-safe) global reference.
+pub type SharedGlobal = Arc<Mutex<Global>>;
 /// Type alias for a shared (thread-safe) memory reference.
 pub type SharedMemory = Arc<Mutex<Memory>>;
 /// Type alias for a shared (thread-safe) table reference.
 pub type SharedTable = Arc<Mutex<Table>>;
-/// Type alias for a shared (thread-safe) global reference.
-pub type SharedGlobal = Arc<Mutex<Global>>;
-
-/// A WebAssembly instance.
-///
-/// An instance is an instantiated module with runtime state including memories,
-/// tables, globals, and exported functions.
-pub struct Instance {
-    module: Arc<Module>,
-    store: Arc<Mutex<Store>>,
-    shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
-    meter: Arc<InstanceMeter>,
-    /// The memory values.
-    pub memories: Vec<SharedMemory>,
-    /// The table values.
-    pub tables: Vec<SharedTable>,
-    /// The global values.
-    pub globals: Vec<SharedGlobal>,
-    /// Shared region IDs currently attached to this instance's memory.
-    attached_regions: Vec<SharedRegionId>,
-    funcs: Vec<Arc<dyn HostFunc>>,
-    exports: HashMap<String, Extern>,
-    import_bindings: Vec<Option<Extern>>,
-    elem_segments_active: Vec<bool>,
-    data_segments_active: Vec<bool>,
-    func_ref_handles: Vec<u32>,
-}
-
-/// An external value that can be imported or exported.
-///
-/// Represents a function, table, memory, or global that can be passed between
-/// the host and WebAssembly.
-#[derive(Clone)]
-/// A host or guest value exposed through imports and exports.
-pub enum Extern {
-    /// A guest-exported function binding.
-    Func(GuestFuncBinding),
-    /// A host-provided function.
-    HostFunc(Arc<dyn HostFunc>),
-    /// A shared table value.
-    Table(SharedTable),
-    /// A shared linear memory value.
-    Memory(SharedMemory),
-    /// A shared global value.
-    Global(SharedGlobal),
-    /// A tag signature.
-    Tag(FunctionType),
-}
-
-#[derive(Clone)]
-pub struct GuestFuncBinding {
-    pub module: Arc<Module>,
-    pub imports: Vec<(String, String, Extern)>,
-    pub func_idx: u32,
-    pub func_type: FunctionType,
-}
-
-impl std::fmt::Debug for Extern {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Extern::Func(func) => f.debug_tuple("Func").field(&func.func_idx).finish(),
-            Extern::HostFunc(_) => f.write_str("HostFunc(..)"),
-            Extern::Table(table) => f.debug_tuple("Table").field(table).finish(),
-            Extern::Memory(memory) => f.debug_tuple("Memory").field(memory).finish(),
-            Extern::Global(global) => f.debug_tuple("Global").field(global).finish(),
-            Extern::Tag(tag) => f.debug_tuple("Tag").field(tag).finish(),
-        }
-    }
-}
 
 /// Trait for host-provided functions callable from WebAssembly.
 ///
@@ -143,19 +79,6 @@ pub enum HostCallOutcome {
     },
 }
 
-impl<F> HostFunc for F
-where
-    F: Fn(&mut HostCaller<'_>, &[WasmValue]) -> Result<Vec<WasmValue>> + Send + Sync + 'static,
-{
-    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self(caller, args)
-    }
-
-    fn function_type(&self) -> Option<&FunctionType> {
-        None
-    }
-}
-
 /// A registered host function together with its signature metadata.
 pub struct NativeFuncRef {
     /// The host function implementation.
@@ -176,31 +99,83 @@ pub(crate) struct GuestFuncTarget {
     pub func_idx: u32,
 }
 
+struct TypedHostFunc {
+    inner: Arc<dyn HostFunc>,
+    func_type: FunctionType,
+}
+
+/// A WebAssembly instance.
+///
+/// An instance is an instantiated module with runtime state including memories,
+/// tables, globals, and exported functions.
+pub struct Instance {
+    module: Arc<Module>,
+    store: Arc<Mutex<Store>>,
+    shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
+    meter: Arc<InstanceMeter>,
+    /// The memory values.
+    pub memories: Vec<SharedMemory>,
+    /// The table values.
+    pub tables: Vec<SharedTable>,
+    /// The global values.
+    pub globals: Vec<SharedGlobal>,
+    /// Shared region IDs currently attached to this instance's memory.
+    attached_regions: Vec<SharedRegionId>,
+    funcs: Vec<Arc<dyn HostFunc>>,
+    exports: HashMap<String, Extern>,
+    import_bindings: Vec<Option<Extern>>,
+    elem_segments_active: Vec<bool>,
+    data_segments_active: Vec<bool>,
+    func_ref_handles: Vec<u32>,
+}
+
+/// The WebAssembly store.
+///
+/// A store holds all runtime state including instantiated instances and
+/// registered native (host) functions. It is shared among instances to enable
+/// inter-module communication.
+#[derive(Default)]
+/// Shared runtime store for instances and host resources.
+pub struct Store {
+    /// Instances currently owned by this store.
+    pub instances: Vec<Instance>,
+    native_funcs: Vec<NativeFuncRef>,
+    shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
+}
+
 /// Context for a host function invocation, including the calling instance.
 pub struct HostCaller<'a> {
     store: &'a mut Store,
     memories: &'a [SharedMemory],
 }
 
-impl<'a> HostCaller<'a> {
-    pub(crate) fn new(store: &'a mut Store, memories: &'a [SharedMemory]) -> Self {
-        Self { store, memories }
-    }
-
-    /// Returns the caller's linear memory at the given index.
-    pub fn memory(&self, index: u32) -> Option<SharedMemory> {
-        self.memories.get(index as usize).cloned()
-    }
-
-    /// Returns the runtime store backing this host call.
-    pub fn store(&mut self) -> &mut Store {
-        self.store
-    }
+/// An external value that can be imported or exported.
+///
+/// Represents a function, table, memory, or global that can be passed between
+/// the host and WebAssembly.
+#[derive(Clone)]
+/// A host or guest value exposed through imports and exports.
+pub enum Extern {
+    /// A guest-exported function binding.
+    Func(GuestFuncBinding),
+    /// A host-provided function.
+    HostFunc(Arc<dyn HostFunc>),
+    /// A shared table value.
+    Table(SharedTable),
+    /// A shared linear memory value.
+    Memory(SharedMemory),
+    /// A shared global value.
+    Global(SharedGlobal),
+    /// A tag signature.
+    Tag(FunctionType),
 }
 
-struct TypedHostFunc {
-    inner: Arc<dyn HostFunc>,
-    func_type: FunctionType,
+#[derive(Clone)]
+pub struct GuestFuncBinding {
+    pub module: Arc<Module>,
+    pub imports: Vec<(String, String, Extern)>,
+    pub func_idx: u32,
+    pub func_type: FunctionType,
 }
 
 struct GuestFuncRefHost {
@@ -208,69 +183,6 @@ struct GuestFuncRefHost {
     imports: Vec<(String, String, Extern)>,
     func_idx: u32,
     func_type: FunctionType,
-}
-
-impl HostFunc for GuestFuncRefHost {
-    fn call(&self, _caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        let imports = self
-            .imports
-            .iter()
-            .map(|(module, name, extern_)| {
-                let extern_ = match extern_ {
-                    Extern::Table(table) => Extern::Table(Arc::new(Mutex::new(
-                        table.lock().map_err(poisoned_lock)?.clone(),
-                    ))),
-                    _ => extern_.clone(),
-                };
-                Ok((module.as_str(), name.as_str(), extern_))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let instance = Arc::new(Mutex::new(Instance::with_imports(
-            self.module.clone(),
-            &imports,
-        )?));
-        let mut interpreter = crate::interpreter::Interpreter::with_instance(instance);
-        interpreter.execute_function(&self.module, self.func_idx, args)
-    }
-
-    fn function_type(&self) -> Option<&FunctionType> {
-        Some(&self.func_type)
-    }
-}
-
-impl GuestFuncBinding {
-    pub(crate) fn into_host_func(self) -> Arc<dyn HostFunc> {
-        Arc::new(GuestFuncRefHost {
-            module: self.module,
-            imports: self.imports,
-            func_idx: self.func_idx,
-            func_type: self.func_type,
-        })
-    }
-}
-
-impl TypedHostFunc {
-    fn new(inner: Arc<dyn HostFunc>, func_type: FunctionType) -> Self {
-        Self { inner, func_type }
-    }
-}
-
-impl HostFunc for TypedHostFunc {
-    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self.inner.call(caller, args)
-    }
-
-    fn call_with_suspension(
-        &self,
-        caller: &mut HostCaller<'_>,
-        args: &[WasmValue],
-    ) -> Result<HostCallOutcome> {
-        self.inner.call_with_suspension(caller, args)
-    }
-
-    fn function_type(&self) -> Option<&FunctionType> {
-        Some(&self.func_type)
-    }
 }
 
 impl NativeFuncRef {
@@ -306,148 +218,27 @@ impl NativeFuncRef {
     }
 }
 
-/// The WebAssembly store.
-///
-/// A store holds all runtime state including instantiated instances and
-/// registered native (host) functions. It is shared among instances to enable
-/// inter-module communication.
-#[derive(Default)]
-/// Shared runtime store for instances and host resources.
-pub struct Store {
-    /// Instances currently owned by this store.
-    pub instances: Vec<Instance>,
-    native_funcs: Vec<NativeFuncRef>,
-    shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
+impl TypedHostFunc {
+    fn new(inner: Arc<dyn HostFunc>, func_type: FunctionType) -> Self {
+        Self { inner, func_type }
+    }
 }
 
-impl Store {
-    /// Creates a new `Store`.
-    pub fn new() -> Self {
-        Self {
-            instances: Vec::new(),
-            native_funcs: Vec::new(),
-            shared_memory: Arc::new(ParkingMutex::new(SharedMemoryRegistry::default())),
-        }
+impl HostFunc for TypedHostFunc {
+    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self.inner.call(caller, args)
     }
 
-    /// Returns a clone of the shared memory registry Arc.
-    pub fn shared_memory_registry(&self) -> Arc<ParkingMutex<SharedMemoryRegistry>> {
-        self.shared_memory.clone()
-    }
-
-    /// Creates a `Store` backed by an existing shared memory registry.
-    ///
-    /// This allows multiple stores (and their instances) to share the same
-    /// `SharedMemoryRegistry`, making shared regions visible across all of them.
-    pub fn with_shared_registry(registry: Arc<ParkingMutex<SharedMemoryRegistry>>) -> Self {
-        Self {
-            instances: Vec::new(),
-            native_funcs: Vec::new(),
-            shared_memory: registry,
-        }
-    }
-
-    /// Adds instance.
-    pub fn add_instance(&mut self, instance: Instance) -> usize {
-        self.instances.push(instance);
-        self.instances.len() - 1
-    }
-
-    /// Registers native.
-    pub fn register_native(&mut self, func: Box<dyn HostFunc>, func_type: FunctionType) -> u32 {
-        let idx = self.native_funcs.len() as u32;
-        self.native_funcs
-            .push(NativeFuncRef::new(Arc::from(func), func_type));
-        idx
-    }
-
-    pub(crate) fn register_internal_native(
-        &mut self,
-        func: Box<dyn HostFunc>,
-        func_type: FunctionType,
-    ) -> u32 {
-        let idx = self.native_funcs.len() as u32;
-        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
-        native.internal = true;
-        self.native_funcs.push(native);
-        idx
-    }
-
-    pub(crate) fn register_internal_guest_native(
-        &mut self,
-        func: Box<dyn HostFunc>,
-        func_type: FunctionType,
-        module: Arc<Module>,
-        func_idx: u32,
-    ) -> u32 {
-        let idx = self.native_funcs.len() as u32;
-        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
-        native.internal = true;
-        native.guest_target = Some(GuestFuncTarget { module, func_idx });
-        self.native_funcs.push(native);
-        idx
-    }
-
-    /// Registers native func.
-    pub fn register_native_func(
-        &mut self,
-        _name: &str,
-        func: Box<dyn HostFunc>,
-        func_type: FunctionType,
-    ) -> u32 {
-        self.register_native(func, func_type)
-    }
-
-    /// Returns native func.
-    pub fn get_native_func(&self, idx: u32) -> Option<&NativeFuncRef> {
-        self.native_funcs.get(idx as usize)
-    }
-
-    /// Returns native func count.
-    pub fn get_native_func_count(&self) -> u32 {
-        self.native_funcs
-            .iter()
-            .filter(|func| !func.internal)
-            .count() as u32
-    }
-
-    /// Allocates a shared region without mapping it into any guest memory.
-    pub fn allocate_shared_region(&mut self, size: u32) -> Result<SharedRegionId> {
-        self.shared_memory.lock().allocate_region_standalone(size)
-    }
-
-    /// Destroys shared region.
-    pub fn destroy_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
-        self.shared_memory.lock().destroy_region(region_id)
-    }
-
-    /// Returns the length of the shared region in bytes.
-    pub fn shared_region_len(&self, region_id: SharedRegionId) -> Result<u32> {
-        self.shared_memory.lock().region_len(region_id)
-    }
-
-    /// Writes data to a shared region from the host side.
-    pub fn write_shared_region(
+    fn call_with_suspension(
         &self,
-        region_id: SharedRegionId,
-        offset: usize,
-        data: &[u8],
-    ) -> Result<()> {
-        self.shared_memory
-            .lock()
-            .write_to_region(region_id, offset, data)
+        caller: &mut HostCaller<'_>,
+        args: &[WasmValue],
+    ) -> Result<HostCallOutcome> {
+        self.inner.call_with_suspension(caller, args)
     }
 
-    /// Reads data from a shared region from the host side.
-    pub fn read_shared_region(
-        &self,
-        region_id: SharedRegionId,
-        offset: usize,
-        buf: &mut [u8],
-    ) -> Result<()> {
-        self.shared_memory
-            .lock()
-            .read_from_region(region_id, offset, buf)
+    fn function_type(&self) -> Option<&FunctionType> {
+        Some(&self.func_type)
     }
 }
 
@@ -1515,10 +1306,223 @@ impl Drop for Instance {
 
         for region_id in regions {
             if let Some(memory) = self.memories.first()
-                && let Ok(mut mem) = memory.lock() {
-                    let _ = shared_memory.detach_region(&mut mem, region_id);
-                }
+                && let Ok(mut mem) = memory.lock()
+            {
+                let _ = shared_memory.detach_region(&mut mem, region_id);
+            }
         }
+    }
+}
+
+impl Store {
+    /// Creates a new `Store`.
+    pub fn new() -> Self {
+        Self {
+            instances: Vec::new(),
+            native_funcs: Vec::new(),
+            shared_memory: Arc::new(ParkingMutex::new(SharedMemoryRegistry::default())),
+        }
+    }
+
+    /// Returns a clone of the shared memory registry Arc.
+    pub fn shared_memory_registry(&self) -> Arc<ParkingMutex<SharedMemoryRegistry>> {
+        self.shared_memory.clone()
+    }
+
+    /// Creates a `Store` backed by an existing shared memory registry.
+    ///
+    /// This allows multiple stores (and their instances) to share the same
+    /// `SharedMemoryRegistry`, making shared regions visible across all of them.
+    pub fn with_shared_registry(registry: Arc<ParkingMutex<SharedMemoryRegistry>>) -> Self {
+        Self {
+            instances: Vec::new(),
+            native_funcs: Vec::new(),
+            shared_memory: registry,
+        }
+    }
+
+    /// Adds instance.
+    pub fn add_instance(&mut self, instance: Instance) -> usize {
+        self.instances.push(instance);
+        self.instances.len() - 1
+    }
+
+    /// Registers native.
+    pub fn register_native(&mut self, func: Box<dyn HostFunc>, func_type: FunctionType) -> u32 {
+        let idx = self.native_funcs.len() as u32;
+        self.native_funcs
+            .push(NativeFuncRef::new(Arc::from(func), func_type));
+        idx
+    }
+
+    pub(crate) fn register_internal_native(
+        &mut self,
+        func: Box<dyn HostFunc>,
+        func_type: FunctionType,
+    ) -> u32 {
+        let idx = self.native_funcs.len() as u32;
+        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
+        native.internal = true;
+        self.native_funcs.push(native);
+        idx
+    }
+
+    pub(crate) fn register_internal_guest_native(
+        &mut self,
+        func: Box<dyn HostFunc>,
+        func_type: FunctionType,
+        module: Arc<Module>,
+        func_idx: u32,
+    ) -> u32 {
+        let idx = self.native_funcs.len() as u32;
+        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
+        native.internal = true;
+        native.guest_target = Some(GuestFuncTarget { module, func_idx });
+        self.native_funcs.push(native);
+        idx
+    }
+
+    /// Registers native func.
+    pub fn register_native_func(
+        &mut self,
+        _name: &str,
+        func: Box<dyn HostFunc>,
+        func_type: FunctionType,
+    ) -> u32 {
+        self.register_native(func, func_type)
+    }
+
+    /// Returns native func.
+    pub fn get_native_func(&self, idx: u32) -> Option<&NativeFuncRef> {
+        self.native_funcs.get(idx as usize)
+    }
+
+    /// Returns native func count.
+    pub fn get_native_func_count(&self) -> u32 {
+        self.native_funcs
+            .iter()
+            .filter(|func| !func.internal)
+            .count() as u32
+    }
+
+    /// Allocates a shared region without mapping it into any guest memory.
+    pub fn allocate_shared_region(&mut self, size: u32) -> Result<SharedRegionId> {
+        self.shared_memory.lock().allocate_region_standalone(size)
+    }
+
+    /// Destroys shared region.
+    pub fn destroy_shared_region(&mut self, region_id: SharedRegionId) -> Result<()> {
+        self.shared_memory.lock().destroy_region(region_id)
+    }
+
+    /// Returns the length of the shared region in bytes.
+    pub fn shared_region_len(&self, region_id: SharedRegionId) -> Result<u32> {
+        self.shared_memory.lock().region_len(region_id)
+    }
+
+    /// Writes data to a shared region from the host side.
+    pub fn write_shared_region(
+        &self,
+        region_id: SharedRegionId,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<()> {
+        self.shared_memory
+            .lock()
+            .write_to_region(region_id, offset, data)
+    }
+
+    /// Reads data from a shared region from the host side.
+    pub fn read_shared_region(
+        &self,
+        region_id: SharedRegionId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        self.shared_memory
+            .lock()
+            .read_from_region(region_id, offset, buf)
+    }
+}
+
+impl<'a> HostCaller<'a> {
+    pub(crate) fn new(store: &'a mut Store, memories: &'a [SharedMemory]) -> Self {
+        Self { store, memories }
+    }
+
+    /// Returns the caller's linear memory at the given index.
+    pub fn memory(&self, index: u32) -> Option<SharedMemory> {
+        self.memories.get(index as usize).cloned()
+    }
+
+    /// Returns the runtime store backing this host call.
+    pub fn store(&mut self) -> &mut Store {
+        self.store
+    }
+}
+
+impl std::fmt::Debug for Extern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Extern::Func(func) => f.debug_tuple("Func").field(&func.func_idx).finish(),
+            Extern::HostFunc(_) => f.write_str("HostFunc(..)"),
+            Extern::Table(table) => f.debug_tuple("Table").field(table).finish(),
+            Extern::Memory(memory) => f.debug_tuple("Memory").field(memory).finish(),
+            Extern::Global(global) => f.debug_tuple("Global").field(global).finish(),
+            Extern::Tag(tag) => f.debug_tuple("Tag").field(tag).finish(),
+        }
+    }
+}
+
+impl GuestFuncBinding {
+    pub(crate) fn into_host_func(self) -> Arc<dyn HostFunc> {
+        Arc::new(GuestFuncRefHost {
+            module: self.module,
+            imports: self.imports,
+            func_idx: self.func_idx,
+            func_type: self.func_type,
+        })
+    }
+}
+
+impl HostFunc for GuestFuncRefHost {
+    fn call(&self, _caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        let imports = self
+            .imports
+            .iter()
+            .map(|(module, name, extern_)| {
+                let extern_ = match extern_ {
+                    Extern::Table(table) => Extern::Table(Arc::new(Mutex::new(
+                        table.lock().map_err(poisoned_lock)?.clone(),
+                    ))),
+                    _ => extern_.clone(),
+                };
+                Ok((module.as_str(), name.as_str(), extern_))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let instance = Arc::new(Mutex::new(Instance::with_imports(
+            self.module.clone(),
+            &imports,
+        )?));
+        let mut interpreter = crate::interpreter::Interpreter::with_instance(instance);
+        interpreter.execute_function(&self.module, self.func_idx, args)
+    }
+
+    fn function_type(&self) -> Option<&FunctionType> {
+        Some(&self.func_type)
+    }
+}
+
+impl<F> HostFunc for F
+where
+    F: Fn(&mut HostCaller<'_>, &[WasmValue]) -> Result<Vec<WasmValue>> + Send + Sync + 'static,
+{
+    fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
+        self(caller, args)
+    }
+
+    fn function_type(&self) -> Option<&FunctionType> {
+        None
     }
 }
 
@@ -1640,6 +1644,23 @@ fn evaluate_const_expr(
     }
 }
 
+fn io_to_load_error(error: std::io::Error) -> WasmError {
+    WasmError::Load(error.to_string())
+}
+
+fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryType) -> bool {
+    actual.size() >= required.limits.min()
+        && match (actual.type_().limits.max(), required.limits.max()) {
+            (_, None) => true,
+            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
+            (None, Some(_)) => false,
+        }
+}
+
+fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
+    WasmError::Runtime("instance lock poisoned".to_string())
+}
+
 fn pop_const_i32(stack: &mut Vec<WasmValue>) -> Result<i32> {
     match stack.pop() {
         Some(WasmValue::I32(value)) => Ok(value),
@@ -1666,8 +1687,16 @@ fn pop_const_i64(stack: &mut Vec<WasmValue>) -> Result<i64> {
     }
 }
 
-fn io_to_load_error(error: std::io::Error) -> WasmError {
-    WasmError::Load(error.to_string())
+fn table_matches_required(actual: &Table, required: &crate::runtime::TableType) -> bool {
+    actual.type_.elem_type == required.elem_type
+        && (actual.type_.nullable == required.nullable
+            || (!actual.type_.nullable && required.nullable))
+        && actual.size() >= required.limits.min()
+        && match (actual.type_.limits.max(), required.limits.max()) {
+            (_, None) => true,
+            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
+            (None, Some(_)) => false,
+        }
 }
 
 fn validate_values(values: &[WasmValue], expected: &[ValType], kind: &str) -> Result<()> {
@@ -1693,31 +1722,6 @@ fn validate_values(values: &[WasmValue], expected: &[ValType], kind: &str) -> Re
     }
 
     Ok(())
-}
-
-fn table_matches_required(actual: &Table, required: &crate::runtime::TableType) -> bool {
-    actual.type_.elem_type == required.elem_type
-        && (actual.type_.nullable == required.nullable
-            || (!actual.type_.nullable && required.nullable))
-        && actual.size() >= required.limits.min()
-        && match (actual.type_.limits.max(), required.limits.max()) {
-            (_, None) => true,
-            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
-            (None, Some(_)) => false,
-        }
-}
-
-fn memory_matches_required(actual: &Memory, required: &crate::runtime::MemoryType) -> bool {
-    actual.size() >= required.limits.min()
-        && match (actual.type_().limits.max(), required.limits.max()) {
-            (_, None) => true,
-            (Some(actual_max), Some(required_max)) => actual_max <= required_max,
-            (None, Some(_)) => false,
-        }
-}
-
-fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
-    WasmError::Runtime("instance lock poisoned".to_string())
 }
 
 #[cfg(test)]

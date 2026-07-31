@@ -5,33 +5,19 @@
 
 use std::sync::Arc;
 
-use crate::runtime::WasmValue;
-use crate::runtime::instance::Instance;
-use crate::runtime::module::Module;
-use crate::runtime::suspend::SuspendedHandle;
-use crate::runtime::types::{GlobalType, MemoryType, TableType};
+use crate::{
+    runtime::WasmValue,
+    runtime::instance::Instance,
+    runtime::module::Module,
+    runtime::suspend::SuspendedHandle,
+    runtime::types::{GlobalType, MemoryType, TableType},
+};
+
+/// Type alias for `Result`.
+pub type Result<T> = std::result::Result<T, SnapshotError>;
 
 /// Snapshot format version used by serialised payloads.
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
-
-#[derive(Debug, Clone)]
-/// Complete snapshot payload for an instance.
-pub struct SnapshotPayload {
-    /// Snapshot format version.
-    pub version: u32,
-    /// Hash of the source module used for compatibility checks.
-    pub module_hash: u64,
-    /// Snapshots of the instance memories.
-    pub memory_snapshots: Vec<MemorySnapshot>,
-    /// Snapshots of the instance globals.
-    pub global_snapshots: Vec<GlobalSnapshot>,
-    /// Snapshots of the instance tables.
-    pub table_snapshots: Vec<TableSnapshot>,
-    /// Captured execution state, if the instance was suspended.
-    pub execution_state: Option<ExecutionStateSnapshot>,
-    /// Snapshot metadata used for bookkeeping.
-    pub metadata: SnapshotMetadata,
-}
 
 #[derive(Debug, Clone)]
 /// Metadata associated with a snapshot payload.
@@ -78,13 +64,6 @@ pub struct TableSnapshot {
 }
 
 #[derive(Debug, Clone)]
-/// Captured execution state for a suspended instance.
-pub struct ExecutionStateSnapshot {
-    /// Interpreter-specific execution state.
-    pub interpreter_state: InterpreterStateSnapshot,
-}
-
-#[derive(Debug, Clone)]
 /// Captured interpreter state needed to resume execution.
 pub struct InterpreterStateSnapshot {
     /// Program-counter offset within the current function body.
@@ -101,6 +80,32 @@ pub struct InterpreterStateSnapshot {
     pub interpreter_id: u64,
     /// Suspension epoch used to validate resumption.
     pub suspension_epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+/// Captured execution state for a suspended instance.
+pub struct ExecutionStateSnapshot {
+    /// Interpreter-specific execution state.
+    pub interpreter_state: InterpreterStateSnapshot,
+}
+
+#[derive(Debug, Clone)]
+/// Complete snapshot payload for an instance.
+pub struct SnapshotPayload {
+    /// Snapshot format version.
+    pub version: u32,
+    /// Hash of the source module used for compatibility checks.
+    pub module_hash: u64,
+    /// Snapshots of the instance memories.
+    pub memory_snapshots: Vec<MemorySnapshot>,
+    /// Snapshots of the instance globals.
+    pub global_snapshots: Vec<GlobalSnapshot>,
+    /// Snapshots of the instance tables.
+    pub table_snapshots: Vec<TableSnapshot>,
+    /// Captured execution state, if the instance was suspended.
+    pub execution_state: Option<ExecutionStateSnapshot>,
+    /// Snapshot metadata used for bookkeeping.
+    pub metadata: SnapshotMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,105 +144,6 @@ impl std::fmt::Display for SnapshotError {
 }
 
 impl std::error::Error for SnapshotError {}
-
-/// Type alias for `Result`.
-pub type Result<T> = std::result::Result<T, SnapshotError>;
-
-fn compute_module_hash(module: &Module) -> u64 {
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
-
-    let mut hasher = Sha256::new();
-
-    hasher.write_all(&module.types.len().to_le_bytes()).unwrap();
-    hasher.write_all(&module.funcs.len().to_le_bytes()).unwrap();
-    hasher
-        .write_all(&module.tables.len().to_le_bytes())
-        .unwrap();
-    hasher
-        .write_all(&module.memories.len().to_le_bytes())
-        .unwrap();
-    hasher
-        .write_all(&module.globals.len().to_le_bytes())
-        .unwrap();
-    hasher
-        .write_all(&module.exports.len().to_le_bytes())
-        .unwrap();
-    hasher
-        .write_all(&module.imports.len().to_le_bytes())
-        .unwrap();
-    hasher.write_all(&module.data.len().to_le_bytes()).unwrap();
-    hasher.write_all(&module.elems.len().to_le_bytes()).unwrap();
-
-    for func in &module.funcs {
-        hasher.write_all(&func.type_idx.to_le_bytes()).unwrap();
-    }
-
-    for mem in &module.memories {
-        hasher.write_all(&mem.limits.min().to_le_bytes()).unwrap();
-        if let Some(max) = mem.limits.max() {
-            hasher.write_all(&max.to_le_bytes()).unwrap();
-        }
-    }
-
-    for global_type in &module.globals {
-        hasher
-            .write_all(&global_type.content_type.hash_bytes())
-            .unwrap();
-        hasher.write_all(&[global_type.mutable as u8]).unwrap();
-    }
-
-    for table in &module.tables {
-        hasher.write_all(&[table.elem_type as u8]).unwrap();
-        hasher
-            .write_all(&(table.limits.min() as u64).to_le_bytes())
-            .unwrap();
-        if let Some(max) = table.limits.max() {
-            hasher.write_all(&(max as u64).to_le_bytes()).unwrap();
-        }
-    }
-
-    for export in &module.exports {
-        hasher.write_all(export.name.as_bytes()).unwrap();
-    }
-
-    for import in &module.imports {
-        hasher.write_all(import.module.as_bytes()).unwrap();
-        hasher.write_all(import.name.as_bytes()).unwrap();
-    }
-
-    for data in &module.data {
-        let kind_byte: u8 = match data.kind {
-            crate::runtime::module::DataKind::Active { .. } => 0,
-            crate::runtime::module::DataKind::Passive => 1,
-        };
-        hasher.write_all(&[kind_byte]).unwrap();
-        hasher
-            .write_all(&(data.init.len() as u64).to_le_bytes())
-            .unwrap();
-        hasher.write_all(&data.init).unwrap();
-    }
-
-    for elem in &module.elems {
-        let kind_byte: u8 = match elem.kind {
-            crate::runtime::module::ElemKind::Active { .. } => 0,
-            crate::runtime::module::ElemKind::Passive => 1,
-            crate::runtime::module::ElemKind::Declarative => 2,
-        };
-        hasher.write_all(&[kind_byte]).unwrap();
-        hasher
-            .write_all(&(elem.init.len() as u64).to_le_bytes())
-            .unwrap();
-        for elem_init in &elem.init {
-            hasher.write_all(elem_init).unwrap();
-        }
-    }
-
-    let result = hasher.finalize();
-    u64::from_le_bytes([
-        result[0], result[1], result[2], result[3], result[4], result[5], result[6], result[7],
-    ])
-}
 
 /// Captures snapshot.
 pub fn capture_snapshot(
@@ -341,28 +247,6 @@ pub fn capture_snapshot(
         execution_state,
         metadata,
     })
-}
-
-/// Validates snapshot compatibility.
-pub fn validate_snapshot_compatibility(
-    snapshot: &SnapshotPayload,
-    target_module: &Module,
-) -> Result<()> {
-    if snapshot.version != SNAPSHOT_FORMAT_VERSION {
-        return Err(SnapshotError::IncompatibleTarget(format!(
-            "snapshot format version {} is not compatible with runtime version {}",
-            snapshot.version, SNAPSHOT_FORMAT_VERSION
-        )));
-    }
-
-    let target_hash = compute_module_hash(target_module);
-    if snapshot.module_hash != target_hash {
-        return Err(SnapshotError::IncompatibleTarget(
-            "module hash mismatch: snapshot was created from a different module".to_string(),
-        ));
-    }
-
-    Ok(())
 }
 
 /// Restores snapshot.
@@ -525,6 +409,124 @@ pub fn restore_snapshot(
     }
 
     Ok(suspended_handle)
+}
+
+/// Validates snapshot compatibility.
+pub fn validate_snapshot_compatibility(
+    snapshot: &SnapshotPayload,
+    target_module: &Module,
+) -> Result<()> {
+    if snapshot.version != SNAPSHOT_FORMAT_VERSION {
+        return Err(SnapshotError::IncompatibleTarget(format!(
+            "snapshot format version {} is not compatible with runtime version {}",
+            snapshot.version, SNAPSHOT_FORMAT_VERSION
+        )));
+    }
+
+    let target_hash = compute_module_hash(target_module);
+    if snapshot.module_hash != target_hash {
+        return Err(SnapshotError::IncompatibleTarget(
+            "module hash mismatch: snapshot was created from a different module".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn compute_module_hash(module: &Module) -> u64 {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    let mut hasher = Sha256::new();
+
+    hasher.write_all(&module.types.len().to_le_bytes()).unwrap();
+    hasher.write_all(&module.funcs.len().to_le_bytes()).unwrap();
+    hasher
+        .write_all(&module.tables.len().to_le_bytes())
+        .unwrap();
+    hasher
+        .write_all(&module.memories.len().to_le_bytes())
+        .unwrap();
+    hasher
+        .write_all(&module.globals.len().to_le_bytes())
+        .unwrap();
+    hasher
+        .write_all(&module.exports.len().to_le_bytes())
+        .unwrap();
+    hasher
+        .write_all(&module.imports.len().to_le_bytes())
+        .unwrap();
+    hasher.write_all(&module.data.len().to_le_bytes()).unwrap();
+    hasher.write_all(&module.elems.len().to_le_bytes()).unwrap();
+
+    for func in &module.funcs {
+        hasher.write_all(&func.type_idx.to_le_bytes()).unwrap();
+    }
+
+    for mem in &module.memories {
+        hasher.write_all(&mem.limits.min().to_le_bytes()).unwrap();
+        if let Some(max) = mem.limits.max() {
+            hasher.write_all(&max.to_le_bytes()).unwrap();
+        }
+    }
+
+    for global_type in &module.globals {
+        hasher
+            .write_all(&global_type.content_type.hash_bytes())
+            .unwrap();
+        hasher.write_all(&[global_type.mutable as u8]).unwrap();
+    }
+
+    for table in &module.tables {
+        hasher.write_all(&[table.elem_type as u8]).unwrap();
+        hasher
+            .write_all(&(table.limits.min() as u64).to_le_bytes())
+            .unwrap();
+        if let Some(max) = table.limits.max() {
+            hasher.write_all(&(max as u64).to_le_bytes()).unwrap();
+        }
+    }
+
+    for export in &module.exports {
+        hasher.write_all(export.name.as_bytes()).unwrap();
+    }
+
+    for import in &module.imports {
+        hasher.write_all(import.module.as_bytes()).unwrap();
+        hasher.write_all(import.name.as_bytes()).unwrap();
+    }
+
+    for data in &module.data {
+        let kind_byte: u8 = match data.kind {
+            crate::runtime::module::DataKind::Active { .. } => 0,
+            crate::runtime::module::DataKind::Passive => 1,
+        };
+        hasher.write_all(&[kind_byte]).unwrap();
+        hasher
+            .write_all(&(data.init.len() as u64).to_le_bytes())
+            .unwrap();
+        hasher.write_all(&data.init).unwrap();
+    }
+
+    for elem in &module.elems {
+        let kind_byte: u8 = match elem.kind {
+            crate::runtime::module::ElemKind::Active { .. } => 0,
+            crate::runtime::module::ElemKind::Passive => 1,
+            crate::runtime::module::ElemKind::Declarative => 2,
+        };
+        hasher.write_all(&[kind_byte]).unwrap();
+        hasher
+            .write_all(&(elem.init.len() as u64).to_le_bytes())
+            .unwrap();
+        for elem_init in &elem.init {
+            hasher.write_all(elem_init).unwrap();
+        }
+    }
+
+    let result = hasher.finalize();
+    u64::from_le_bytes([
+        result[0], result[1], result[2], result[3], result[4], result[5], result[6], result[7],
+    ])
 }
 
 #[cfg(test)]

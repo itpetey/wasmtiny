@@ -1,8 +1,11 @@
-use crate::loader::{Parser, Validator};
-use crate::runtime::{Instance, Module, Result, WasmError};
 use std::sync::{Arc, Mutex};
 
 use super::runtime::{AotExport, AotModule};
+
+use crate::{
+    loader::{Parser, Validator},
+    runtime::{Instance, Module, Result, WasmError},
+};
 
 /// Ahead-of-time module loader.
 pub struct AotLoader {
@@ -93,14 +96,14 @@ impl AotLoader {
     }
 }
 
-fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
-    WasmError::Runtime("instance lock poisoned".to_string())
-}
-
 impl Default for AotLoader {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
+    WasmError::Runtime("instance lock poisoned".to_string())
 }
 
 #[cfg(test)]

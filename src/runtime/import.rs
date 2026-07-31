@@ -1,17 +1,3 @@
-/// Import descriptor from the WebAssembly module.
-///
-/// Represents an import from an external module (e.g., host functions, memories).
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Import.
-pub struct Import {
-    /// The module name of the import.
-    pub module: String,
-    /// The field name of the import.
-    pub name: String,
-    /// The kind of import (function, table, memory, global, or tag).
-    pub kind: ImportKind,
-}
-
 /// The kind of an import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Import kind.
@@ -26,6 +12,20 @@ pub enum ImportKind {
     Global(crate::runtime::GlobalType),
     /// A tag import (function type index).
     Tag(u32),
+}
+
+/// Import descriptor from the WebAssembly module.
+///
+/// Represents an import from an external module (e.g., host functions, memories).
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Import.
+pub struct Import {
+    /// The module name of the import.
+    pub module: String,
+    /// The field name of the import.
+    pub name: String,
+    /// The kind of import (function, table, memory, global, or tag).
+    pub kind: ImportKind,
 }
 
 /// Import type descriptor.

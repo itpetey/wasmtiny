@@ -1,5 +1,4 @@
-use super::Result;
-use super::WasmValue;
+use super::{Result, WasmValue};
 
 /// WebAssembly numeric types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +24,105 @@ pub enum RefType {
     ExternRef,
 }
 
+/// WebAssembly value types (numeric or reference).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Val type.
+pub enum ValType {
+    /// A numeric type ([`NumType`]).
+    Num(NumType),
+    /// A reference type ([`RefType`]).
+    Ref(RefType),
+}
+
+/// WebAssembly function signature.
+///
+/// A function type defines the parameter types and result types of a function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Function type.
+pub struct FunctionType {
+    /// Parameter types.
+    pub params: Vec<ValType>,
+    /// Result types.
+    pub results: Vec<ValType>,
+}
+
+/// Limits for memory pages or table elements.
+///
+/// Specifies the minimum and optionally maximum size for resources like
+/// memory pages or table element counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Limits.
+pub enum Limits {
+    /// Minimum only (no maximum).
+    Min(u32),
+    /// Minimum and maximum bounds.
+    MinMax(u32, u32),
+}
+
+/// WebAssembly table type.
+///
+/// Defines the element type and size limits for a table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Table type.
+pub struct TableType {
+    /// The element type of the table.
+    pub elem_type: RefType,
+    /// Whether the table accepts null references.
+    pub nullable: bool,
+    /// Size limits for the table.
+    pub limits: Limits,
+}
+
+/// WebAssembly memory type.
+///
+/// Defines the page size limits for a linear memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Memory type.
+pub struct MemoryType {
+    /// Size limits in pages (64 KiB per page).
+    pub limits: Limits,
+    /// Whether this memory is shared (atomic operations allowed).
+    pub shared: bool,
+}
+
+/// WebAssembly global type.
+///
+/// Defines the type and mutability of a global.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Global type.
+pub struct GlobalType {
+    /// The value type of the global.
+    pub content_type: ValType,
+    /// Whether the global is mutable.
+    pub mutable: bool,
+}
+
+/// A WebAssembly table instance.
+///
+/// Tables store function references or external references and support
+/// dynamic indexing.
+#[derive(Debug, Clone, PartialEq)]
+/// Table.
+pub struct Table {
+    /// The table type.
+    pub type_: TableType,
+    /// The table elements.
+    pub data: Vec<WasmValue>,
+}
+
+/// A WebAssembly global.
+///
+/// Globals hold a single value that can be either immutable or mutable.
+/// They can be accessed from WebAssembly code and (if mutable) modified.
+#[derive(Debug, Clone)]
+/// Global.
+pub struct Global {
+    /// The global type.
+    pub type_: GlobalType,
+    /// The current value.
+    pub value: super::WasmValue,
+}
+
 impl RefType {
     /// Decodes this value from its compact byte representation.
     pub fn from_u8(v: u8) -> Self {
@@ -34,16 +132,6 @@ impl RefType {
             _ => RefType::FuncRef,
         }
     }
-}
-
-/// WebAssembly value types (numeric or reference).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-/// Val type.
-pub enum ValType {
-    /// A numeric type ([`NumType`]).
-    Num(NumType),
-    /// A reference type ([`RefType`]).
-    Ref(RefType),
 }
 
 impl ValType {
@@ -82,18 +170,6 @@ impl ValType {
     }
 }
 
-/// WebAssembly function signature.
-///
-/// A function type defines the parameter types and result types of a function.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Function type.
-pub struct FunctionType {
-    /// Parameter types.
-    pub params: Vec<ValType>,
-    /// Result types.
-    pub results: Vec<ValType>,
-}
-
 impl FunctionType {
     /// Creates a new `FunctionType`.
     pub fn new(params: Vec<ValType>, results: Vec<ValType>) -> Self {
@@ -107,19 +183,6 @@ impl FunctionType {
             results: Vec::new(),
         }
     }
-}
-
-/// Limits for memory pages or table elements.
-///
-/// Specifies the minimum and optionally maximum size for resources like
-/// memory pages or table element counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Limits.
-pub enum Limits {
-    /// Minimum only (no maximum).
-    Min(u32),
-    /// Minimum and maximum bounds.
-    MinMax(u32, u32),
 }
 
 impl Limits {
@@ -153,20 +216,6 @@ impl Limits {
     }
 }
 
-/// WebAssembly table type.
-///
-/// Defines the element type and size limits for a table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Table type.
-pub struct TableType {
-    /// The element type of the table.
-    pub elem_type: RefType,
-    /// Whether the table accepts null references.
-    pub nullable: bool,
-    /// Size limits for the table.
-    pub limits: Limits,
-}
-
 impl TableType {
     /// Creates a new `TableType`.
     pub fn new(elem_type: RefType, limits: Limits) -> Self {
@@ -194,18 +243,6 @@ impl TableType {
     }
 }
 
-/// WebAssembly memory type.
-///
-/// Defines the page size limits for a linear memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Memory type.
-pub struct MemoryType {
-    /// Size limits in pages (64 KiB per page).
-    pub limits: Limits,
-    /// Whether this memory is shared (atomic operations allowed).
-    pub shared: bool,
-}
-
 impl MemoryType {
     /// Creates a new `MemoryType`.
     pub fn new(limits: Limits) -> Self {
@@ -226,18 +263,6 @@ impl MemoryType {
     }
 }
 
-/// WebAssembly global type.
-///
-/// Defines the type and mutability of a global.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Global type.
-pub struct GlobalType {
-    /// The value type of the global.
-    pub content_type: ValType,
-    /// Whether the global is mutable.
-    pub mutable: bool,
-}
-
 impl GlobalType {
     /// Creates a new `GlobalType`.
     pub fn new(content_type: ValType, mutable: bool) -> Self {
@@ -246,19 +271,6 @@ impl GlobalType {
             mutable,
         }
     }
-}
-
-/// A WebAssembly table instance.
-///
-/// Tables store function references or external references and support
-/// dynamic indexing.
-#[derive(Debug, Clone, PartialEq)]
-/// Table.
-pub struct Table {
-    /// The table type.
-    pub type_: TableType,
-    /// The table elements.
-    pub data: Vec<WasmValue>,
 }
 
 impl Table {
@@ -316,19 +328,6 @@ impl Table {
             .resize(new_size as usize, WasmValue::NullRef(self.type_.elem_type));
         Ok(old_size)
     }
-}
-
-/// A WebAssembly global.
-///
-/// Globals hold a single value that can be either immutable or mutable.
-/// They can be accessed from WebAssembly code and (if mutable) modified.
-#[derive(Debug, Clone)]
-/// Global.
-pub struct Global {
-    /// The global type.
-    pub type_: GlobalType,
-    /// The current value.
-    pub value: super::WasmValue,
 }
 
 impl Global {

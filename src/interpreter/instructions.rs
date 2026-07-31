@@ -1,3 +1,16 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Block type.
+pub struct BlockType(pub Option<u32>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Mem arg.
+pub struct MemArg {
+    /// Declared alignment exponent for the memory access.
+    pub align: u32,
+    /// The offset.
+    pub offset: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 /// Decoded WebAssembly instruction.
 pub enum Instruction {
@@ -437,19 +450,6 @@ pub enum Instruction {
     MemoryAtomicWait32(MemArg),
     /// WebAssembly `memory.atomic.wait64` instruction.
     MemoryAtomicWait64(MemArg),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Block type.
-pub struct BlockType(pub Option<u32>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Mem arg.
-pub struct MemArg {
-    /// Declared alignment exponent for the memory access.
-    pub align: u32,
-    /// The offset.
-    pub offset: u32,
 }
 
 #[cfg(test)]

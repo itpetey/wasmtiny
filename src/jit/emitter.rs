@@ -15,6 +15,146 @@ pub enum MemOffset {
     RipRel(i32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// x86-64 general-purpose register.
+pub enum Reg {
+    /// The `rax` register.
+    Rax,
+    /// The `rcx` register.
+    Rcx,
+    /// The `rdx` register.
+    Rdx,
+    /// The `rbx` register.
+    Rbx,
+    /// The `rsp` register.
+    Rsp,
+    /// The `rbp` register.
+    Rbp,
+    /// The `rsi` register.
+    Rsi,
+    /// The `rdi` register.
+    Rdi,
+    /// The `r8` register.
+    R8,
+    /// The `r9` register.
+    R9,
+    /// The `r10` register.
+    R10,
+    /// The `r11` register.
+    R11,
+    /// The `r12` register.
+    R12,
+    /// The `r13` register.
+    R13,
+    /// The `r14` register.
+    R14,
+    /// The `r15` register.
+    R15,
+    /// The `al` register.
+    Al,
+    /// The `cl` register.
+    Cl,
+    /// The `dl` register.
+    Dl,
+    /// The `bl` register.
+    Bl,
+}
+
+#[derive(Clone, Debug)]
+/// Memory address for x86-64 instructions.
+///
+/// Represents a memory operand with base register, index register, scale, and displacement.
+pub struct Address {
+    /// Optional base register.
+    pub base: Option<Reg>,
+    /// Optional index register.
+    pub index: Option<Reg>,
+    /// Scale factor applied to the index register.
+    pub scale: u8,
+    /// Optional displacement in bytes.
+    pub displacement: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// x86-64 SSE register (for floating-point operations).
+pub enum XmmReg {
+    /// The `xmm0` register.
+    Xmm0,
+    /// The `xmm1` register.
+    Xmm1,
+    /// The `xmm2` register.
+    Xmm2,
+    /// The `xmm3` register.
+    Xmm3,
+    /// The `xmm4` register.
+    Xmm4,
+    /// The `xmm5` register.
+    Xmm5,
+    /// The `xmm6` register.
+    Xmm6,
+    /// The `xmm7` register.
+    Xmm7,
+    /// The `xmm8` register.
+    Xmm8,
+    /// The `xmm9` register.
+    Xmm9,
+    /// The `xmm10` register.
+    Xmm10,
+    /// The `xmm11` register.
+    Xmm11,
+    /// The `xmm12` register.
+    Xmm12,
+    /// The `xmm13` register.
+    Xmm13,
+    /// The `xmm14` register.
+    Xmm14,
+    /// The `xmm15` register.
+    Xmm15,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// x86-64 condition codes for conditional instructions.
+pub enum Condition {
+    /// Overflow flag is set.
+    Overflow,
+    /// Overflow flag is clear.
+    NotOverflow,
+    /// Unsigned comparison is below.
+    Below,
+    /// Unsigned comparison is above or equal.
+    AboveOrEqual,
+    /// Comparison is equal.
+    Equal,
+    /// Comparison is not equal.
+    NotEqual,
+    /// Unsigned comparison is below or equal.
+    BelowOrEqual,
+    /// Unsigned comparison is above.
+    Above,
+    /// Sign flag is set.
+    Sign,
+    /// Sign flag is clear.
+    NotSign,
+    /// Parity flag is set.
+    Parity,
+    /// Parity flag is clear.
+    NotParity,
+    /// Signed comparison is less than.
+    LessSigned,
+    /// Signed comparison is greater than or equal.
+    GreaterOrEqualSigned,
+    /// Signed comparison is less than or equal.
+    LessOrEqualSigned,
+    /// Signed comparison is greater than.
+    GreaterSigned,
+}
+
+/// Machine code emitter.
+pub struct Emitter {
+    /// The generated code buffer.
+    code: Vec<u8>,
+}
+
 #[allow(dead_code)]
 impl MemOffset {
     /// Encodes this displacement into the ModR/M byte stream.
@@ -42,19 +182,43 @@ impl MemOffset {
     }
 }
 
-#[derive(Clone, Debug)]
-/// Memory address for x86-64 instructions.
-///
-/// Represents a memory operand with base register, index register, scale, and displacement.
-pub struct Address {
-    /// Optional base register.
-    pub base: Option<Reg>,
-    /// Optional index register.
-    pub index: Option<Reg>,
-    /// Scale factor applied to the index register.
-    pub scale: u8,
-    /// Optional displacement in bytes.
-    pub displacement: Option<i32>,
+impl Reg {
+    /// Returns the architectural encoding for this register.
+    pub fn encode(self) -> u8 {
+        match self {
+            Reg::Rax | Reg::Al => 0,
+            Reg::Rcx | Reg::Cl => 1,
+            Reg::Rdx | Reg::Dl => 2,
+            Reg::Rbx | Reg::Bl => 3,
+            Reg::Rsp => 4,
+            Reg::Rbp => 5,
+            Reg::Rsi => 6,
+            Reg::Rdi => 7,
+            Reg::R8 => 8,
+            Reg::R9 => 9,
+            Reg::R10 => 10,
+            Reg::R11 => 11,
+            Reg::R12 => 12,
+            Reg::R13 => 13,
+            Reg::R14 => 14,
+            Reg::R15 => 15,
+        }
+    }
+
+    /// Returns whether 64bit.
+    pub fn is_64bit(self) -> bool {
+        !self.is_8bit()
+    }
+
+    /// Returns whether 8bit.
+    pub fn is_8bit(self) -> bool {
+        matches!(self, Reg::Al | Reg::Cl | Reg::Dl | Reg::Bl)
+    }
+
+    /// Returns the natural word size of this register in bytes.
+    pub fn word_size(self) -> u8 {
+        if self.is_64bit() { 8 } else { 4 }
+    }
 }
 
 impl Address {
@@ -113,127 +277,6 @@ impl Address {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-/// x86-64 general-purpose register.
-pub enum Reg {
-    /// The `rax` register.
-    Rax,
-    /// The `rcx` register.
-    Rcx,
-    /// The `rdx` register.
-    Rdx,
-    /// The `rbx` register.
-    Rbx,
-    /// The `rsp` register.
-    Rsp,
-    /// The `rbp` register.
-    Rbp,
-    /// The `rsi` register.
-    Rsi,
-    /// The `rdi` register.
-    Rdi,
-    /// The `r8` register.
-    R8,
-    /// The `r9` register.
-    R9,
-    /// The `r10` register.
-    R10,
-    /// The `r11` register.
-    R11,
-    /// The `r12` register.
-    R12,
-    /// The `r13` register.
-    R13,
-    /// The `r14` register.
-    R14,
-    /// The `r15` register.
-    R15,
-    /// The `al` register.
-    Al,
-    /// The `cl` register.
-    Cl,
-    /// The `dl` register.
-    Dl,
-    /// The `bl` register.
-    Bl,
-}
-
-impl Reg {
-    /// Returns the architectural encoding for this register.
-    pub fn encode(self) -> u8 {
-        match self {
-            Reg::Rax | Reg::Al => 0,
-            Reg::Rcx | Reg::Cl => 1,
-            Reg::Rdx | Reg::Dl => 2,
-            Reg::Rbx | Reg::Bl => 3,
-            Reg::Rsp => 4,
-            Reg::Rbp => 5,
-            Reg::Rsi => 6,
-            Reg::Rdi => 7,
-            Reg::R8 => 8,
-            Reg::R9 => 9,
-            Reg::R10 => 10,
-            Reg::R11 => 11,
-            Reg::R12 => 12,
-            Reg::R13 => 13,
-            Reg::R14 => 14,
-            Reg::R15 => 15,
-        }
-    }
-
-    /// Returns whether 64bit.
-    pub fn is_64bit(self) -> bool {
-        !self.is_8bit()
-    }
-
-    /// Returns whether 8bit.
-    pub fn is_8bit(self) -> bool {
-        matches!(self, Reg::Al | Reg::Cl | Reg::Dl | Reg::Bl)
-    }
-
-    /// Returns the natural word size of this register in bytes.
-    pub fn word_size(self) -> u8 {
-        if self.is_64bit() { 8 } else { 4 }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// x86-64 SSE register (for floating-point operations).
-pub enum XmmReg {
-    /// The `xmm0` register.
-    Xmm0,
-    /// The `xmm1` register.
-    Xmm1,
-    /// The `xmm2` register.
-    Xmm2,
-    /// The `xmm3` register.
-    Xmm3,
-    /// The `xmm4` register.
-    Xmm4,
-    /// The `xmm5` register.
-    Xmm5,
-    /// The `xmm6` register.
-    Xmm6,
-    /// The `xmm7` register.
-    Xmm7,
-    /// The `xmm8` register.
-    Xmm8,
-    /// The `xmm9` register.
-    Xmm9,
-    /// The `xmm10` register.
-    Xmm10,
-    /// The `xmm11` register.
-    Xmm11,
-    /// The `xmm12` register.
-    Xmm12,
-    /// The `xmm13` register.
-    Xmm13,
-    /// The `xmm14` register.
-    Xmm14,
-    /// The `xmm15` register.
-    Xmm15,
-}
-
 impl XmmReg {
     /// Returns the architectural encoding for this SIMD register.
     pub fn encode(self) -> u8 {
@@ -258,43 +301,6 @@ impl XmmReg {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// x86-64 condition codes for conditional instructions.
-pub enum Condition {
-    /// Overflow flag is set.
-    Overflow,
-    /// Overflow flag is clear.
-    NotOverflow,
-    /// Unsigned comparison is below.
-    Below,
-    /// Unsigned comparison is above or equal.
-    AboveOrEqual,
-    /// Comparison is equal.
-    Equal,
-    /// Comparison is not equal.
-    NotEqual,
-    /// Unsigned comparison is below or equal.
-    BelowOrEqual,
-    /// Unsigned comparison is above.
-    Above,
-    /// Sign flag is set.
-    Sign,
-    /// Sign flag is clear.
-    NotSign,
-    /// Parity flag is set.
-    Parity,
-    /// Parity flag is clear.
-    NotParity,
-    /// Signed comparison is less than.
-    LessSigned,
-    /// Signed comparison is greater than or equal.
-    GreaterOrEqualSigned,
-    /// Signed comparison is less than or equal.
-    LessOrEqualSigned,
-    /// Signed comparison is greater than.
-    GreaterSigned,
-}
-
 impl Condition {
     /// Returns the machine-code encoding for this condition code.
     pub fn encode(self) -> u8 {
@@ -317,12 +323,6 @@ impl Condition {
             Condition::GreaterSigned => 0xF,
         }
     }
-}
-
-/// Machine code emitter.
-pub struct Emitter {
-    /// The generated code buffer.
-    code: Vec<u8>,
 }
 
 impl Emitter {

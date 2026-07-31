@@ -1,21 +1,21 @@
-use crate::aot_runtime::runtime::AotModule;
-use crate::runtime::{
-    NumType, Result, RuntimeSuspender, SharedMemoryMappingId, SuspendedHandle, TrapCode, ValType,
-    WasmError, WasmValue,
-};
-use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::ptr;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    cell::RefCell,
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    ptr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-thread_local! {
-    static LLVM_RUNTIME_CTX: RefCell<LlvmRuntimeContext> =
-        const { RefCell::new(LlvmRuntimeContext::new()) };
-}
+use crate::{
+    aot_runtime::runtime::AotModule,
+    runtime::{
+        NumType, Result, RuntimeSuspender, SharedMemoryMappingId, SuspendedHandle, TrapCode,
+        ValType, WasmError, WasmValue,
+    },
+};
 
 struct LlvmRuntimeContext {
     memory_ptr: *mut u8,
@@ -59,18 +59,1077 @@ impl LlvmRuntimeContext {
     }
 }
 
-fn context_id_for_module(module: *mut AotModule) -> Option<u64> {
-    (!module.is_null()).then(|| unsafe { (&*module).runtime_id() })
+thread_local! {
+    static LLVM_RUNTIME_CTX: RefCell<LlvmRuntimeContext> =
+        const { RefCell::new(LlvmRuntimeContext::new()) };
 }
 
-fn fingerprint_for_module(module: *mut AotModule) -> Option<u64> {
-    if module.is_null() {
-        return None;
+macro_rules! define_shared_load {
+    ($name:ident, $ty:ty, $default:expr, $call:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(mapping_id: u64, offset: u32) -> $ty {
+            let mapping_id = SharedMemoryMappingId::from_raw(mapping_id);
+            let Some(result) = with_current_module_mut(|module| $call(module, mapping_id, offset))
+            else {
+                set_runtime_error("missing JIT execution context for shared memory".to_string());
+                set_trap(TrapCode::HostTrap);
+                return $default;
+            };
+
+            match result {
+                Ok(value) => value,
+                Err(WasmError::Trap(code)) => {
+                    set_trap(code);
+                    $default
+                }
+                Err(error) => {
+                    set_runtime_error(error.to_string());
+                    set_trap(TrapCode::HostTrap);
+                    $default
+                }
+            }
+        }
+    };
+}
+
+macro_rules! define_shared_store {
+    ($name:ident, $ty:ty, $call:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(mapping_id: u64, offset: u32, value: $ty) {
+            let mapping_id = SharedMemoryMappingId::from_raw(mapping_id);
+            let Some(result) =
+                with_current_module_mut(|module| $call(module, mapping_id, offset, value))
+            else {
+                set_runtime_error("missing JIT execution context for shared memory".to_string());
+                set_trap(TrapCode::HostTrap);
+                return;
+            };
+
+            match result {
+                Ok(()) => {}
+                Err(WasmError::Trap(code)) => set_trap(code),
+                Err(error) => {
+                    set_runtime_error(error.to_string());
+                    set_trap(TrapCode::HostTrap);
+                }
+            }
+        }
+    };
+}
+
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load,
+    i32,
+    0i32,
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_i32(mapping_id, offset)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load,
+    i64,
+    0i64,
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_i64(mapping_id, offset)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_f32_load,
+    f32,
+    0.0f32,
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_f32(mapping_id, offset)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_f64_load,
+    f64,
+    0.0f64,
+    |module: &mut AotModule, mapping_id, offset| {
+        module.read_shared_region_f64(mapping_id, offset)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load8_s,
+    i32,
+    0i32,
+    |module: &mut AotModule, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i8 as i32)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load8_u,
+    i32,
+    0i32,
+    |module: &mut AotModule, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i32)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load16_s,
+    i32,
+    0i32,
+    |module: &mut AotModule, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(i16::from_le_bytes(bytes) as i32)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i32_load16_u,
+    i32,
+    0i32,
+    |module: &mut AotModule, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(u16::from_le_bytes(bytes) as i32)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load8_s,
+    i64,
+    0i64,
+    |module: &mut AotModule, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i8 as i64)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load8_u,
+    i64,
+    0i64,
+    |module: &mut AotModule, mapping_id, offset| {
+        module
+            .read_shared_region_u8(mapping_id, offset)
+            .map(|v| v as i64)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load16_s,
+    i64,
+    0i64,
+    |module: &mut AotModule, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(i16::from_le_bytes(bytes) as i64)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load16_u,
+    i64,
+    0i64,
+    |module: &mut AotModule, mapping_id, offset| {
+        let mut bytes = [0u8; 2];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(u16::from_le_bytes(bytes) as i64)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load32_s,
+    i64,
+    0i64,
+    |module: &mut AotModule, mapping_id, offset| {
+        let mut bytes = [0u8; 4];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(i32::from_le_bytes(bytes) as i64)
+    }
+);
+
+define_shared_load!(
+    llvm_jit_shared_memory_i64_load32_u,
+    i64,
+    0i64,
+    |module: &mut AotModule, mapping_id, offset| {
+        let mut bytes = [0u8; 4];
+        module.read_shared_region(mapping_id, offset, &mut bytes)?;
+        Ok(u32::from_le_bytes(bytes) as i64)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i32_store,
+    i32,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region_i32(mapping_id, offset, value)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store,
+    i64,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region_i64(mapping_id, offset, value)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_f32_store,
+    f32,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region_f32(mapping_id, offset, value)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_f64_store,
+    f64,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region_f64(mapping_id, offset, value)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i32_store8,
+    i32,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region_u8(mapping_id, offset, value as u8)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i32_store16,
+    i32,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store8,
+    i64,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region_u8(mapping_id, offset, value as u8)
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store16,
+    i64,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
+    }
+);
+
+define_shared_store!(
+    llvm_jit_shared_memory_i64_store32,
+    i64,
+    |module: &mut AotModule, mapping_id, offset, value| {
+        module.write_shared_region(mapping_id, offset, &(value as u32).to_le_bytes())
+    }
+);
+
+macro_rules! define_load {
+    ($name:ident, $size:expr, $ty:ty, $default:expr, $body:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32) -> $ty {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe { $body(ptr) },
+                None => {
+                    set_trap(TrapCode::MemoryOutOfBounds);
+                    $default
+                }
+            }
+        }
+    };
+}
+
+macro_rules! define_store {
+    ($name:ident, $size:expr, $ty:ty, $body:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32, val: $ty) {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe { $body(ptr, val) },
+                None => set_trap(TrapCode::MemoryOutOfBounds),
+            }
+        }
+    };
+}
+
+define_load!(
+    llvm_jit_i32_load,
+    4,
+    i32,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const i32)
+);
+
+define_load!(
+    llvm_jit_i64_load,
+    8,
+    i64,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const i64)
+);
+
+define_load!(llvm_jit_f32_load, 4, f32, 0.0, |ptr| {
+    std::ptr::read_unaligned(ptr as *const f32)
+});
+
+define_load!(llvm_jit_f64_load, 8, f64, 0.0, |ptr| {
+    std::ptr::read_unaligned(ptr as *const f64)
+});
+
+define_load!(
+    llvm_jit_i32_load8_s,
+    1,
+    i32,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const i8) as i32
+);
+
+define_load!(
+    llvm_jit_i32_load8_u,
+    1,
+    i32,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const u8) as i32
+);
+
+define_load!(
+    llvm_jit_i32_load16_s,
+    2,
+    i32,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const i16) as i32
+);
+
+define_load!(
+    llvm_jit_i32_load16_u,
+    2,
+    i32,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const u16) as i32
+);
+
+define_load!(
+    llvm_jit_i64_load8_s,
+    1,
+    i64,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const i8) as i64
+);
+
+define_load!(
+    llvm_jit_i64_load8_u,
+    1,
+    i64,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const u8) as i64
+);
+
+define_load!(
+    llvm_jit_i64_load16_s,
+    2,
+    i64,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const i16) as i64
+);
+
+define_load!(
+    llvm_jit_i64_load16_u,
+    2,
+    i64,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const u16) as i64
+);
+
+define_load!(
+    llvm_jit_i64_load32_s,
+    4,
+    i64,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const i32) as i64
+);
+
+define_load!(
+    llvm_jit_i64_load32_u,
+    4,
+    i64,
+    0,
+    |ptr| std::ptr::read_unaligned(ptr as *const u32) as i64
+);
+
+define_store!(llvm_jit_i32_store, 4, i32, |ptr, val| {
+    std::ptr::write_unaligned(ptr as *mut i32, val)
+});
+
+define_store!(llvm_jit_i64_store, 8, i64, |ptr, val| {
+    std::ptr::write_unaligned(ptr as *mut i64, val)
+});
+
+define_store!(llvm_jit_f32_store, 4, f32, |ptr, val| {
+    std::ptr::write_unaligned(ptr as *mut f32, val)
+});
+
+define_store!(llvm_jit_f64_store, 8, f64, |ptr, val| {
+    std::ptr::write_unaligned(ptr as *mut f64, val)
+});
+
+define_store!(llvm_jit_i32_store8, 1, i32, |ptr, val| {
+    std::ptr::write_unaligned(ptr, val as u8)
+});
+
+define_store!(llvm_jit_i32_store16, 2, i32, |ptr, val| {
+    std::ptr::write_unaligned(ptr as *mut u16, val as u16)
+});
+
+define_store!(llvm_jit_i64_store8, 1, i64, |ptr, val| {
+    std::ptr::write_unaligned(ptr, val as u8)
+});
+
+define_store!(llvm_jit_i64_store16, 2, i64, |ptr, val| {
+    std::ptr::write_unaligned(ptr as *mut u16, val as u16)
+});
+
+define_store!(llvm_jit_i64_store32, 4, i64, |ptr, val| {
+    std::ptr::write_unaligned(ptr as *mut u32, val as u32)
+});
+
+macro_rules! define_atomic_load {
+    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $cast:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32) -> $ty {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe {
+                    let atomic_ptr = ptr as *mut $atomic_ty;
+                    $cast((*atomic_ptr).load(Ordering::SeqCst))
+                },
+                None => {
+                    set_trap(TrapCode::MemoryOutOfBounds);
+                    0 as $ty
+                }
+            }
+        }
+    };
+}
+
+macro_rules! define_atomic_store {
+    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $cast:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32, val: $ty) {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe {
+                    let atomic_ptr = ptr as *mut $atomic_ty;
+                    (*atomic_ptr).store($cast(val), Ordering::SeqCst);
+                },
+                None => set_trap(TrapCode::MemoryOutOfBounds),
+            }
+        }
+    };
+}
+
+define_atomic_load!(
+    llvm_jit_i32_atomic_load,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |v: i32| v
+);
+
+define_atomic_load!(
+    llvm_jit_i64_atomic_load,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |v: i64| v
+);
+
+define_atomic_store!(
+    llvm_jit_i32_atomic_store,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |v: i32| v
+);
+
+define_atomic_store!(
+    llvm_jit_i64_atomic_store,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |v: i64| v
+);
+
+macro_rules! define_atomic_rmw {
+    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $op:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(addr: u32, val: $ty) -> $ty {
+            match check_bounds(addr, $size) {
+                Some(ptr) => unsafe {
+                    let atomic_ptr = ptr as *mut $atomic_ty;
+                    let old = (*atomic_ptr).load(Ordering::SeqCst);
+                    (*atomic_ptr).store($op(old, val), Ordering::SeqCst);
+                    old
+                },
+                None => {
+                    set_trap(TrapCode::MemoryOutOfBounds);
+                    0 as $ty
+                }
+            }
+        }
+    };
+}
+
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_add,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old.wrapping_add(new)
+);
+
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_add,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old.wrapping_add(new)
+);
+
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_sub,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old.wrapping_sub(new)
+);
+
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_sub,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old.wrapping_sub(new)
+);
+
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_and,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old & new
+);
+
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_and,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old & new
+);
+
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_or,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old | new
+);
+
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_or,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old | new
+);
+
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_xor,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |old: i32, new: i32| old ^ new
+);
+
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_xor,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |old: i64, new: i64| old ^ new
+);
+
+define_atomic_rmw!(
+    llvm_jit_i32_atomic_rmw_xchg,
+    4,
+    i32,
+    std::sync::atomic::AtomicI32,
+    |_old: i32, new: i32| new
+);
+
+define_atomic_rmw!(
+    llvm_jit_i64_atomic_rmw_xchg,
+    8,
+    i64,
+    std::sync::atomic::AtomicI64,
+    |_old: i64, new: i64| new
+);
+
+/// Clears execution context.
+pub fn clear_execution_context() {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if ctx.execution_pinned {
+            return;
+        }
+        if let Some(flag) = ctx.execution_flag.take() {
+            flag.store(false, Ordering::SeqCst);
+        }
+        ctx.current_module = ptr::null_mut();
+        ctx.current_context_id = None;
+        ctx.current_module_fingerprint = None;
+        ctx.current_owner_jit_id = None;
+        ctx.executing = false;
+        ctx.memory_ptr = ptr::null_mut();
+        ctx.memory_len = 0;
+        ctx.suspended_handle = None;
+        ctx.execution_pinned = false;
+    });
+}
+
+/// Clears execution context for owner.
+pub fn clear_execution_context_for_owner(owner_jit_id: u64, force: bool) -> bool {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if ctx.current_owner_jit_id != Some(owner_jit_id) {
+            return false;
+        }
+        if ctx.execution_pinned && !force {
+            return false;
+        }
+        if let Some(flag) = ctx.execution_flag.take() {
+            flag.store(false, Ordering::SeqCst);
+        }
+        ctx.current_module = ptr::null_mut();
+        ctx.current_context_id = None;
+        ctx.current_module_fingerprint = None;
+        ctx.current_owner_jit_id = None;
+        ctx.executing = false;
+        ctx.memory_ptr = ptr::null_mut();
+        ctx.memory_len = 0;
+        ctx.suspended_handle = None;
+        ctx.execution_pinned = false;
+        true
+    })
+}
+
+/// Clears trap.
+pub fn clear_trap() {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        ctx.trap = None;
+        ctx.runtime_error = None;
+    });
+}
+
+/// Configures safepoint handling for the current execution context.
+pub fn configure_safepoints(enabled: bool, requested: bool, jit_id: u64, execution_epoch: u64) {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        ctx.safepoints_enabled = enabled;
+        ctx.suspend_requested = requested;
+        ctx.jit_id = jit_id;
+        ctx.execution_epoch = execution_epoch;
+        ctx.executing = true;
+        ctx.suspended_handle = None;
+        ctx.runtime_error = None;
+    });
+}
+
+/// Returns the active execution context identifier, if any.
+pub fn current_execution_context_id() -> Option<u64> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_context_id)
+}
+
+/// Returns the active module fingerprint, if any.
+pub fn current_execution_module_fingerprint() -> Option<u64> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_module_fingerprint)
+}
+
+/// Returns the owning JIT identifier for the active execution context.
+pub fn current_execution_owner_jit_id() -> Option<u64> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_owner_jit_id)
+}
+
+/// Returns whether this value has execution context.
+pub fn has_execution_context() -> bool {
+    LLVM_RUNTIME_CTX.with(|ctx| !ctx.borrow().current_module.is_null())
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_call_import(
+    func_idx: u32,
+    args_ptr: *const u64,
+    arg_count: u32,
+    results_ptr: *mut u64,
+    result_count: u32,
+) {
+    let Some(result) = with_current_module_mut(|module| {
+        let Some(func_type) = module.get_func_type(func_idx).cloned() else {
+            return Err(WasmError::Trap(TrapCode::HostTrap));
+        };
+
+        if func_type.params.len() != arg_count as usize
+            || func_type.results.len() != result_count as usize
+        {
+            return Err(WasmError::Trap(TrapCode::HostTrap));
+        }
+
+        let mut args = Vec::with_capacity(func_type.params.len());
+        for (idx, value_type) in func_type.params.iter().enumerate() {
+            let raw = unsafe { *args_ptr.add(idx) };
+            let Some(value) = unpack_raw_value(raw, *value_type) else {
+                return Err(WasmError::Trap(TrapCode::HostTrap));
+            };
+            args.push(value);
+        }
+
+        module.invoke_import_with_suspension(func_idx, &args)
+    }) else {
+        set_trap(TrapCode::HostTrap);
+        return;
+    };
+
+    match result {
+        Ok(crate::runtime::HostCallOutcome::Complete(results)) => {
+            if results.len() != result_count as usize {
+                set_trap(TrapCode::HostTrap);
+                refresh_memory_context_from_module();
+                return;
+            }
+            for (idx, value) in results.iter().enumerate() {
+                let Some(raw) = pack_wasm_value(value) else {
+                    set_trap(TrapCode::HostTrap);
+                    refresh_memory_context_from_module();
+                    return;
+                };
+                unsafe {
+                    *results_ptr.add(idx) = raw;
+                }
+            }
+        }
+        Ok(crate::runtime::HostCallOutcome::Pending { .. }) => {
+            LLVM_RUNTIME_CTX.with(|ctx| {
+                let mut ctx = ctx.borrow_mut();
+                ctx.runtime_error = Some(
+                    "pending hostcall suspension is unsupported in JIT import path".to_string(),
+                );
+            });
+            set_trap(TrapCode::HostTrap);
+            refresh_memory_context_from_module();
+            return;
+        }
+        Err(WasmError::Trap(code)) => set_trap(code),
+        Err(_) => set_trap(TrapCode::HostTrap),
     }
 
-    let mut hasher = DefaultHasher::new();
-    format!("{:?}", unsafe { (&*module).module() }).hash(&mut hasher);
-    Some(hasher.finish())
+    refresh_memory_context_from_module();
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_f32_min(a: f32, b: f32) -> f32 {
+    wasm_f32_min(a, b)
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_f64_min(a: f64, b: f64) -> f64 {
+    wasm_f64_min(a, b)
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_has_trap() -> i32 {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        ctx.borrow()
+            .trap
+            .as_ref()
+            .map(|code| trap_code_to_i32(code.clone()))
+            .unwrap_or(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_i32_atomic_rmw_cmpxchg(addr: u32, expected: i32, new: i32) -> i32 {
+    match check_bounds(addr, 4) {
+        Some(ptr) => unsafe {
+            let atomic_ptr = ptr as *mut std::sync::atomic::AtomicI32;
+            let old = (*atomic_ptr).load(Ordering::SeqCst);
+            if old == expected {
+                (*atomic_ptr).store(new, Ordering::SeqCst);
+                1
+            } else {
+                0
+            }
+        },
+        None => {
+            set_trap(TrapCode::MemoryOutOfBounds);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i32_div_s(a: i32, b: i32) -> i32 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    if a == i32::MIN && b == -1 {
+        set_trap(TrapCode::IntegerOverflow);
+        return 0;
+    }
+    a / b
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i32_div_u(a: u32, b: u32) -> u32 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    a / b
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i32_rem_s(a: i32, b: i32) -> i32 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    a % b
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i32_rem_u(a: u32, b: u32) -> u32 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    a % b
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_i64_atomic_rmw_cmpxchg(addr: u32, expected: i64, new: i64) -> i32 {
+    match check_bounds(addr, 8) {
+        Some(ptr) => unsafe {
+            let atomic_ptr = ptr as *mut std::sync::atomic::AtomicI64;
+            let old = (*atomic_ptr).load(Ordering::SeqCst);
+            if old == expected {
+                (*atomic_ptr).store(new, Ordering::SeqCst);
+                1
+            } else {
+                0
+            }
+        },
+        None => {
+            set_trap(TrapCode::MemoryOutOfBounds);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i64_div_s(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    if a == i64::MIN && b == -1 {
+        set_trap(TrapCode::IntegerOverflow);
+        return 0;
+    }
+    a / b
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i64_div_u(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    a / b
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i64_rem_s(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    a % b
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_i64_rem_u(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        set_trap(TrapCode::IntegerDivisionByZero);
+        return 0;
+    }
+    a % b
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_atomic_notify32(_addr: u32, _n: u32) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_atomic_wait32(_addr: u32, _expected: i32, _timeout: i64) -> i32 {
+    2
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn llvm_jit_memory_atomic_wait64(_addr: u32, _expected: i64, _timeout: i64) -> i32 {
+    2
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_memory_grow(delta: i32) -> i32 {
+    let Some(result) = with_current_module_mut(|module| module.memory_grow_wasm(0, delta)) else {
+        set_trap(TrapCode::HostTrap);
+        return -1;
+    };
+
+    let value = match result {
+        Ok(old_size) => old_size,
+        Err(WasmError::Trap(code)) => {
+            set_trap(code);
+            -1
+        }
+        Err(error) => {
+            set_runtime_error(error.to_string());
+            set_trap(TrapCode::HostTrap);
+            -1
+        }
+    };
+
+    refresh_memory_context_from_module();
+    value
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_memory_size() -> i32 {
+    let Some(result) = with_current_module_mut(|module| module.memory_size(0)) else {
+        set_trap(TrapCode::HostTrap);
+        return 0;
+    };
+
+    match result {
+        Ok(size) => size,
+        Err(error) => {
+            set_runtime_error(error.to_string());
+            set_trap(TrapCode::HostTrap);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_meter_tick(units: u64) {
+    let Some(result) = with_current_module_mut(|module| module.record_execution(units)) else {
+        set_runtime_error("missing JIT execution context for metering".to_string());
+        set_trap(TrapCode::HostTrap);
+        return;
+    };
+
+    match result {
+        Ok(()) => {}
+        Err(WasmError::Trap(code)) => set_trap(code),
+        Err(error) => {
+            set_runtime_error(error.to_string());
+            set_trap(TrapCode::HostTrap);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_safepoint_entry(
+    func_idx: u32,
+    args_ptr: *const u64,
+    arg_count: u32,
+) -> i32 {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if !ctx.safepoints_enabled || !ctx.suspend_requested {
+            return 0;
+        }
+
+        let Some(module_ptr) = (!ctx.current_module.is_null()).then_some(ctx.current_module) else {
+            ctx.trap = Some(TrapCode::HostTrap);
+            return 1;
+        };
+
+        let module = unsafe { &mut *module_ptr };
+        let Some(func_type) = module.get_func_type(func_idx).cloned() else {
+            ctx.trap = Some(TrapCode::HostTrap);
+            return 1;
+        };
+
+        if func_type.params.len() != arg_count as usize {
+            ctx.trap = Some(TrapCode::HostTrap);
+            return 1;
+        }
+
+        let mut args = Vec::with_capacity(func_type.params.len());
+        for (idx, value_type) in func_type.params.iter().enumerate() {
+            let raw = unsafe { *args_ptr.add(idx) };
+            let Some(value) = unpack_raw_value(raw, *value_type) else {
+                ctx.trap = Some(TrapCode::HostTrap);
+                return 1;
+            };
+            args.push(value);
+        }
+
+        let handle = RuntimeSuspender::new().suspend_jit(
+            func_idx,
+            args,
+            ctx.jit_id,
+            ctx.execution_epoch,
+            ctx.current_context_id.unwrap_or(0),
+        );
+        ctx.suspended_handle = Some(handle);
+        ctx.suspend_requested = false;
+        1
+    })
+}
+
+#[unsafe(no_mangle)]
+#[allow(missing_docs)]
+pub extern "C" fn llvm_jit_trap_unreachable() {
+    set_trap(TrapCode::Unreachable);
 }
 
 /// Sets the execution context for the current thread.
@@ -155,24 +1214,15 @@ pub unsafe fn set_execution_context(
     Ok(())
 }
 
-/// Returns whether this value has execution context.
-pub fn has_execution_context() -> bool {
-    LLVM_RUNTIME_CTX.with(|ctx| !ctx.borrow().current_module.is_null())
-}
-
-/// Returns the active execution context identifier, if any.
-pub fn current_execution_context_id() -> Option<u64> {
-    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_context_id)
-}
-
-/// Returns the active module fingerprint, if any.
-pub fn current_execution_module_fingerprint() -> Option<u64> {
-    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_module_fingerprint)
-}
-
-/// Returns the owning JIT identifier for the active execution context.
-pub fn current_execution_owner_jit_id() -> Option<u64> {
-    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow().current_owner_jit_id)
+/// Sets execution context pinned for owner.
+pub fn set_execution_context_pinned_for_owner(owner_jit_id: u64, pinned: bool) {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if ctx.current_owner_jit_id != Some(owner_jit_id) {
+            return;
+        }
+        ctx.execution_pinned = pinned;
+    })
 }
 
 /// Sets only the memory context for the current thread.
@@ -185,86 +1235,9 @@ pub fn set_memory_context(ptr: *mut u8, len: usize) {
         .expect("null module context cannot fail");
 }
 
-/// Clears execution context.
-pub fn clear_execution_context() {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
-        if ctx.execution_pinned {
-            return;
-        }
-        if let Some(flag) = ctx.execution_flag.take() {
-            flag.store(false, Ordering::SeqCst);
-        }
-        ctx.current_module = ptr::null_mut();
-        ctx.current_context_id = None;
-        ctx.current_module_fingerprint = None;
-        ctx.current_owner_jit_id = None;
-        ctx.executing = false;
-        ctx.memory_ptr = ptr::null_mut();
-        ctx.memory_len = 0;
-        ctx.suspended_handle = None;
-        ctx.execution_pinned = false;
-    });
-}
-
-/// Clears execution context for owner.
-pub fn clear_execution_context_for_owner(owner_jit_id: u64, force: bool) -> bool {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
-        if ctx.current_owner_jit_id != Some(owner_jit_id) {
-            return false;
-        }
-        if ctx.execution_pinned && !force {
-            return false;
-        }
-        if let Some(flag) = ctx.execution_flag.take() {
-            flag.store(false, Ordering::SeqCst);
-        }
-        ctx.current_module = ptr::null_mut();
-        ctx.current_context_id = None;
-        ctx.current_module_fingerprint = None;
-        ctx.current_owner_jit_id = None;
-        ctx.executing = false;
-        ctx.memory_ptr = ptr::null_mut();
-        ctx.memory_len = 0;
-        ctx.suspended_handle = None;
-        ctx.execution_pinned = false;
-        true
-    })
-}
-
-/// Sets execution context pinned for owner.
-pub fn set_execution_context_pinned_for_owner(owner_jit_id: u64, pinned: bool) {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
-        if ctx.current_owner_jit_id != Some(owner_jit_id) {
-            return;
-        }
-        ctx.execution_pinned = pinned;
-    })
-}
-
-/// Clears trap.
-pub fn clear_trap() {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
-        ctx.trap = None;
-        ctx.runtime_error = None;
-    });
-}
-
-/// Configures safepoint handling for the current execution context.
-pub fn configure_safepoints(enabled: bool, requested: bool, jit_id: u64, execution_epoch: u64) {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
-        ctx.safepoints_enabled = enabled;
-        ctx.suspend_requested = requested;
-        ctx.jit_id = jit_id;
-        ctx.execution_epoch = execution_epoch;
-        ctx.executing = true;
-        ctx.suspended_handle = None;
-        ctx.runtime_error = None;
-    });
+/// Takes runtime error.
+pub fn take_runtime_error() -> Option<String> {
+    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().runtime_error.take())
 }
 
 /// Takes suspended handle.
@@ -272,14 +1245,68 @@ pub fn take_suspended_handle() -> Option<SuspendedHandle> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().suspended_handle.take())
 }
 
-/// Takes runtime error.
-pub fn take_runtime_error() -> Option<String> {
-    LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().runtime_error.take())
-}
-
 /// Takes trap.
 pub fn take_trap() -> Option<TrapCode> {
     LLVM_RUNTIME_CTX.with(|ctx| ctx.borrow_mut().trap.take())
+}
+
+fn check_bounds(addr: u32, size: u32) -> Option<*mut u8> {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let ctx = ctx.borrow();
+        if ctx.memory_ptr.is_null() {
+            return None;
+        }
+        let end = (addr as usize).checked_add(size as usize)?;
+        if end > ctx.memory_len {
+            return None;
+        }
+        Some(unsafe { ctx.memory_ptr.add(addr as usize) })
+    })
+}
+
+fn context_id_for_module(module: *mut AotModule) -> Option<u64> {
+    (!module.is_null()).then(|| unsafe { (&*module).runtime_id() })
+}
+
+fn fingerprint_for_module(module: *mut AotModule) -> Option<u64> {
+    if module.is_null() {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    format!("{:?}", unsafe { (&*module).module() }).hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn pack_wasm_value(value: &WasmValue) -> Option<u64> {
+    match value {
+        WasmValue::I32(v) => Some(*v as u32 as u64),
+        WasmValue::I64(v) => Some(*v as u64),
+        WasmValue::F32(v) => Some(v.to_bits() as u64),
+        WasmValue::F64(v) => Some(v.to_bits()),
+        _ => None,
+    }
+}
+
+fn refresh_memory_context_from_module() {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        let current_module = ctx.borrow().current_module;
+        if current_module.is_null() {
+            return;
+        }
+
+        let (memory_ptr, memory_len) =
+            unsafe { (&mut *current_module).memory_context() }.unwrap_or((ptr::null_mut(), 0));
+        let mut ctx = ctx.borrow_mut();
+        ctx.memory_ptr = memory_ptr;
+        ctx.memory_len = memory_len;
+    });
+}
+
+fn set_runtime_error(message: String) {
+    LLVM_RUNTIME_CTX.with(|ctx| {
+        ctx.borrow_mut().runtime_error = Some(message);
+    });
 }
 
 fn set_trap(code: TrapCode) {
@@ -306,64 +1333,6 @@ fn trap_code_to_i32(code: TrapCode) -> i32 {
         TrapCode::CallIndirectNull => 11,
         TrapCode::NullReference => 12,
         TrapCode::HostTrap => 13,
-    }
-}
-
-fn set_runtime_error(message: String) {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        ctx.borrow_mut().runtime_error = Some(message);
-    });
-}
-
-fn check_bounds(addr: u32, size: u32) -> Option<*mut u8> {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let ctx = ctx.borrow();
-        if ctx.memory_ptr.is_null() {
-            return None;
-        }
-        let end = (addr as usize).checked_add(size as usize)?;
-        if end > ctx.memory_len {
-            return None;
-        }
-        Some(unsafe { ctx.memory_ptr.add(addr as usize) })
-    })
-}
-
-fn with_current_module_mut<F, T>(f: F) -> Option<T>
-where
-    F: FnOnce(&mut AotModule) -> T,
-{
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let module_ptr = ctx.borrow().current_module;
-        if module_ptr.is_null() {
-            return None;
-        }
-        Some(unsafe { f(&mut *module_ptr) })
-    })
-}
-
-fn refresh_memory_context_from_module() {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let current_module = ctx.borrow().current_module;
-        if current_module.is_null() {
-            return;
-        }
-
-        let (memory_ptr, memory_len) =
-            unsafe { (&mut *current_module).memory_context() }.unwrap_or((ptr::null_mut(), 0));
-        let mut ctx = ctx.borrow_mut();
-        ctx.memory_ptr = memory_ptr;
-        ctx.memory_len = memory_len;
-    });
-}
-
-fn pack_wasm_value(value: &WasmValue) -> Option<u64> {
-    match value {
-        WasmValue::I32(v) => Some(*v as u32 as u64),
-        WasmValue::I64(v) => Some(*v as u64),
-        WasmValue::F32(v) => Some(v.to_bits() as u64),
-        WasmValue::F64(v) => Some(v.to_bits()),
-        _ => None,
     }
 }
 
@@ -403,925 +1372,17 @@ fn wasm_f64_min(a: f64, b: f64) -> f64 {
     if a < b { a } else { b }
 }
 
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_has_trap() -> i32 {
+fn with_current_module_mut<F, T>(f: F) -> Option<T>
+where
+    F: FnOnce(&mut AotModule) -> T,
+{
     LLVM_RUNTIME_CTX.with(|ctx| {
-        ctx.borrow()
-            .trap
-            .as_ref()
-            .map(|code| trap_code_to_i32(code.clone()))
-            .unwrap_or(0)
+        let module_ptr = ctx.borrow().current_module;
+        if module_ptr.is_null() {
+            return None;
+        }
+        Some(unsafe { f(&mut *module_ptr) })
     })
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_trap_unreachable() {
-    set_trap(TrapCode::Unreachable);
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_call_import(
-    func_idx: u32,
-    args_ptr: *const u64,
-    arg_count: u32,
-    results_ptr: *mut u64,
-    result_count: u32,
-) {
-    let Some(result) = with_current_module_mut(|module| {
-        let Some(func_type) = module.get_func_type(func_idx).cloned() else {
-            return Err(WasmError::Trap(TrapCode::HostTrap));
-        };
-
-        if func_type.params.len() != arg_count as usize
-            || func_type.results.len() != result_count as usize
-        {
-            return Err(WasmError::Trap(TrapCode::HostTrap));
-        }
-
-        let mut args = Vec::with_capacity(func_type.params.len());
-        for (idx, value_type) in func_type.params.iter().enumerate() {
-            let raw = unsafe { *args_ptr.add(idx) };
-            let Some(value) = unpack_raw_value(raw, *value_type) else {
-                return Err(WasmError::Trap(TrapCode::HostTrap));
-            };
-            args.push(value);
-        }
-
-        module.invoke_import_with_suspension(func_idx, &args)
-    }) else {
-        set_trap(TrapCode::HostTrap);
-        return;
-    };
-
-    match result {
-        Ok(crate::runtime::HostCallOutcome::Complete(results)) => {
-            if results.len() != result_count as usize {
-                set_trap(TrapCode::HostTrap);
-                refresh_memory_context_from_module();
-                return;
-            }
-            for (idx, value) in results.iter().enumerate() {
-                let Some(raw) = pack_wasm_value(value) else {
-                    set_trap(TrapCode::HostTrap);
-                    refresh_memory_context_from_module();
-                    return;
-                };
-                unsafe {
-                    *results_ptr.add(idx) = raw;
-                }
-            }
-        }
-        Ok(crate::runtime::HostCallOutcome::Pending { .. }) => {
-            LLVM_RUNTIME_CTX.with(|ctx| {
-                let mut ctx = ctx.borrow_mut();
-                ctx.runtime_error = Some(
-                    "pending hostcall suspension is unsupported in JIT import path".to_string(),
-                );
-            });
-            set_trap(TrapCode::HostTrap);
-            refresh_memory_context_from_module();
-            return;
-        }
-        Err(WasmError::Trap(code)) => set_trap(code),
-        Err(_) => set_trap(TrapCode::HostTrap),
-    }
-
-    refresh_memory_context_from_module();
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_safepoint_entry(
-    func_idx: u32,
-    args_ptr: *const u64,
-    arg_count: u32,
-) -> i32 {
-    LLVM_RUNTIME_CTX.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
-        if !ctx.safepoints_enabled || !ctx.suspend_requested {
-            return 0;
-        }
-
-        let Some(module_ptr) = (!ctx.current_module.is_null()).then_some(ctx.current_module) else {
-            ctx.trap = Some(TrapCode::HostTrap);
-            return 1;
-        };
-
-        let module = unsafe { &mut *module_ptr };
-        let Some(func_type) = module.get_func_type(func_idx).cloned() else {
-            ctx.trap = Some(TrapCode::HostTrap);
-            return 1;
-        };
-
-        if func_type.params.len() != arg_count as usize {
-            ctx.trap = Some(TrapCode::HostTrap);
-            return 1;
-        }
-
-        let mut args = Vec::with_capacity(func_type.params.len());
-        for (idx, value_type) in func_type.params.iter().enumerate() {
-            let raw = unsafe { *args_ptr.add(idx) };
-            let Some(value) = unpack_raw_value(raw, *value_type) else {
-                ctx.trap = Some(TrapCode::HostTrap);
-                return 1;
-            };
-            args.push(value);
-        }
-
-        let handle = RuntimeSuspender::new().suspend_jit(
-            func_idx,
-            args,
-            ctx.jit_id,
-            ctx.execution_epoch,
-            ctx.current_context_id.unwrap_or(0),
-        );
-        ctx.suspended_handle = Some(handle);
-        ctx.suspend_requested = false;
-        1
-    })
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_meter_tick(units: u64) {
-    let Some(result) = with_current_module_mut(|module| module.record_execution(units)) else {
-        set_runtime_error("missing JIT execution context for metering".to_string());
-        set_trap(TrapCode::HostTrap);
-        return;
-    };
-
-    match result {
-        Ok(()) => {}
-        Err(WasmError::Trap(code)) => set_trap(code),
-        Err(error) => {
-            set_runtime_error(error.to_string());
-            set_trap(TrapCode::HostTrap);
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_memory_size() -> i32 {
-    let Some(result) = with_current_module_mut(|module| module.memory_size(0)) else {
-        set_trap(TrapCode::HostTrap);
-        return 0;
-    };
-
-    match result {
-        Ok(size) => size,
-        Err(error) => {
-            set_runtime_error(error.to_string());
-            set_trap(TrapCode::HostTrap);
-            0
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_memory_grow(delta: i32) -> i32 {
-    let Some(result) = with_current_module_mut(|module| module.memory_grow_wasm(0, delta)) else {
-        set_trap(TrapCode::HostTrap);
-        return -1;
-    };
-
-    let value = match result {
-        Ok(old_size) => old_size,
-        Err(WasmError::Trap(code)) => {
-            set_trap(code);
-            -1
-        }
-        Err(error) => {
-            set_runtime_error(error.to_string());
-            set_trap(TrapCode::HostTrap);
-            -1
-        }
-    };
-
-    refresh_memory_context_from_module();
-    value
-}
-
-macro_rules! define_shared_load {
-    ($name:ident, $ty:ty, $default:expr, $call:expr) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $name(mapping_id: u64, offset: u32) -> $ty {
-            let mapping_id = SharedMemoryMappingId::from_raw(mapping_id);
-            let Some(result) = with_current_module_mut(|module| $call(module, mapping_id, offset))
-            else {
-                set_runtime_error("missing JIT execution context for shared memory".to_string());
-                set_trap(TrapCode::HostTrap);
-                return $default;
-            };
-
-            match result {
-                Ok(value) => value,
-                Err(WasmError::Trap(code)) => {
-                    set_trap(code);
-                    $default
-                }
-                Err(error) => {
-                    set_runtime_error(error.to_string());
-                    set_trap(TrapCode::HostTrap);
-                    $default
-                }
-            }
-        }
-    };
-}
-
-macro_rules! define_shared_store {
-    ($name:ident, $ty:ty, $call:expr) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $name(mapping_id: u64, offset: u32, value: $ty) {
-            let mapping_id = SharedMemoryMappingId::from_raw(mapping_id);
-            let Some(result) =
-                with_current_module_mut(|module| $call(module, mapping_id, offset, value))
-            else {
-                set_runtime_error("missing JIT execution context for shared memory".to_string());
-                set_trap(TrapCode::HostTrap);
-                return;
-            };
-
-            match result {
-                Ok(()) => {}
-                Err(WasmError::Trap(code)) => set_trap(code),
-                Err(error) => {
-                    set_runtime_error(error.to_string());
-                    set_trap(TrapCode::HostTrap);
-                }
-            }
-        }
-    };
-}
-
-define_shared_load!(
-    llvm_jit_shared_memory_i32_load,
-    i32,
-    0i32,
-    |module: &mut AotModule, mapping_id, offset| {
-        module.read_shared_region_i32(mapping_id, offset)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i64_load,
-    i64,
-    0i64,
-    |module: &mut AotModule, mapping_id, offset| {
-        module.read_shared_region_i64(mapping_id, offset)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_f32_load,
-    f32,
-    0.0f32,
-    |module: &mut AotModule, mapping_id, offset| {
-        module.read_shared_region_f32(mapping_id, offset)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_f64_load,
-    f64,
-    0.0f64,
-    |module: &mut AotModule, mapping_id, offset| {
-        module.read_shared_region_f64(mapping_id, offset)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i32_load8_s,
-    i32,
-    0i32,
-    |module: &mut AotModule, mapping_id, offset| {
-        module
-            .read_shared_region_u8(mapping_id, offset)
-            .map(|v| v as i8 as i32)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i32_load8_u,
-    i32,
-    0i32,
-    |module: &mut AotModule, mapping_id, offset| {
-        module
-            .read_shared_region_u8(mapping_id, offset)
-            .map(|v| v as i32)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i32_load16_s,
-    i32,
-    0i32,
-    |module: &mut AotModule, mapping_id, offset| {
-        let mut bytes = [0u8; 2];
-        module.read_shared_region(mapping_id, offset, &mut bytes)?;
-        Ok(i16::from_le_bytes(bytes) as i32)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i32_load16_u,
-    i32,
-    0i32,
-    |module: &mut AotModule, mapping_id, offset| {
-        let mut bytes = [0u8; 2];
-        module.read_shared_region(mapping_id, offset, &mut bytes)?;
-        Ok(u16::from_le_bytes(bytes) as i32)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i64_load8_s,
-    i64,
-    0i64,
-    |module: &mut AotModule, mapping_id, offset| {
-        module
-            .read_shared_region_u8(mapping_id, offset)
-            .map(|v| v as i8 as i64)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i64_load8_u,
-    i64,
-    0i64,
-    |module: &mut AotModule, mapping_id, offset| {
-        module
-            .read_shared_region_u8(mapping_id, offset)
-            .map(|v| v as i64)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i64_load16_s,
-    i64,
-    0i64,
-    |module: &mut AotModule, mapping_id, offset| {
-        let mut bytes = [0u8; 2];
-        module.read_shared_region(mapping_id, offset, &mut bytes)?;
-        Ok(i16::from_le_bytes(bytes) as i64)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i64_load16_u,
-    i64,
-    0i64,
-    |module: &mut AotModule, mapping_id, offset| {
-        let mut bytes = [0u8; 2];
-        module.read_shared_region(mapping_id, offset, &mut bytes)?;
-        Ok(u16::from_le_bytes(bytes) as i64)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i64_load32_s,
-    i64,
-    0i64,
-    |module: &mut AotModule, mapping_id, offset| {
-        let mut bytes = [0u8; 4];
-        module.read_shared_region(mapping_id, offset, &mut bytes)?;
-        Ok(i32::from_le_bytes(bytes) as i64)
-    }
-);
-define_shared_load!(
-    llvm_jit_shared_memory_i64_load32_u,
-    i64,
-    0i64,
-    |module: &mut AotModule, mapping_id, offset| {
-        let mut bytes = [0u8; 4];
-        module.read_shared_region(mapping_id, offset, &mut bytes)?;
-        Ok(u32::from_le_bytes(bytes) as i64)
-    }
-);
-
-define_shared_store!(
-    llvm_jit_shared_memory_i32_store,
-    i32,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region_i32(mapping_id, offset, value)
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_i64_store,
-    i64,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region_i64(mapping_id, offset, value)
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_f32_store,
-    f32,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region_f32(mapping_id, offset, value)
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_f64_store,
-    f64,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region_f64(mapping_id, offset, value)
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_i32_store8,
-    i32,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region_u8(mapping_id, offset, value as u8)
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_i32_store16,
-    i32,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_i64_store8,
-    i64,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region_u8(mapping_id, offset, value as u8)
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_i64_store16,
-    i64,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region(mapping_id, offset, &(value as u16).to_le_bytes())
-    }
-);
-define_shared_store!(
-    llvm_jit_shared_memory_i64_store32,
-    i64,
-    |module: &mut AotModule, mapping_id, offset, value| {
-        module.write_shared_region(mapping_id, offset, &(value as u32).to_le_bytes())
-    }
-);
-
-macro_rules! define_load {
-    ($name:ident, $size:expr, $ty:ty, $default:expr, $body:expr) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $name(addr: u32) -> $ty {
-            match check_bounds(addr, $size) {
-                Some(ptr) => unsafe { $body(ptr) },
-                None => {
-                    set_trap(TrapCode::MemoryOutOfBounds);
-                    $default
-                }
-            }
-        }
-    };
-}
-
-macro_rules! define_store {
-    ($name:ident, $size:expr, $ty:ty, $body:expr) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $name(addr: u32, val: $ty) {
-            match check_bounds(addr, $size) {
-                Some(ptr) => unsafe { $body(ptr, val) },
-                None => set_trap(TrapCode::MemoryOutOfBounds),
-            }
-        }
-    };
-}
-
-define_load!(
-    llvm_jit_i32_load,
-    4,
-    i32,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const i32)
-);
-define_load!(
-    llvm_jit_i64_load,
-    8,
-    i64,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const i64)
-);
-define_load!(llvm_jit_f32_load, 4, f32, 0.0, |ptr| {
-    std::ptr::read_unaligned(ptr as *const f32)
-});
-define_load!(llvm_jit_f64_load, 8, f64, 0.0, |ptr| {
-    std::ptr::read_unaligned(ptr as *const f64)
-});
-define_load!(
-    llvm_jit_i32_load8_s,
-    1,
-    i32,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const i8) as i32
-);
-define_load!(
-    llvm_jit_i32_load8_u,
-    1,
-    i32,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const u8) as i32
-);
-define_load!(
-    llvm_jit_i32_load16_s,
-    2,
-    i32,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const i16) as i32
-);
-define_load!(
-    llvm_jit_i32_load16_u,
-    2,
-    i32,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const u16) as i32
-);
-define_load!(
-    llvm_jit_i64_load8_s,
-    1,
-    i64,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const i8) as i64
-);
-define_load!(
-    llvm_jit_i64_load8_u,
-    1,
-    i64,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const u8) as i64
-);
-define_load!(
-    llvm_jit_i64_load16_s,
-    2,
-    i64,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const i16) as i64
-);
-define_load!(
-    llvm_jit_i64_load16_u,
-    2,
-    i64,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const u16) as i64
-);
-define_load!(
-    llvm_jit_i64_load32_s,
-    4,
-    i64,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const i32) as i64
-);
-define_load!(
-    llvm_jit_i64_load32_u,
-    4,
-    i64,
-    0,
-    |ptr| std::ptr::read_unaligned(ptr as *const u32) as i64
-);
-
-define_store!(llvm_jit_i32_store, 4, i32, |ptr, val| {
-    std::ptr::write_unaligned(ptr as *mut i32, val)
-});
-define_store!(llvm_jit_i64_store, 8, i64, |ptr, val| {
-    std::ptr::write_unaligned(ptr as *mut i64, val)
-});
-define_store!(llvm_jit_f32_store, 4, f32, |ptr, val| {
-    std::ptr::write_unaligned(ptr as *mut f32, val)
-});
-define_store!(llvm_jit_f64_store, 8, f64, |ptr, val| {
-    std::ptr::write_unaligned(ptr as *mut f64, val)
-});
-define_store!(llvm_jit_i32_store8, 1, i32, |ptr, val| {
-    std::ptr::write_unaligned(ptr, val as u8)
-});
-define_store!(llvm_jit_i32_store16, 2, i32, |ptr, val| {
-    std::ptr::write_unaligned(ptr as *mut u16, val as u16)
-});
-define_store!(llvm_jit_i64_store8, 1, i64, |ptr, val| {
-    std::ptr::write_unaligned(ptr, val as u8)
-});
-define_store!(llvm_jit_i64_store16, 2, i64, |ptr, val| {
-    std::ptr::write_unaligned(ptr as *mut u16, val as u16)
-});
-define_store!(llvm_jit_i64_store32, 4, i64, |ptr, val| {
-    std::ptr::write_unaligned(ptr as *mut u32, val as u32)
-});
-
-macro_rules! define_atomic_load {
-    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $cast:expr) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $name(addr: u32) -> $ty {
-            match check_bounds(addr, $size) {
-                Some(ptr) => unsafe {
-                    let atomic_ptr = ptr as *mut $atomic_ty;
-                    $cast((*atomic_ptr).load(Ordering::SeqCst))
-                },
-                None => {
-                    set_trap(TrapCode::MemoryOutOfBounds);
-                    0 as $ty
-                }
-            }
-        }
-    };
-}
-
-macro_rules! define_atomic_store {
-    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $cast:expr) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $name(addr: u32, val: $ty) {
-            match check_bounds(addr, $size) {
-                Some(ptr) => unsafe {
-                    let atomic_ptr = ptr as *mut $atomic_ty;
-                    (*atomic_ptr).store($cast(val), Ordering::SeqCst);
-                },
-                None => set_trap(TrapCode::MemoryOutOfBounds),
-            }
-        }
-    };
-}
-
-define_atomic_load!(
-    llvm_jit_i32_atomic_load,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |v: i32| v
-);
-define_atomic_load!(
-    llvm_jit_i64_atomic_load,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |v: i64| v
-);
-define_atomic_store!(
-    llvm_jit_i32_atomic_store,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |v: i32| v
-);
-define_atomic_store!(
-    llvm_jit_i64_atomic_store,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |v: i64| v
-);
-
-macro_rules! define_atomic_rmw {
-    ($name:ident, $size:expr, $ty:ty, $atomic_ty:ty, $op:expr) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $name(addr: u32, val: $ty) -> $ty {
-            match check_bounds(addr, $size) {
-                Some(ptr) => unsafe {
-                    let atomic_ptr = ptr as *mut $atomic_ty;
-                    let old = (*atomic_ptr).load(Ordering::SeqCst);
-                    (*atomic_ptr).store($op(old, val), Ordering::SeqCst);
-                    old
-                },
-                None => {
-                    set_trap(TrapCode::MemoryOutOfBounds);
-                    0 as $ty
-                }
-            }
-        }
-    };
-}
-
-define_atomic_rmw!(
-    llvm_jit_i32_atomic_rmw_add,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |old: i32, new: i32| old.wrapping_add(new)
-);
-define_atomic_rmw!(
-    llvm_jit_i64_atomic_rmw_add,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |old: i64, new: i64| old.wrapping_add(new)
-);
-define_atomic_rmw!(
-    llvm_jit_i32_atomic_rmw_sub,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |old: i32, new: i32| old.wrapping_sub(new)
-);
-define_atomic_rmw!(
-    llvm_jit_i64_atomic_rmw_sub,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |old: i64, new: i64| old.wrapping_sub(new)
-);
-define_atomic_rmw!(
-    llvm_jit_i32_atomic_rmw_and,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |old: i32, new: i32| old & new
-);
-define_atomic_rmw!(
-    llvm_jit_i64_atomic_rmw_and,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |old: i64, new: i64| old & new
-);
-define_atomic_rmw!(
-    llvm_jit_i32_atomic_rmw_or,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |old: i32, new: i32| old | new
-);
-define_atomic_rmw!(
-    llvm_jit_i64_atomic_rmw_or,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |old: i64, new: i64| old | new
-);
-define_atomic_rmw!(
-    llvm_jit_i32_atomic_rmw_xor,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |old: i32, new: i32| old ^ new
-);
-define_atomic_rmw!(
-    llvm_jit_i64_atomic_rmw_xor,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |old: i64, new: i64| old ^ new
-);
-define_atomic_rmw!(
-    llvm_jit_i32_atomic_rmw_xchg,
-    4,
-    i32,
-    std::sync::atomic::AtomicI32,
-    |_old: i32, new: i32| new
-);
-define_atomic_rmw!(
-    llvm_jit_i64_atomic_rmw_xchg,
-    8,
-    i64,
-    std::sync::atomic::AtomicI64,
-    |_old: i64, new: i64| new
-);
-
-#[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_i32_atomic_rmw_cmpxchg(addr: u32, expected: i32, new: i32) -> i32 {
-    match check_bounds(addr, 4) {
-        Some(ptr) => unsafe {
-            let atomic_ptr = ptr as *mut std::sync::atomic::AtomicI32;
-            let old = (*atomic_ptr).load(Ordering::SeqCst);
-            if old == expected {
-                (*atomic_ptr).store(new, Ordering::SeqCst);
-                1
-            } else {
-                0
-            }
-        },
-        None => {
-            set_trap(TrapCode::MemoryOutOfBounds);
-            0
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_i64_atomic_rmw_cmpxchg(addr: u32, expected: i64, new: i64) -> i32 {
-    match check_bounds(addr, 8) {
-        Some(ptr) => unsafe {
-            let atomic_ptr = ptr as *mut std::sync::atomic::AtomicI64;
-            let old = (*atomic_ptr).load(Ordering::SeqCst);
-            if old == expected {
-                (*atomic_ptr).store(new, Ordering::SeqCst);
-                1
-            } else {
-                0
-            }
-        },
-        None => {
-            set_trap(TrapCode::MemoryOutOfBounds);
-            0
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_memory_atomic_notify32(_addr: u32, _n: u32) -> i32 {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_memory_atomic_wait32(_addr: u32, _expected: i32, _timeout: i64) -> i32 {
-    2
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn llvm_jit_memory_atomic_wait64(_addr: u32, _expected: i64, _timeout: i64) -> i32 {
-    2
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i32_div_s(a: i32, b: i32) -> i32 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    if a == i32::MIN && b == -1 {
-        set_trap(TrapCode::IntegerOverflow);
-        return 0;
-    }
-    a / b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i32_div_u(a: u32, b: u32) -> u32 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    a / b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i32_rem_s(a: i32, b: i32) -> i32 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    a % b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i32_rem_u(a: u32, b: u32) -> u32 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    a % b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i64_div_s(a: i64, b: i64) -> i64 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    if a == i64::MIN && b == -1 {
-        set_trap(TrapCode::IntegerOverflow);
-        return 0;
-    }
-    a / b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i64_div_u(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    a / b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i64_rem_s(a: i64, b: i64) -> i64 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    a % b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_i64_rem_u(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        set_trap(TrapCode::IntegerDivisionByZero);
-        return 0;
-    }
-    a % b
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_f32_min(a: f32, b: f32) -> f32 {
-    wasm_f32_min(a, b)
-}
-
-#[unsafe(no_mangle)]
-#[allow(missing_docs)]
-pub extern "C" fn llvm_jit_f64_min(a: f64, b: f64) -> f64 {
-    wasm_f64_min(a, b)
 }
 
 #[cfg(test)]

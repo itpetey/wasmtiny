@@ -9,10 +9,10 @@
 //! - [`AotRuntime`] - Main runtime for managing AOT modules
 //! - [`AotLoader`] - Loads WebAssembly modules into the AOT runtime
 
+pub use loader::AotLoader;
+pub use runtime::AotRuntime;
+
 /// Loading support for ahead-of-time modules.
 pub mod loader;
 /// Runtime-related APIs.
 pub mod runtime;
-
-pub use loader::AotLoader;
-pub use runtime::AotRuntime;

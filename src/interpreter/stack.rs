@@ -7,6 +7,44 @@ pub struct OperandStack {
     max_size: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+/// Kind of control frame active in the interpreter.
+pub enum FrameKind {
+    /// A function frame.
+    Function,
+    /// A structured block frame.
+    Block,
+    /// A loop frame.
+    Loop,
+}
+
+#[derive(Debug, Clone)]
+/// A frame stored on the interpreter control stack.
+pub struct ControlFrame {
+    /// Kind of control construct represented by this frame.
+    pub kind: FrameKind,
+    /// Current instruction position within the frame code.
+    pub position: usize,
+    /// Encoded instruction bytes for this frame.
+    pub code: Vec<u8>,
+    /// Number of values produced when the frame completes.
+    pub arity: usize,
+    /// Number of values expected by branches to this frame.
+    pub label_arity: usize,
+    /// Number of local slots associated with the frame.
+    pub local_count: usize,
+    /// Operand-stack height when the frame was entered.
+    pub height: usize,
+    /// Captured local values for the frame.
+    pub locals: Vec<WasmValue>,
+}
+
+#[derive(Debug, Clone)]
+/// Control stack.
+pub struct ControlStack {
+    frames: Vec<ControlFrame>,
+}
+
 impl OperandStack {
     /// Creates a new `OperandStack`.
     pub fn new(max_size: usize) -> Self {
@@ -127,10 +165,96 @@ impl OperandStack {
     }
 }
 
-#[derive(Debug, Clone)]
-/// Control stack.
-pub struct ControlStack {
-    frames: Vec<ControlFrame>,
+impl FrameKind {
+    /// Decodes this value from its compact byte representation.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => FrameKind::Function,
+            1 => FrameKind::Block,
+            2 => FrameKind::Loop,
+            _ => FrameKind::Block,
+        }
+    }
+}
+
+impl ControlFrame {
+    /// Creates a new `ControlFrame`.
+    pub fn new(
+        kind: FrameKind,
+        param_count: u32,
+        result_count: u32,
+        label_count: u32,
+        code: Vec<u8>,
+        locals: Vec<WasmValue>,
+    ) -> Self {
+        Self {
+            kind,
+            position: 0,
+            code,
+            arity: result_count as usize,
+            label_arity: label_count as usize,
+            local_count: param_count as usize,
+            height: 0,
+            locals,
+        }
+    }
+
+    /// Returns i32.
+    pub fn get_i32(&self, stack: &mut OperandStack) -> crate::runtime::Result<i32> {
+        let idx = match stack.pop() {
+            Some(WasmValue::I32(v)) => v as u32,
+            Some(_) => {
+                return Err(crate::runtime::WasmError::Runtime(
+                    "type mismatch".to_string(),
+                ));
+            }
+            None => {
+                return Err(crate::runtime::WasmError::Runtime(
+                    "stack underflow".to_string(),
+                ));
+            }
+        };
+        Ok(idx as i32)
+    }
+
+    /// Returns i64.
+    pub fn get_i64(&self, stack: &mut OperandStack) -> crate::runtime::Result<i64> {
+        match stack.pop() {
+            Some(WasmValue::I64(v)) => Ok(v),
+            Some(_) => Err(crate::runtime::WasmError::Runtime(
+                "type mismatch".to_string(),
+            )),
+            None => Err(crate::runtime::WasmError::Runtime(
+                "stack underflow".to_string(),
+            )),
+        }
+    }
+
+    /// Returns f32.
+    pub fn get_f32(&self, stack: &mut OperandStack) -> crate::runtime::Result<f32> {
+        match stack.pop() {
+            Some(WasmValue::F32(v)) => Ok(v),
+            Some(_) => Err(crate::runtime::WasmError::Runtime(
+                "type mismatch".to_string(),
+            )),
+            None => Err(crate::runtime::WasmError::Runtime(
+                "stack underflow".to_string(),
+            )),
+        }
+    }
+
+    /// Returns f64.
+    pub fn get_f64(&self, stack: &mut OperandStack) -> crate::runtime::Result<f64> {
+        match stack.pop() {
+            Some(WasmValue::F64(v)) => Ok(v),
+            Some(_) => Err(crate::runtime::WasmError::Runtime(
+                "type mismatch".to_string(),
+            )),
+            None => Err(crate::runtime::WasmError::Runtime(
+                "stack underflow".to_string(),
+            )),
+        }
+    }
 }
 
 impl ControlStack {
@@ -283,130 +407,6 @@ impl ControlStack {
 impl Default for ControlStack {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-/// Kind of control frame active in the interpreter.
-pub enum FrameKind {
-    /// A function frame.
-    Function,
-    /// A structured block frame.
-    Block,
-    /// A loop frame.
-    Loop,
-}
-
-impl FrameKind {
-    /// Decodes this value from its compact byte representation.
-    pub fn from_u8(v: u8) -> Self {
-        match v {
-            0 => FrameKind::Function,
-            1 => FrameKind::Block,
-            2 => FrameKind::Loop,
-            _ => FrameKind::Block,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-/// A frame stored on the interpreter control stack.
-pub struct ControlFrame {
-    /// Kind of control construct represented by this frame.
-    pub kind: FrameKind,
-    /// Current instruction position within the frame code.
-    pub position: usize,
-    /// Encoded instruction bytes for this frame.
-    pub code: Vec<u8>,
-    /// Number of values produced when the frame completes.
-    pub arity: usize,
-    /// Number of values expected by branches to this frame.
-    pub label_arity: usize,
-    /// Number of local slots associated with the frame.
-    pub local_count: usize,
-    /// Operand-stack height when the frame was entered.
-    pub height: usize,
-    /// Captured local values for the frame.
-    pub locals: Vec<WasmValue>,
-}
-
-impl ControlFrame {
-    /// Creates a new `ControlFrame`.
-    pub fn new(
-        kind: FrameKind,
-        param_count: u32,
-        result_count: u32,
-        label_count: u32,
-        code: Vec<u8>,
-        locals: Vec<WasmValue>,
-    ) -> Self {
-        Self {
-            kind,
-            position: 0,
-            code,
-            arity: result_count as usize,
-            label_arity: label_count as usize,
-            local_count: param_count as usize,
-            height: 0,
-            locals,
-        }
-    }
-
-    /// Returns i32.
-    pub fn get_i32(&self, stack: &mut OperandStack) -> crate::runtime::Result<i32> {
-        let idx = match stack.pop() {
-            Some(WasmValue::I32(v)) => v as u32,
-            Some(_) => {
-                return Err(crate::runtime::WasmError::Runtime(
-                    "type mismatch".to_string(),
-                ));
-            }
-            None => {
-                return Err(crate::runtime::WasmError::Runtime(
-                    "stack underflow".to_string(),
-                ));
-            }
-        };
-        Ok(idx as i32)
-    }
-
-    /// Returns i64.
-    pub fn get_i64(&self, stack: &mut OperandStack) -> crate::runtime::Result<i64> {
-        match stack.pop() {
-            Some(WasmValue::I64(v)) => Ok(v),
-            Some(_) => Err(crate::runtime::WasmError::Runtime(
-                "type mismatch".to_string(),
-            )),
-            None => Err(crate::runtime::WasmError::Runtime(
-                "stack underflow".to_string(),
-            )),
-        }
-    }
-
-    /// Returns f32.
-    pub fn get_f32(&self, stack: &mut OperandStack) -> crate::runtime::Result<f32> {
-        match stack.pop() {
-            Some(WasmValue::F32(v)) => Ok(v),
-            Some(_) => Err(crate::runtime::WasmError::Runtime(
-                "type mismatch".to_string(),
-            )),
-            None => Err(crate::runtime::WasmError::Runtime(
-                "stack underflow".to_string(),
-            )),
-        }
-    }
-
-    /// Returns f64.
-    pub fn get_f64(&self, stack: &mut OperandStack) -> crate::runtime::Result<f64> {
-        match stack.pop() {
-            Some(WasmValue::F64(v)) => Ok(v),
-            Some(_) => Err(crate::runtime::WasmError::Runtime(
-                "type mismatch".to_string(),
-            )),
-            None => Err(crate::runtime::WasmError::Runtime(
-                "stack underflow".to_string(),
-            )),
-        }
     }
 }
 

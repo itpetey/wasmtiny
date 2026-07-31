@@ -1,5 +1,6 @@
-use crate::runtime::{Module, Result, WasmError, WasmValue};
 use std::collections::HashMap;
+
+use crate::runtime::{Module, Result, WasmError, WasmValue};
 
 #[derive(Debug, Clone)]
 /// Ir opcode.
@@ -72,6 +73,15 @@ pub struct IrBlock {
     pub successors: Vec<u32>,
 }
 
+/// Fast interpreter.
+pub struct FastInterpreter {
+    registers: Vec<WasmValue>,
+    blocks: HashMap<u32, IrBlock>,
+    #[allow(dead_code)]
+    current_block: u32,
+    local_count: u8,
+}
+
 impl IrBlock {
     /// Creates a new `IrBlock`.
     pub fn new() -> Self {
@@ -86,15 +96,6 @@ impl Default for IrBlock {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Fast interpreter.
-pub struct FastInterpreter {
-    registers: Vec<WasmValue>,
-    blocks: HashMap<u32, IrBlock>,
-    #[allow(dead_code)]
-    current_block: u32,
-    local_count: u8,
 }
 
 impl FastInterpreter {

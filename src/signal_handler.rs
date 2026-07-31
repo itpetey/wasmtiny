@@ -16,16 +16,17 @@
 //! Signal handlers must be async-signal-safe. This module uses only POSIX
 //! async-signal-safe functions in the handler itself.
 
-use crate::runtime::{TrapCode, WasmError};
-use std::cell::RefCell;
-use std::sync::Once;
+use std::{cell::RefCell, sync::Once};
 
+use crate::runtime::{TrapCode, WasmError};
+
+/// One-time initialization for the signal handler.
+static INIT: Once = Once::new();
 // On macOS, jmp_buf is 68 bytes (17 * 4 bytes for int32 + padding)
 // On Linux, it varies but is typically around 200 bytes
 // We use a conservative size that works on both platforms
 #[cfg(target_os = "macos")]
 const JMP_BUF_SIZE: usize = 192;
-
 #[cfg(not(target_os = "macos"))]
 const JMP_BUF_SIZE: usize = 256;
 
@@ -59,9 +60,6 @@ thread_local! {
     static IN_TRAP_HANDLER: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// One-time initialization for the signal handler.
-static INIT: Once = Once::new();
-
 /// Installs the SIGSEGV (and SIGBUS on macOS) signal handler.
 ///
 /// This is called automatically by `with_trap_handler` on first use.
@@ -72,65 +70,6 @@ pub fn install_signal_handler() {
         #[cfg(target_os = "macos")]
         install_one(libc::SIGBUS);
     });
-}
-
-fn install_one(signal: libc::c_int) {
-    // SAFETY: sigaction, sigemptyset are FFI calls with standard semantics.
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = sigsegv_handler as *const () as usize;
-        sa.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
-        libc::sigemptyset(&mut sa.sa_mask);
-
-        if libc::sigaction(signal, &sa, std::ptr::null_mut()) != 0 {
-            panic!(
-                "Failed to install signal handler for {}: {}",
-                signal,
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-}
-
-/// The SIGSEGV signal handler.
-///
-/// Checks if the faulting address is in a shared memory region. If yes,
-/// and if a jump buffer is set, `longjmp`s back to the recovery point.
-/// Otherwise, re-raises SIGSEGV with the default handler.
-extern "C" fn sigsegv_handler(
-    sig: libc::c_int,
-    info: *mut libc::siginfo_t,
-    _context: *mut libc::c_void,
-) {
-    // Extract the faulting address from siginfo_t
-    let _fault_addr = unsafe { (*info).si_addr() as usize };
-
-    // Check if we have a jump buffer set up
-    let should_longjmp = JUMP_BUFFER.with(|buf| buf.borrow().is_some());
-
-    if should_longjmp {
-        let in_handler = IN_TRAP_HANDLER.with(|flag| *flag.borrow());
-
-        if in_handler {
-            // longjmp back to the recovery point with value 1 (indicating trap)
-            JUMP_BUFFER.with(|buf| {
-                if let Some(jmp_buf_ptr) = *buf.borrow() {
-                    unsafe {
-                        longjmp(jmp_buf_ptr, 1);
-                    }
-                }
-            });
-        }
-    }
-
-    // If we get here, no jump buffer was set up.
-    // Re-raise with the default handler to crash the process.
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = libc::SIG_DFL;
-        libc::sigaction(sig, &sa, std::ptr::null_mut());
-        libc::raise(sig);
-    }
 }
 
 /// Executes a closure with SIGSEGV trap handling enabled.
@@ -192,6 +131,65 @@ where
     });
 
     result
+}
+
+fn install_one(signal: libc::c_int) {
+    // SAFETY: sigaction, sigemptyset are FFI calls with standard semantics.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = sigsegv_handler as *const () as usize;
+        sa.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+        libc::sigemptyset(&mut sa.sa_mask);
+
+        if libc::sigaction(signal, &sa, std::ptr::null_mut()) != 0 {
+            panic!(
+                "Failed to install signal handler for {}: {}",
+                signal,
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+/// The SIGSEGV signal handler.
+///
+/// Checks if the faulting address is in a shared memory region. If yes,
+/// and if a jump buffer is set, `longjmp`s back to the recovery point.
+/// Otherwise, re-raises SIGSEGV with the default handler.
+extern "C" fn sigsegv_handler(
+    sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    _context: *mut libc::c_void,
+) {
+    // Extract the faulting address from siginfo_t
+    let _fault_addr = unsafe { (*info).si_addr() as usize };
+
+    // Check if we have a jump buffer set up
+    let should_longjmp = JUMP_BUFFER.with(|buf| buf.borrow().is_some());
+
+    if should_longjmp {
+        let in_handler = IN_TRAP_HANDLER.with(|flag| *flag.borrow());
+
+        if in_handler {
+            // longjmp back to the recovery point with value 1 (indicating trap)
+            JUMP_BUFFER.with(|buf| {
+                if let Some(jmp_buf_ptr) = *buf.borrow() {
+                    unsafe {
+                        longjmp(jmp_buf_ptr, 1);
+                    }
+                }
+            });
+        }
+    }
+
+    // If we get here, no jump buffer was set up.
+    // Re-raise with the default handler to crash the process.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = libc::SIG_DFL;
+        libc::sigaction(sig, &sa, std::ptr::null_mut());
+        libc::raise(sig);
+    }
 }
 
 #[cfg(test)]

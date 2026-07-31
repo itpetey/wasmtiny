@@ -43,18 +43,19 @@
 //! let result = interpreter.continue_execution(module)?;
 //! ```
 
-use crate::interpreter::{ControlStack, OperandStack};
-use crate::runtime::{ValType, WasmError, WasmValue};
+use std::{
+    sync::Arc,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+
 use parking_lot::RwLock;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use crate::{
+    interpreter::{ControlStack, OperandStack},
+    runtime::{ValType, WasmError, WasmValue},
+};
 
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Returns whether suspension error.
-pub fn is_suspension_error(error: &WasmError) -> bool {
-    matches!(error, WasmError::Suspended(_))
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Suspension error.
@@ -68,21 +69,6 @@ pub enum SuspensionError {
     /// A pending host call must complete before resumption can continue.
     HostcallPending,
 }
-
-impl std::fmt::Display for SuspensionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InstanceNotSuspended(msg) => write!(f, "Instance not suspended: {}", msg),
-            Self::InvalidResumeState(msg) => write!(f, "Invalid resume state: {}", msg),
-            Self::UnsupportedSuspensionState(msg) => {
-                write!(f, "Unsupported suspension state: {}", msg)
-            }
-            Self::HostcallPending => write!(f, "Hostcall is pending completion"),
-        }
-    }
-}
-
-impl std::error::Error for SuspensionError {}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -100,6 +86,70 @@ pub(crate) struct InterpreterState {
     pub(crate) interpreter_id: u64,
     pub(crate) suspension_epoch: u64,
 }
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) enum JitState {
+    Pending {
+        func_idx: u32,
+        args: Vec<WasmValue>,
+        jit_id: u64,
+        execution_epoch: u64,
+        context_id: u64,
+        resume_pc: u32,
+    },
+    Suspended {
+        func_idx: u32,
+        jit_id: u64,
+        execution_epoch: u64,
+        context_id: u64,
+        saved_registers: Vec<u64>,
+        stack_pointer: u64,
+        frame_pointer: u64,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) enum SuspensionState {
+    Interpreter(InterpreterState),
+    Jit(JitState),
+    HostcallPending {
+        pending_work: Vec<u8>,
+        result_types: Vec<ValType>,
+        resume_state: Box<SuspensionState>,
+    },
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone)]
+/// Suspended handle.
+pub struct SuspendedHandle(Arc<SuspendedInstance>);
+
+pub(crate) struct SuspendedInstance {
+    engine: ExecutionEngine,
+    state: Arc<RwLock<SuspensionState>>,
+    suspended: Arc<AtomicBool>,
+    instance_id: u64,
+}
+
+/// Runtime suspender.
+pub struct RuntimeSuspender;
+
+impl std::fmt::Display for SuspensionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InstanceNotSuspended(msg) => write!(f, "Instance not suspended: {}", msg),
+            Self::InvalidResumeState(msg) => write!(f, "Invalid resume state: {}", msg),
+            Self::UnsupportedSuspensionState(msg) => {
+                write!(f, "Unsupported suspension state: {}", msg)
+            }
+            Self::HostcallPending => write!(f, "Hostcall is pending completion"),
+        }
+    }
+}
+
+impl std::error::Error for SuspensionError {}
 
 impl InterpreterState {
     /// Captures the current execution state.
@@ -150,67 +200,128 @@ impl InterpreterState {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) enum JitState {
-    Pending {
-        func_idx: u32,
-        args: Vec<WasmValue>,
-        jit_id: u64,
-        execution_epoch: u64,
-        context_id: u64,
-        resume_pc: u32,
-    },
-    Suspended {
-        func_idx: u32,
-        jit_id: u64,
-        execution_epoch: u64,
-        context_id: u64,
-        saved_registers: Vec<u64>,
-        stack_pointer: u64,
-        frame_pointer: u64,
-    },
-}
+impl SuspendedHandle {
+    pub(crate) fn new(instance: SuspendedInstance) -> Self {
+        Self(Arc::new(instance))
+    }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) enum SuspensionState {
-    Interpreter(InterpreterState),
-    Jit(JitState),
-    HostcallPending {
-        pending_work: Vec<u8>,
-        result_types: Vec<ValType>,
-        resume_state: Box<SuspensionState>,
-    },
-    #[default]
-    None,
-}
+    /// Returns whether suspended.
+    pub fn is_suspended(&self) -> bool {
+        self.0.is_suspended()
+    }
 
-pub(crate) struct SuspendedInstance {
-    engine: ExecutionEngine,
-    state: Arc<RwLock<SuspensionState>>,
-    suspended: Arc<AtomicBool>,
-    instance_id: u64,
-}
+    /// Returns whether this value has pending hostcall.
+    pub fn has_pending_hostcall(&self) -> bool {
+        let state = self.0.state();
+        let guard = state.read();
+        matches!(*guard, SuspensionState::HostcallPending { .. })
+    }
 
-impl std::fmt::Debug for SuspendedInstance {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SuspendedInstance")
-            .field("engine", &self.engine)
-            .field("state", &self.state)
-            .field("suspended", &self.suspended.load(Ordering::SeqCst))
-            .field("instance_id", &self.instance_id)
-            .finish()
+    pub(crate) fn suspension_state(&self) -> crate::runtime::suspend::SuspensionState {
+        self.0.state().read().clone()
+    }
+
+    pub(crate) fn interpreter_id(&self) -> Option<u64> {
+        let state = self.0.state();
+        let guard = state.read();
+        match &*guard {
+            SuspensionState::Interpreter(state) => Some(state.interpreter_id),
+            SuspensionState::HostcallPending { resume_state, .. } => {
+                if let SuspensionState::Interpreter(state) = &**resume_state {
+                    Some(state.interpreter_id)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn suspension_epoch(&self) -> Option<u64> {
+        let state = self.0.state();
+        let guard = state.read();
+        match &*guard {
+            SuspensionState::Interpreter(state) => Some(state.suspension_epoch),
+            SuspensionState::HostcallPending { resume_state, .. } => {
+                if let SuspensionState::Interpreter(state) = &**resume_state {
+                    Some(state.suspension_epoch)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn jit_id(&self) -> Option<u64> {
+        let state = self.0.state();
+        let guard = state.read();
+        match &*guard {
+            SuspensionState::Jit(JitState::Pending { jit_id, .. }) => Some(*jit_id),
+            SuspensionState::Jit(JitState::Suspended { jit_id, .. }) => Some(*jit_id),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn jit_execution_epoch(&self) -> Option<u64> {
+        let state = self.0.state();
+        let guard = state.read();
+        match &*guard {
+            SuspensionState::Jit(JitState::Pending {
+                execution_epoch, ..
+            }) => Some(*execution_epoch),
+            SuspensionState::Jit(JitState::Suspended {
+                execution_epoch, ..
+            }) => Some(*execution_epoch),
+            _ => None,
+        }
+    }
+
+    /// Returns the pending host work payload, if one is present.
+    pub fn pending_work(&self) -> Option<Vec<u8>> {
+        let state = self.0.state();
+        let guard = state.read();
+        if let SuspensionState::HostcallPending { pending_work, .. } = &*guard {
+            Some(pending_work.clone())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn resume_after_hostcall(
+        &self,
+        results: &[WasmValue],
+    ) -> Result<SuspensionState, SuspensionError> {
+        self.0.resume_after_hostcall(results)
+    }
+
+    pub(crate) fn resume(&self) -> Result<SuspensionState, SuspensionError> {
+        self.0.resume()
+    }
+
+    #[cfg(feature = "llvm-jit")]
+    pub(crate) fn cancel(&self) {
+        let mut state = self.0.state.write();
+        *state = SuspensionState::None;
+        self.0.suspended.store(false, Ordering::SeqCst);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn engine(&self) -> &ExecutionEngine {
+        self.0.engine()
+    }
+
+    /// Returns the identifier for the suspended instance.
+    pub fn instance_id(&self) -> u64 {
+        self.0.instance_id()
     }
 }
 
-impl Clone for SuspendedInstance {
-    fn clone(&self) -> Self {
-        Self {
-            engine: self.engine.clone(),
-            state: self.state.clone(),
-            suspended: self.suspended.clone(),
-            instance_id: self.instance_id,
-        }
+impl From<SuspendedInstance> for SuspendedHandle {
+    fn from(instance: SuspendedInstance) -> Self {
+        SuspendedHandle::new(instance)
     }
 }
 
@@ -352,137 +463,27 @@ impl SuspendedInstance {
     }
 }
 
-#[derive(Debug, Clone)]
-/// Suspended handle.
-pub struct SuspendedHandle(Arc<SuspendedInstance>);
-
-impl SuspendedHandle {
-    pub(crate) fn new(instance: SuspendedInstance) -> Self {
-        Self(Arc::new(instance))
-    }
-
-    /// Returns whether suspended.
-    pub fn is_suspended(&self) -> bool {
-        self.0.is_suspended()
-    }
-
-    /// Returns whether this value has pending hostcall.
-    pub fn has_pending_hostcall(&self) -> bool {
-        let state = self.0.state();
-        let guard = state.read();
-        matches!(*guard, SuspensionState::HostcallPending { .. })
-    }
-
-    pub(crate) fn suspension_state(&self) -> crate::runtime::suspend::SuspensionState {
-        self.0.state().read().clone()
-    }
-
-    pub(crate) fn interpreter_id(&self) -> Option<u64> {
-        let state = self.0.state();
-        let guard = state.read();
-        match &*guard {
-            SuspensionState::Interpreter(state) => Some(state.interpreter_id),
-            SuspensionState::HostcallPending { resume_state, .. } => {
-                if let SuspensionState::Interpreter(state) = &**resume_state {
-                    Some(state.interpreter_id)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn suspension_epoch(&self) -> Option<u64> {
-        let state = self.0.state();
-        let guard = state.read();
-        match &*guard {
-            SuspensionState::Interpreter(state) => Some(state.suspension_epoch),
-            SuspensionState::HostcallPending { resume_state, .. } => {
-                if let SuspensionState::Interpreter(state) = &**resume_state {
-                    Some(state.suspension_epoch)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn jit_id(&self) -> Option<u64> {
-        let state = self.0.state();
-        let guard = state.read();
-        match &*guard {
-            SuspensionState::Jit(JitState::Pending { jit_id, .. }) => Some(*jit_id),
-            SuspensionState::Jit(JitState::Suspended { jit_id, .. }) => Some(*jit_id),
-            _ => None,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn jit_execution_epoch(&self) -> Option<u64> {
-        let state = self.0.state();
-        let guard = state.read();
-        match &*guard {
-            SuspensionState::Jit(JitState::Pending {
-                execution_epoch, ..
-            }) => Some(*execution_epoch),
-            SuspensionState::Jit(JitState::Suspended {
-                execution_epoch, ..
-            }) => Some(*execution_epoch),
-            _ => None,
-        }
-    }
-
-    /// Returns the pending host work payload, if one is present.
-    pub fn pending_work(&self) -> Option<Vec<u8>> {
-        let state = self.0.state();
-        let guard = state.read();
-        if let SuspensionState::HostcallPending { pending_work, .. } = &*guard {
-            Some(pending_work.clone())
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn resume_after_hostcall(
-        &self,
-        results: &[WasmValue],
-    ) -> Result<SuspensionState, SuspensionError> {
-        self.0.resume_after_hostcall(results)
-    }
-
-    pub(crate) fn resume(&self) -> Result<SuspensionState, SuspensionError> {
-        self.0.resume()
-    }
-
-    #[cfg(feature = "llvm-jit")]
-    pub(crate) fn cancel(&self) {
-        let mut state = self.0.state.write();
-        *state = SuspensionState::None;
-        self.0.suspended.store(false, Ordering::SeqCst);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn engine(&self) -> &ExecutionEngine {
-        self.0.engine()
-    }
-
-    /// Returns the identifier for the suspended instance.
-    pub fn instance_id(&self) -> u64 {
-        self.0.instance_id()
+impl std::fmt::Debug for SuspendedInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuspendedInstance")
+            .field("engine", &self.engine)
+            .field("state", &self.state)
+            .field("suspended", &self.suspended.load(Ordering::SeqCst))
+            .field("instance_id", &self.instance_id)
+            .finish()
     }
 }
 
-impl From<SuspendedInstance> for SuspendedHandle {
-    fn from(instance: SuspendedInstance) -> Self {
-        SuspendedHandle::new(instance)
+impl Clone for SuspendedInstance {
+    fn clone(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            state: self.state.clone(),
+            suspended: self.suspended.clone(),
+            instance_id: self.instance_id,
+        }
     }
 }
-
-/// Runtime suspender.
-pub struct RuntimeSuspender;
 
 impl RuntimeSuspender {
     /// Creates a new `RuntimeSuspender`.
@@ -565,6 +566,31 @@ impl Default for RuntimeSuspender {
     }
 }
 
+/// Returns whether suspension error.
+pub fn is_suspension_error(error: &WasmError) -> bool {
+    matches!(error, WasmError::Suspended(_))
+}
+
+fn apply_hostcall_results(
+    mut state: SuspensionState,
+    results: &[WasmValue],
+) -> Result<SuspensionState, SuspensionError> {
+    match &mut state {
+        SuspensionState::Interpreter(interpreter_state) => {
+            for value in results {
+                interpreter_state
+                    .operand_stack
+                    .push(*value)
+                    .map_err(|e| SuspensionError::InvalidResumeState(e.to_string()))?;
+            }
+            Ok(state)
+        }
+        _ => Err(SuspensionError::UnsupportedSuspensionState(
+            "hostcall completion is only supported for interpreter state".to_string(),
+        )),
+    }
+}
+
 fn validate_hostcall_results(
     results: &[WasmValue],
     expected: &[ValType],
@@ -589,26 +615,6 @@ fn validate_hostcall_results(
     }
 
     Ok(())
-}
-
-fn apply_hostcall_results(
-    mut state: SuspensionState,
-    results: &[WasmValue],
-) -> Result<SuspensionState, SuspensionError> {
-    match &mut state {
-        SuspensionState::Interpreter(interpreter_state) => {
-            for value in results {
-                interpreter_state
-                    .operand_stack
-                    .push(*value)
-                    .map_err(|e| SuspensionError::InvalidResumeState(e.to_string()))?;
-            }
-            Ok(state)
-        }
-        _ => Err(SuspensionError::UnsupportedSuspensionState(
-            "hostcall completion is only supported for interpreter state".to_string(),
-        )),
-    }
 }
 
 #[cfg(test)]

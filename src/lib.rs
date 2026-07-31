@@ -35,24 +35,10 @@
 //! - `llvm-jit`: Enable LLVM-based JIT compilation for improved performance.
 //!   Requires LLVM libraries to be installed.
 
-pub mod aot_runtime;
-/// Application APIs.
-pub mod application;
-/// Interpreter APIs.
-pub mod interpreter;
-/// Jit APIs.
-pub mod jit;
-/// Loader-related APIs.
-pub mod loader;
-/// Memory APIs.
-pub mod memory;
-/// Runtime-related APIs.
-pub mod runtime;
-/// SIGSEGV signal handler for translating page faults to WASM traps.
-pub mod signal_handler;
-
 pub use application::WasmApplication;
 pub use interpreter::SafepointConfig;
+#[cfg(feature = "llvm-jit")]
+pub use jit::LlvmJit;
 pub use memory::RegionProt;
 pub use runtime::ExportType;
 pub use runtime::FunctionType;
@@ -81,5 +67,18 @@ pub use runtime::WasmError;
 pub use runtime::WasmValue;
 pub use runtime::is_suspension_error;
 
-#[cfg(feature = "llvm-jit")]
-pub use jit::LlvmJit;
+pub mod aot_runtime;
+/// Application APIs.
+pub mod application;
+/// Interpreter APIs.
+pub mod interpreter;
+/// Jit APIs.
+pub mod jit;
+/// Loader-related APIs.
+pub mod loader;
+/// Memory APIs.
+pub mod memory;
+/// Runtime-related APIs.
+pub mod runtime;
+/// SIGSEGV signal handler for translating page faults to WASM traps.
+pub mod signal_handler;

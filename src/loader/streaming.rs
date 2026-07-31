@@ -1,4 +1,5 @@
 use super::Parser;
+
 use crate::runtime::{Module, Result, WasmError};
 
 /// Streaming parser for incremental WebAssembly module parsing.
@@ -9,6 +10,15 @@ pub struct StreamingParser {
     buffer: Vec<u8>,
     module: Option<Module>,
     parser: Parser,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The state of a streaming parse operation.
+pub enum ParseState {
+    /// Parsing completed successfully.
+    Complete,
+    /// More data is needed to complete parsing.
+    NeedMoreData,
 }
 
 impl StreamingParser {
@@ -56,15 +66,6 @@ impl Default for StreamingParser {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// The state of a streaming parse operation.
-pub enum ParseState {
-    /// Parsing completed successfully.
-    Complete,
-    /// More data is needed to complete parsing.
-    NeedMoreData,
 }
 
 fn is_incomplete_input(error: &WasmError) -> bool {

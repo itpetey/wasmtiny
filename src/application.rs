@@ -15,20 +15,20 @@
 //! let result = app.call_function(idx, "main", &[])?;
 //! ```
 
+#[cfg(feature = "llvm-jit")]
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
 use crate::aot_runtime::runtime::{AotExport, AotRuntime};
+#[cfg(feature = "llvm-jit")]
+use crate::jit::{LlvmJit, set_execution_context};
 use crate::memory::RegionProt;
 use crate::runtime::{
     Extern, FunctionType, Global, GuestFuncBinding, HostFunc, Import, InstanceLimits,
     InstanceStats, Memory, Result, SharedRegionId, SharedTable, Store, Table, WasmError, WasmValue,
 };
-use std::fs;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-
-#[cfg(feature = "llvm-jit")]
-use crate::jit::{LlvmJit, set_execution_context};
-#[cfg(feature = "llvm-jit")]
-use std::collections::HashMap;
 
 /// Execution mode for WebAssembly modules.
 ///

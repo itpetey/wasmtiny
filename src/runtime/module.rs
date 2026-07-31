@@ -1,8 +1,99 @@
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use super::{ExportType, FunctionType, GlobalType, Import, ImportKind, MemoryType, TableType};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_MODULE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone)]
+/// A local declaration in a function body.
+pub struct Local {
+    /// Number of locals with this type.
+    pub count: u32,
+    /// Value type of the declared locals.
+    pub type_: super::ValType,
+}
+
+#[derive(Debug, Clone)]
+/// A function defined in the module.
+pub struct Func {
+    /// Index into the module type section.
+    pub type_idx: u32,
+    /// Locals declared by the function body.
+    pub locals: Vec<Local>,
+    /// Raw function body bytes.
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+/// The placement mode for a data segment.
+pub enum DataKind {
+    /// An active data segment initialised into a target memory.
+    Active {
+        /// The target memory index.
+        memory_idx: u32,
+        /// The encoded constant-expression offset.
+        offset: Vec<u8>,
+    },
+    /// A passive data segment applied by bulk-memory instructions.
+    Passive,
+}
+
+#[derive(Debug, Clone)]
+/// A data segment declared by the module.
+pub struct DataSegment {
+    /// Whether the segment is active or passive.
+    pub kind: DataKind,
+    /// Initial bytes stored in the segment.
+    pub init: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+/// The placement mode for an element segment.
+pub enum ElemKind {
+    /// An active element segment initialised into a target table.
+    Active {
+        /// The target table index.
+        table_idx: u32,
+        /// The encoded constant-expression offset.
+        offset: Vec<u8>,
+    },
+    /// A passive element segment applied by bulk-memory instructions.
+    Passive,
+    /// A declarative element segment used only for validation.
+    Declarative,
+}
+
+#[derive(Debug, Clone)]
+/// An element segment declared by the module.
+pub struct ElemSegment {
+    /// Whether the segment is active, passive, or declarative.
+    pub kind: ElemKind,
+    /// Reference type stored by the segment.
+    pub type_: super::RefType,
+    /// Whether the element segment permits null references.
+    pub nullable: bool,
+    /// Encoded initialiser expressions for each element.
+    pub init: Vec<Vec<u8>>,
+    /// Whether this segment was synthesised from a table declaration initialiser.
+    pub generated_by_table_init: bool,
+}
+
+#[derive(Debug, Clone)]
+/// Optional symbolic names captured from the custom name section.
+pub struct NameSection {
+    #[allow(dead_code)]
+    /// Optional symbolic name for the module.
+    pub module_name: Option<String>,
+    #[allow(dead_code)]
+    /// Symbolic names keyed by function index.
+    pub func_names: HashMap<u32, String>,
+    #[allow(dead_code)]
+    /// Symbolic local names keyed by function index and local index.
+    pub local_names: HashMap<u32, HashMap<u32, String>>,
+}
 
 #[derive(Debug, Clone)]
 /// Parsed WebAssembly module.
@@ -39,94 +130,6 @@ pub struct Module {
     pub elems: Vec<ElemSegment>,
     #[allow(dead_code)]
     names: HashMap<String, NameSection>,
-}
-
-#[derive(Debug, Clone)]
-/// A function defined in the module.
-pub struct Func {
-    /// Index into the module type section.
-    pub type_idx: u32,
-    /// Locals declared by the function body.
-    pub locals: Vec<Local>,
-    /// Raw function body bytes.
-    pub body: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-/// A local declaration in a function body.
-pub struct Local {
-    /// Number of locals with this type.
-    pub count: u32,
-    /// Value type of the declared locals.
-    pub type_: super::ValType,
-}
-
-#[derive(Debug, Clone)]
-/// A data segment declared by the module.
-pub struct DataSegment {
-    /// Whether the segment is active or passive.
-    pub kind: DataKind,
-    /// Initial bytes stored in the segment.
-    pub init: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-/// The placement mode for a data segment.
-pub enum DataKind {
-    /// An active data segment initialised into a target memory.
-    Active {
-        /// The target memory index.
-        memory_idx: u32,
-        /// The encoded constant-expression offset.
-        offset: Vec<u8>,
-    },
-    /// A passive data segment applied by bulk-memory instructions.
-    Passive,
-}
-
-#[derive(Debug, Clone)]
-/// An element segment declared by the module.
-pub struct ElemSegment {
-    /// Whether the segment is active, passive, or declarative.
-    pub kind: ElemKind,
-    /// Reference type stored by the segment.
-    pub type_: super::RefType,
-    /// Whether the element segment permits null references.
-    pub nullable: bool,
-    /// Encoded initialiser expressions for each element.
-    pub init: Vec<Vec<u8>>,
-    /// Whether this segment was synthesised from a table declaration initialiser.
-    pub generated_by_table_init: bool,
-}
-
-#[derive(Debug, Clone)]
-/// The placement mode for an element segment.
-pub enum ElemKind {
-    /// An active element segment initialised into a target table.
-    Active {
-        /// The target table index.
-        table_idx: u32,
-        /// The encoded constant-expression offset.
-        offset: Vec<u8>,
-    },
-    /// A passive element segment applied by bulk-memory instructions.
-    Passive,
-    /// A declarative element segment used only for validation.
-    Declarative,
-}
-
-#[derive(Debug, Clone)]
-/// Optional symbolic names captured from the custom name section.
-pub struct NameSection {
-    #[allow(dead_code)]
-    /// Optional symbolic name for the module.
-    pub module_name: Option<String>,
-    #[allow(dead_code)]
-    /// Symbolic names keyed by function index.
-    pub func_names: HashMap<u32, String>,
-    #[allow(dead_code)]
-    /// Symbolic local names keyed by function index and local index.
-    pub local_names: HashMap<u32, HashMap<u32, String>>,
 }
 
 impl Module {

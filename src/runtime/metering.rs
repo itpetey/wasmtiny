@@ -1,6 +1,7 @@
 use super::{Result, TrapCode, WasmError};
-use crate::memory::PAGE_SIZE_BYTES;
 use parking_lot::RwLock;
+
+use crate::memory::PAGE_SIZE_BYTES;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 /// Resource usage statistics for a running instance.
@@ -22,6 +23,17 @@ pub struct InstanceLimits {
     pub max_memory_pages: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct InstanceMeterState {
+    executed_instructions: u64,
+    limits: InstanceLimits,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct InstanceMeter {
+    state: RwLock<InstanceMeterState>,
+}
+
 impl InstanceLimits {
     /// Constant `fn`.
     pub const fn new(
@@ -33,17 +45,6 @@ impl InstanceLimits {
             max_memory_pages,
         }
     }
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct InstanceMeter {
-    state: RwLock<InstanceMeterState>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct InstanceMeterState {
-    executed_instructions: u64,
-    limits: InstanceLimits,
 }
 
 impl InstanceMeter {

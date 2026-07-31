@@ -11,6 +11,10 @@
 //! - [`ControlStack`] - Stack for control flow frames (blocks, loops, functions)
 //! - [`SafepointConfig`] - Configuration for execution suspension points
 
+pub use exec::{Interpreter, SafepointConfig};
+pub use instructions::Instruction;
+pub use stack::{ControlFrame, ControlStack, FrameKind, OperandStack};
+
 /// Interpreter execution support.
 pub mod exec;
 #[allow(dead_code)]
@@ -19,7 +23,3 @@ mod fast;
 pub mod instructions;
 /// Interpreter stack types.
 pub mod stack;
-
-pub use exec::{Interpreter, SafepointConfig};
-pub use instructions::Instruction;
-pub use stack::{ControlFrame, ControlStack, FrameKind, OperandStack};

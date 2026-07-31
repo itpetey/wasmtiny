@@ -1,14 +1,16 @@
+use std::io::Cursor;
+
 use super::BinaryReader;
+
 use crate::runtime::{
     DataKind, DataSegment, ElemKind, ElemSegment, ExportKind, ExportType, Func, FunctionType,
     GlobalType, Import, ImportKind, Limits, Local, MemoryType, Module, NumType, RefType, Result,
     TableType, ValType, WasmError,
 };
-use std::io::Cursor;
 
-const MAGIC: u32 = 0x6D736100;
 const CURRENT_VERSION: u32 = 1;
 const FUNC_TYPE_FORM: u8 = 0x60;
+const MAGIC: u32 = 0x6D736100;
 
 /// WebAssembly module parser.
 ///

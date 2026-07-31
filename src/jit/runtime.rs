@@ -1,5 +1,15 @@
-use crate::runtime::SuspendedHandle;
 use std::collections::HashMap;
+
+use crate::runtime::SuspendedHandle;
+
+#[derive(Clone, Debug)]
+/// A machine-code entry point for on-stack replacement.
+pub struct OsrEntryPoint {
+    /// WebAssembly program-counter offset associated with the entry.
+    pub pc_offset: u32,
+    /// Native code address to jump to for OSR.
+    pub target_address: u64,
+}
 
 /// JIT code cache with support for safepoints and OSR.
 ///
@@ -12,15 +22,6 @@ pub struct JitCodeCache {
     osr_threshold: u64,
     osr_entry_points: HashMap<u64, Vec<OsrEntryPoint>>,
     suspended_instances: HashMap<u64, SuspendedHandle>,
-}
-
-#[derive(Clone, Debug)]
-/// A machine-code entry point for on-stack replacement.
-pub struct OsrEntryPoint {
-    /// WebAssembly program-counter offset associated with the entry.
-    pub pc_offset: u32,
-    /// Native code address to jump to for OSR.
-    pub target_address: u64,
 }
 
 #[allow(dead_code)]

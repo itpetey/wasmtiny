@@ -11,6 +11,8 @@ use wasmtiny::{
     runtime::{HostCaller, HostFunc},
 };
 
+static HOST_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// Registers a host import that counts invocations and echoes a fixed i64.
 struct CountingHostFunc {
     counter: &'static AtomicUsize,
@@ -35,7 +37,36 @@ impl HostFunc for CountingHostFunc {
     }
 }
 
-static HOST_CALLS: AtomicUsize = AtomicUsize::new(0);
+/// Bulk-memory instructions validate and execute (rustc-emitted memcpy).
+#[test]
+fn bulk_memory_instructions_execute() {
+    let wat = r#"
+    (module
+        (memory 1)
+        (func (export "run") (result i32)
+            ;; memory.fill: 4 bytes of 9 at address 0
+            i32.const 0
+            i32.const 9
+            i32.const 4
+            memory.fill
+            ;; memory.copy: copy to address 8
+            i32.const 8
+            i32.const 0
+            i32.const 4
+            memory.copy
+            ;; read back byte 8
+            i32.const 8
+            i32.load8_u))
+    "#;
+    let module = wat::parse_str(wat).expect("compile wat");
+
+    let mut app = WasmApplication::new();
+    let module_idx = app.load_module_from_memory(&module).expect("load module");
+    app.instantiate(module_idx).expect("instantiate");
+
+    let results = app.call_function(module_idx, "run", &[]).expect("run");
+    assert_eq!(results, vec![WasmValue::I32(9)]);
+}
 
 /// A module that calls a host import through a direct import call and via
 /// `call_indirect` through a funcref table, then returns from a nested call.
@@ -92,6 +123,26 @@ fn hostcalls_and_guest_natives_share_one_instance() {
     assert_eq!(HOST_CALLS.load(Ordering::SeqCst), 1);
 }
 
+/// i64 shifts take the shift count as an i64 operand.
+#[test]
+fn i64_shifts_accept_i64_count() {
+    let wat = r#"
+    (module
+        (func (export "run") (result i64)
+            i64.const 32
+            i64.const 2
+            i64.shr_u))
+    "#;
+    let module = wat::parse_str(wat).expect("compile wat");
+
+    let mut app = WasmApplication::new();
+    let module_idx = app.load_module_from_memory(&module).expect("load module");
+    app.instantiate(module_idx).expect("instantiate");
+
+    let results = app.call_function(module_idx, "run", &[]).expect("run");
+    assert_eq!(results, vec![WasmValue::I64(8)]);
+}
+
 /// `memory.grow` inside one invocation must remain visible to the next.
 #[test]
 fn memory_growth_persists_across_invocations() {
@@ -128,55 +179,4 @@ fn memory_growth_persists_across_invocations() {
         .call_function(module_idx, "read", &[])
         .expect("read back");
     assert_eq!(read, vec![WasmValue::I32(7)]);
-}
-
-/// Bulk-memory instructions validate and execute (rustc-emitted memcpy).
-#[test]
-fn bulk_memory_instructions_execute() {
-    let wat = r#"
-    (module
-        (memory 1)
-        (func (export "run") (result i32)
-            ;; memory.fill: 4 bytes of 9 at address 0
-            i32.const 0
-            i32.const 9
-            i32.const 4
-            memory.fill
-            ;; memory.copy: copy to address 8
-            i32.const 8
-            i32.const 0
-            i32.const 4
-            memory.copy
-            ;; read back byte 8
-            i32.const 8
-            i32.load8_u))
-    "#;
-    let module = wat::parse_str(wat).expect("compile wat");
-
-    let mut app = WasmApplication::new();
-    let module_idx = app.load_module_from_memory(&module).expect("load module");
-    app.instantiate(module_idx).expect("instantiate");
-
-    let results = app.call_function(module_idx, "run", &[]).expect("run");
-    assert_eq!(results, vec![WasmValue::I32(9)]);
-}
-
-/// i64 shifts take the shift count as an i64 operand.
-#[test]
-fn i64_shifts_accept_i64_count() {
-    let wat = r#"
-    (module
-        (func (export "run") (result i64)
-            i64.const 32
-            i64.const 2
-            i64.shr_u))
-    "#;
-    let module = wat::parse_str(wat).expect("compile wat");
-
-    let mut app = WasmApplication::new();
-    let module_idx = app.load_module_from_memory(&module).expect("load module");
-    app.instantiate(module_idx).expect("instantiate");
-
-    let results = app.call_function(module_idx, "run", &[]).expect("run");
-    assert_eq!(results, vec![WasmValue::I64(8)]);
 }

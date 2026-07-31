@@ -1,9 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::runtime::{Func, Module, NumType, Result, ValType, WasmError};
-use std::collections::HashMap;
-use std::ffi::CString;
-use std::ptr;
+use std::{collections::HashMap, ffi::CString, ptr};
 
 #[cfg(feature = "llvm-jit")]
 use llvm_sys::LLVMIntPredicate;
@@ -13,6 +10,8 @@ use llvm_sys::LLVMRealPredicate;
 use llvm_sys::core::*;
 #[cfg(feature = "llvm-jit")]
 use llvm_sys::prelude::*;
+
+use crate::runtime::{Func, Module, NumType, Result, ValType, WasmError};
 
 #[cfg(feature = "llvm-jit")]
 #[allow(dead_code)]
@@ -244,14 +243,6 @@ mod opcodes {
 }
 
 #[cfg(feature = "llvm-jit")]
-#[derive(Clone, Debug)]
-struct BlockInfo {
-    kind: BlockKind,
-    start_block: LLVMBasicBlockRef,
-    end_block: LLVMBasicBlockRef,
-}
-
-#[cfg(feature = "llvm-jit")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlockKind {
     /// Variant `Block`.
@@ -274,6 +265,14 @@ pub struct WasmToLlvmTranslator {
     block_stack: Vec<BlockInfo>,
     #[cfg(feature = "llvm-jit")]
     current_function: LLVMValueRef,
+}
+
+#[cfg(feature = "llvm-jit")]
+#[derive(Clone, Debug)]
+struct BlockInfo {
+    kind: BlockKind,
+    start_block: LLVMBasicBlockRef,
+    end_block: LLVMBasicBlockRef,
 }
 
 impl WasmToLlvmTranslator {

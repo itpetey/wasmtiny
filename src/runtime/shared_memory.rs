@@ -1,19 +1,18 @@
-use crate::memory::{PAGE_SIZE_BYTES, RegionProt};
-use crate::runtime::{Memory, Result, WasmError};
-use parking_lot::{Condvar, Mutex as ParkingMutex, RwLock};
-use std::collections::HashMap;
-use std::ffi::CString;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+use std::{
+    collections::HashMap,
+    ffi::CString,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
-/// A waiter for atomic wait/notify on shared memory addresses.
-#[derive(Debug)]
-pub(crate) struct SharedWaiter {
-    pub(crate) notified: ParkingMutex<bool>,
-    pub(crate) condvar: Condvar,
-}
+use parking_lot::{Condvar, Mutex as ParkingMutex, RwLock};
+
+use crate::{
+    memory::{PAGE_SIZE_BYTES, RegionProt},
+    runtime::{Memory, Result, WasmError},
+};
 
 /// Monotonic counter for generating unique shm names.
 static NEXT_SHM_ID: AtomicU64 = AtomicU64::new(1);
@@ -21,18 +20,6 @@ static NEXT_SHM_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// Shared region id.
 pub struct SharedRegionId(u64);
-
-impl SharedRegionId {
-    /// Constant `fn`.
-    pub const fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    /// Constant `fn`.
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
 
 /// An mmap-backed shared memory region.
 ///
@@ -55,22 +42,38 @@ pub struct SharedRegion {
     waiters: Arc<RwLock<HashMap<u32, Arc<SharedWaiter>>>>,
 }
 
-// SAFETY: The fd and ptr are process-wide resources. The fd is a plain integer
-// and the ptr points to a shared mapping that the kernel serialises. All
-// mutation of attachment_count is atomic.
-unsafe impl Send for SharedRegion {}
-unsafe impl Sync for SharedRegion {}
+/// A waiter for atomic wait/notify on shared memory addresses.
+#[derive(Debug)]
+pub(crate) struct SharedWaiter {
+    pub(crate) notified: ParkingMutex<bool>,
+    pub(crate) condvar: Condvar,
+}
 
-impl std::fmt::Debug for SharedRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedRegion")
-            .field("len", &self.len)
-            .field("fd", &self.fd)
-            .field(
-                "attachment_count",
-                &self.attachment_count.load(Ordering::SeqCst),
-            )
-            .finish()
+/// Shared memory registry.
+///
+/// Manages the lifecycle of shared memory regions: creation, destruction,
+/// attachment to guest instances, and detachment. Regions are mapped directly
+/// into guest linear memory via `mmap(MAP_FIXED | MAP_SHARED)` using a shared
+/// file descriptor, so writes in one guest are visible to all others without
+/// any software copy path.
+///
+/// The registry provides **no** public byte-level read or write methods; all
+/// data access goes through the guest's native load/store instructions on the
+/// mapped pages. Host-side convenience accessors are `pub(crate)` only.
+pub struct SharedMemoryRegistry {
+    next_region_id: u64,
+    regions: HashMap<SharedRegionId, Arc<SharedRegion>>,
+}
+
+impl SharedRegionId {
+    /// Constant `fn`.
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Constant `fn`.
+    pub const fn raw(self) -> u64 {
+        self.0
     }
 }
 
@@ -208,6 +211,26 @@ impl SharedRegion {
     }
 }
 
+// SAFETY: The fd and ptr are process-wide resources. The fd is a plain integer
+// and the ptr points to a shared mapping that the kernel serialises. All
+// mutation of attachment_count is atomic.
+unsafe impl Send for SharedRegion {}
+
+unsafe impl Sync for SharedRegion {}
+
+impl std::fmt::Debug for SharedRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedRegion")
+            .field("len", &self.len)
+            .field("fd", &self.fd)
+            .field(
+                "attachment_count",
+                &self.attachment_count.load(Ordering::SeqCst),
+            )
+            .finish()
+    }
+}
+
 impl Drop for SharedRegion {
     fn drop(&mut self) {
         // Unmap the creator's mapping first.
@@ -224,40 +247,6 @@ impl Drop for SharedRegion {
             unsafe {
                 libc::close(self.fd);
             }
-        }
-    }
-}
-
-/// Shared memory registry.
-///
-/// Manages the lifecycle of shared memory regions: creation, destruction,
-/// attachment to guest instances, and detachment. Regions are mapped directly
-/// into guest linear memory via `mmap(MAP_FIXED | MAP_SHARED)` using a shared
-/// file descriptor, so writes in one guest are visible to all others without
-/// any software copy path.
-///
-/// The registry provides **no** public byte-level read or write methods; all
-/// data access goes through the guest's native load/store instructions on the
-/// mapped pages. Host-side convenience accessors are `pub(crate)` only.
-pub struct SharedMemoryRegistry {
-    next_region_id: u64,
-    regions: HashMap<SharedRegionId, Arc<SharedRegion>>,
-}
-
-impl std::fmt::Debug for SharedMemoryRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedMemoryRegistry")
-            .field("next_region_id", &self.next_region_id)
-            .field("regions", &self.regions.len())
-            .finish()
-    }
-}
-
-impl Default for SharedMemoryRegistry {
-    fn default() -> Self {
-        Self {
-            next_region_id: 1,
-            regions: HashMap::new(),
         }
     }
 }
@@ -443,5 +432,23 @@ impl SharedMemoryRegistry {
         self.regions.get(&region_id).cloned().ok_or_else(|| {
             WasmError::Runtime(format!("shared region {} not found", region_id.raw()))
         })
+    }
+}
+
+impl std::fmt::Debug for SharedMemoryRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedMemoryRegistry")
+            .field("next_region_id", &self.next_region_id)
+            .field("regions", &self.regions.len())
+            .finish()
+    }
+}
+
+impl Default for SharedMemoryRegistry {
+    fn default() -> Self {
+        Self {
+            next_region_id: 1,
+            regions: HashMap::new(),
+        }
     }
 }

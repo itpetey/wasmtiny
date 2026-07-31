@@ -1,3 +1,6 @@
+/// Result type alias for WebAssembly operations.
+pub type Result<T> = std::result::Result<T, WasmError>;
+
 /// WebAssembly trap codes.
 ///
 /// These codes indicate the specific reason for a WebAssembly trap, which
@@ -88,9 +91,6 @@ impl std::fmt::Display for WasmError {
 }
 
 impl std::error::Error for WasmError {}
-
-/// Result type alias for WebAssembly operations.
-pub type Result<T> = std::result::Result<T, WasmError>;
 
 impl From<std::io::Error> for WasmError {
     fn from(e: std::io::Error) -> Self {

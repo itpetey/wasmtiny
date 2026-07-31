@@ -10,6 +10,11 @@
 //! - [`StreamingParser`] - Streaming parser for large modules
 //! - [`Validator`] - WebAssembly module validator
 
+pub use parser::Parser;
+pub use reader::BinaryReader;
+pub use streaming::{ParseState, StreamingParser};
+pub use validator::Validator;
+
 /// Binary WebAssembly parser support.
 pub mod parser;
 /// Binary reader APIs.
@@ -18,8 +23,3 @@ pub mod reader;
 pub mod streaming;
 /// Validation APIs.
 pub mod validator;
-
-pub use parser::Parser;
-pub use reader::BinaryReader;
-pub use streaming::{ParseState, StreamingParser};
-pub use validator::Validator;

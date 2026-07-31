@@ -1,9 +1,12 @@
-use crate::loader::BinaryReader;
-use crate::runtime::{
-    DataKind, ElemKind, Func, FunctionType, GlobalType, ImportKind, Module, NumType, RefType,
-    Result, ValType, WasmError,
-};
 use std::collections::HashSet;
+
+use crate::{
+    loader::BinaryReader,
+    runtime::{
+        DataKind, ElemKind, Func, FunctionType, GlobalType, ImportKind, Module, NumType, RefType,
+        Result, ValType, WasmError,
+    },
+};
 
 /// WebAssembly module validator.
 ///

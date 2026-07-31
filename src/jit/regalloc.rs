@@ -1,5 +1,6 @@
-use crate::jit::emitter::{Address, Emitter, Reg};
 use std::collections::HashMap;
+
+use crate::jit::emitter::{Address, Emitter, Reg};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Location assigned to a value by the register allocator.
@@ -8,6 +9,38 @@ pub enum ValueLoc {
     Register(Reg),
     /// The value is currently spilled to a stack slot.
     SpillSlot(u32),
+}
+
+#[derive(Clone, Debug)]
+/// Live range information for a single SSA-like value.
+pub struct LiveInterval {
+    /// Identifier of the tracked value.
+    pub value_id: u32,
+    /// First program position covered by the interval.
+    pub start: u32,
+    /// Exclusive end position of the interval.
+    pub end: u32,
+    /// Current assigned location for the value.
+    pub loc: ValueLoc,
+    /// Whether the interval is pinned to a fixed location.
+    pub is_fixed: bool,
+    /// Whether the interval has been split.
+    pub is_split: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Closed-open interval used for liveness calculations.
+pub struct Interval(pub u32, pub u32);
+
+/// Linear scan allocator.
+pub struct LinearScanAllocator {
+    available_regs: Vec<Reg>,
+    allocated_regs: HashMap<Reg, u32>,
+    spill_slots: u32,
+    intervals: Vec<LiveInterval>,
+    #[allow(dead_code)]
+    spilled_values: HashMap<u32, ValueLoc>,
 }
 
 impl ValueLoc {
@@ -38,23 +71,6 @@ impl ValueLoc {
     }
 }
 
-#[derive(Clone, Debug)]
-/// Live range information for a single SSA-like value.
-pub struct LiveInterval {
-    /// Identifier of the tracked value.
-    pub value_id: u32,
-    /// First program position covered by the interval.
-    pub start: u32,
-    /// Exclusive end position of the interval.
-    pub end: u32,
-    /// Current assigned location for the value.
-    pub loc: ValueLoc,
-    /// Whether the interval is pinned to a fixed location.
-    pub is_fixed: bool,
-    /// Whether the interval has been split.
-    pub is_split: bool,
-}
-
 impl LiveInterval {
     /// Creates a new `LiveInterval`.
     pub fn new(value_id: u32, start: u32) -> Self {
@@ -79,21 +95,6 @@ impl LiveInterval {
             self.end = pos;
         }
     }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-/// Closed-open interval used for liveness calculations.
-pub struct Interval(pub u32, pub u32);
-
-/// Linear scan allocator.
-pub struct LinearScanAllocator {
-    available_regs: Vec<Reg>,
-    allocated_regs: HashMap<Reg, u32>,
-    spill_slots: u32,
-    intervals: Vec<LiveInterval>,
-    #[allow(dead_code)]
-    spilled_values: HashMap<u32, ValueLoc>,
 }
 
 impl LinearScanAllocator {
