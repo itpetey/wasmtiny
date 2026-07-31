@@ -1,6 +1,3 @@
-[build]
-rustflags = ["-C", "target-feature=-crt-static"]
-
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
@@ -21,6 +18,4 @@ opt-level = 3
 lto = true
 codegen-units = 1
 
-[profile.fast-jit]
-inherits = "release"
-opt-level = 3
+

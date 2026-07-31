@@ -46,8 +46,18 @@ cargo test -- --nocapture
   1. `cargo fmt --all`
   2. `cargo clippy -- -D warnings`
   3. `cargo test`
-- **Workspace dependencies** - Use `[workspace.dependencies]` in root `Cargo.toml`. Do not pin different versions.
+- **Pre-commit checks** - Before creating a commit/PR, you MUST run:
+  1. `cargo fmt --all`
+  2. `cargo clippy -- -D warnings`
+  3. `cargo test`
 - **International English only** - Do not use American English anywhere in the project unless required for calling third party APIs.
+
+## Test Layout
+
+- **`tests/spec-core/`** — Vendored WebAssembly spec test corpus (`.wast` files). Exercised by `tests/spec.rs`. Pinned to a specific upstream commit (see `tests/spec-core/README.md`).
+- **`tests/malformed/`** — Malformed/crasher module corpus (`.wasm` files). Each file must fail to load. Exercised by `tests/malformed.rs` via directory walk.
+- **`tests/spine_repro.rs`** — Targeted regression tests for fixed bugs.
+- Tests run via `cargo test` with no submodules, no C toolchain, and no network access required.
 
 ## Code Style
 

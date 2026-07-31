@@ -10,7 +10,7 @@ use wast::core::{AbstractHeapType, NanPattern, WastArgCore, WastRetCore};
 use wast::parser::{self, ParseBuffer};
 use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet};
 
-const SPEC_DIR: &str = "tests/spec/test/core/";
+const SPEC_DIR: &str = "tests/spec-core/";
 
 #[derive(Debug, Clone)]
 enum SpecTestResult {
