@@ -55,8 +55,8 @@ unsafe extern "C" {
 // When `with_trap_handler` is called, it stores a pointer to a `JmpBuf` here.
 // The SIGSEGV handler checks this and `longjmp`s if set.
 thread_local! {
-    static JUMP_BUFFER: RefCell<Option<*mut JmpBuf>> = RefCell::new(None);
-    static IN_TRAP_HANDLER: RefCell<bool> = RefCell::new(false);
+    static JUMP_BUFFER: RefCell<Option<*mut JmpBuf>> = const { RefCell::new(None) };
+    static IN_TRAP_HANDLER: RefCell<bool> = const { RefCell::new(false) };
 }
 
 /// One-time initialization for the signal handler.

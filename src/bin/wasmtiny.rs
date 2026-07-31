@@ -21,7 +21,7 @@ fn main() -> Result<()> {
 
     let module_idx = app.load_module_from_file(&args.module)?;
 
-    println!("Loaded WASM module from {}", &args.module);
+    println!("Loaded WASM module from {}", args.module);
 
     match args.function {
         Some(func) => {
@@ -29,10 +29,10 @@ fn main() -> Result<()> {
 
             match app.call_function(module_idx, &func, &wasm_args) {
                 Ok(results) => {
-                    println!("Function '{}' returned: {:?}", &func, results);
+                    println!("Function '{}' returned: {:?}", func, results);
                 }
                 Err(e) => {
-                    eprintln!("Error calling function '{}': {}", &func, e);
+                    eprintln!("Error calling function '{}': {}", func, e);
                     std::process::exit(1);
                 }
             }

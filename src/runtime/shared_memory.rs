@@ -281,7 +281,7 @@ impl SharedMemoryRegistry {
 
         // Round up to page boundary
         let page_size = PAGE_SIZE_BYTES;
-        let aligned_size = ((size + page_size - 1) / page_size) * page_size;
+        let aligned_size = size.div_ceil(page_size) * page_size;
 
         let region = SharedRegion::new(aligned_size)?;
         let region_id = SharedRegionId(self.next_region_id);
@@ -313,7 +313,7 @@ impl SharedMemoryRegistry {
         }
 
         let page_size = PAGE_SIZE_BYTES;
-        let aligned_size = ((size + page_size - 1) / page_size) * page_size;
+        let aligned_size = size.div_ceil(page_size) * page_size;
 
         let region = SharedRegion::new(aligned_size)?;
         let region_id = SharedRegionId(self.next_region_id);

@@ -231,15 +231,14 @@ impl Memory {
         let ptr = mmap_reserve(capacity)?;
 
         // Make initial pages accessible
-        if initial_bytes > 0 {
-            if let Err(e) = mprotect_range(ptr, initial_bytes, libc::PROT_READ | libc::PROT_WRITE) {
+        if initial_bytes > 0
+            && let Err(e) = mprotect_range(ptr, initial_bytes, libc::PROT_READ | libc::PROT_WRITE) {
                 // Clean up on failure
                 unsafe {
                     libc::munmap(ptr as *mut libc::c_void, capacity);
                 }
                 return Err(e);
             }
-        }
 
         Ok(Self {
             mem_type,
@@ -742,7 +741,7 @@ impl Memory {
             .iter()
             .map(|r| {
                 let end_byte = (r.page_offset as usize) * page_size + r.len as usize;
-                ((end_byte + page_size - 1) / page_size) as u32
+                end_byte.div_ceil(page_size) as u32
             })
             .max()
             .unwrap_or(owned_pages);

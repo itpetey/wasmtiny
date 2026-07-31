@@ -1514,11 +1514,10 @@ impl Drop for Instance {
         let mut shared_memory = self.shared_memory.lock();
 
         for region_id in regions {
-            if let Some(memory) = self.memories.first() {
-                if let Ok(mut mem) = memory.lock() {
+            if let Some(memory) = self.memories.first()
+                && let Ok(mut mem) = memory.lock() {
                     let _ = shared_memory.detach_region(&mut mem, region_id);
                 }
-            }
         }
     }
 }
