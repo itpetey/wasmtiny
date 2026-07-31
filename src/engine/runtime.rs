@@ -1,6 +1,8 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, Mutex},
+};
 
 use super::loader::EngineLoader;
 use parking_lot::Mutex as ParkingMutex;

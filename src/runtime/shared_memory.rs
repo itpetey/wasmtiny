@@ -14,6 +14,8 @@ use crate::{
     runtime::{Memory, Result, WasmError},
 };
 
+/// Maximum shared region size (1 GiB).
+const MAX_REGION_SIZE: u32 = 1 << 30;
 /// Monotonic counter for generating unique shm names.
 static NEXT_SHM_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -76,9 +78,6 @@ impl SharedRegionId {
         self.0
     }
 }
-
-/// Maximum shared region size (1 GiB).
-const MAX_REGION_SIZE: u32 = 1 << 30;
 
 impl SharedRegion {
     /// Creates a new shared region backed by `shm_open` + `mmap(MAP_SHARED)`.

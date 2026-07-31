@@ -33,6 +33,60 @@ fn datacount_section_loads() {
     assert_eq!(result.len(), 1);
 }
 
+/// A module with a huge type section count is rejected without large allocations.
+#[test]
+fn huge_type_count_rejected() {
+    // Build a raw wasm binary with a huge type section count
+    let mut wasm = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+    // Type section (id 1)
+    wasm.push(1); // section id
+    // section payload: count = 0xFFFFFFFF (5-byte LEB128)
+    let count_bytes = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+    let payload = count_bytes.to_vec();
+    let payload_len = payload.len() as u32;
+    // LEB128 encode the section size
+    let mut size_bytes = Vec::new();
+    let mut size = payload_len;
+    loop {
+        let mut byte = (size & 0x7F) as u8;
+        size >>= 7;
+        if size != 0 {
+            byte |= 0x80;
+        }
+        size_bytes.push(byte);
+        if size == 0 {
+            break;
+        }
+    }
+    wasm.extend_from_slice(&size_bytes);
+    wasm.extend_from_slice(&payload);
+
+    let mut app = WasmApplication::new();
+    let result = app.load_module_from_memory(&wasm);
+    assert!(result.is_err(), "huge type count should be rejected");
+}
+
+/// A module with an `if` without `else` where params != results should be rejected.
+#[test]
+fn if_without_else_mismatched_arity_rejected() {
+    let wat = r#"
+    (module
+        (func (export "test") (result i32)
+            i32.const 1
+            if (result i32)
+                i32.const 42
+            end))
+    "#;
+    let module = wat::parse_str(wat).expect("compile wat");
+
+    let mut app = WasmApplication::new();
+    let result = app.load_module_from_memory(&module);
+    assert!(
+        result.is_err(),
+        "if without else with mismatched arity should be rejected"
+    );
+}
+
 /// memory.copy OOB traps without allocating.
 #[test]
 fn memory_copy_oob_traps() {
@@ -116,58 +170,4 @@ fn memory_fill_then_copy_works() {
         .call_function(module_idx, "run", &[])
         .expect("run should succeed");
     assert_eq!(result, vec![WasmValue::I32(9)]);
-}
-
-/// A module with a huge type section count is rejected without large allocations.
-#[test]
-fn huge_type_count_rejected() {
-    // Build a raw wasm binary with a huge type section count
-    let mut wasm = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
-    // Type section (id 1)
-    wasm.push(1); // section id
-    // section payload: count = 0xFFFFFFFF (5-byte LEB128)
-    let count_bytes = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
-    let payload = count_bytes.to_vec();
-    let payload_len = payload.len() as u32;
-    // LEB128 encode the section size
-    let mut size_bytes = Vec::new();
-    let mut size = payload_len;
-    loop {
-        let mut byte = (size & 0x7F) as u8;
-        size >>= 7;
-        if size != 0 {
-            byte |= 0x80;
-        }
-        size_bytes.push(byte);
-        if size == 0 {
-            break;
-        }
-    }
-    wasm.extend_from_slice(&size_bytes);
-    wasm.extend_from_slice(&payload);
-
-    let mut app = WasmApplication::new();
-    let result = app.load_module_from_memory(&wasm);
-    assert!(result.is_err(), "huge type count should be rejected");
-}
-
-/// A module with an `if` without `else` where params != results should be rejected.
-#[test]
-fn if_without_else_mismatched_arity_rejected() {
-    let wat = r#"
-    (module
-        (func (export "test") (result i32)
-            i32.const 1
-            if (result i32)
-                i32.const 42
-            end))
-    "#;
-    let module = wat::parse_str(wat).expect("compile wat");
-
-    let mut app = WasmApplication::new();
-    let result = app.load_module_from_memory(&module);
-    assert!(
-        result.is_err(),
-        "if without else with mismatched arity should be rejected"
-    );
 }

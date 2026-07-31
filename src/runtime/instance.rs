@@ -54,15 +54,15 @@ pub trait HostFunc: Send + Sync + 'static {
     fn function_type(&self) -> Option<&FunctionType>;
 }
 
+struct TypedHostFunc {
+    inner: Arc<dyn HostFunc>,
+    func_type: FunctionType,
+}
+
 #[derive(Clone)]
 pub(crate) struct GuestFuncTarget {
     pub module: Arc<Module>,
     pub func_idx: u32,
-}
-
-struct TypedHostFunc {
-    inner: Arc<dyn HostFunc>,
-    func_type: FunctionType,
 }
 
 /// A WebAssembly instance.

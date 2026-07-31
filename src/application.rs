@@ -15,14 +15,18 @@
 //! let result = app.call_function(idx, "main", &[])?;
 //! ```
 
-use std::fs;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
-use crate::engine::runtime::{Engine, Export};
-use crate::memory::RegionProt;
-use crate::runtime::{
-    FunctionType, HostFunc, Memory, Result, SharedRegionId, Store, WasmError, WasmValue,
+use crate::{
+    engine::runtime::{Engine, Export},
+    memory::RegionProt,
+    runtime::{
+        FunctionType, HostFunc, Memory, Result, SharedRegionId, Store, WasmError, WasmValue,
+    },
 };
 
 /// A WebAssembly application instance.

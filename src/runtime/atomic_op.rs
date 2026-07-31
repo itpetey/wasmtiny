@@ -9,69 +9,6 @@
 
 use super::{FunctionType, NumType, ValType};
 
-/// The kind of atomic operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AtomicKind {
-    /// `memory.atomic.notify` — pops (count, address), returns i32.
-    Notify,
-    /// `memory.atomic.wait32` — pops (timeout, expected_i32, address), returns i32.
-    Wait32,
-    /// `memory.atomic.wait64` — pops (timeout, expected_i64, address), returns i32.
-    Wait64,
-    /// `atomic.fence` — no operands, no result; one reserved 0x00 immediate byte.
-    Fence,
-    /// An atomic load — pops address, pushes result.
-    Load,
-    /// An atomic store — pops (value, address), no result.
-    Store,
-    /// A read-modify-write — pops (operand, address), pushes old value.
-    Rmw,
-}
-
-/// Per-operation metadata for a spec-encoded atomic instruction.
-#[derive(Debug, Clone, Copy)]
-pub struct AtomicOpMeta {
-    /// The spec subopcode byte (the byte after the 0xFE prefix).
-    pub subopcode: u8,
-    /// The kind of operation.
-    pub kind: AtomicKind,
-    /// The operand type (the type of the value loaded/stored/rmw'd).
-    /// `None` for notify/wait/fence.
-    pub operand_type: Option<NumType>,
-    /// The result type pushed on the stack.
-    /// `None` for stores and fence.
-    pub result_type: Option<NumType>,
-    /// The access width in bytes (1, 2, 4, or 8). `0` for fence.
-    pub access_width: u32,
-    /// Parameter types in stack order (top-of-stack last so the validator can
-    /// pop in reverse by iterating front-to-back).
-    pub params: &'static [ValType],
-    /// Result types pushed on the stack.
-    pub results: &'static [ValType],
-}
-
-impl AtomicOpMeta {
-    /// Returns the number of stack operands consumed.
-    pub fn param_count(&self) -> usize {
-        self.params.len()
-    }
-
-    /// Returns whether this op has a result (pushes a value).
-    pub fn has_result(&self) -> bool {
-        !self.results.is_empty()
-    }
-
-    /// Returns a freshly-allocated `FunctionType` for this operation.
-    pub fn func_type(&self) -> FunctionType {
-        FunctionType::new(self.params.to_vec(), self.results.to_vec())
-    }
-}
-
-// --- Static slices for common patterns ---
-
-const I32: ValType = ValType::Num(NumType::I32);
-const I64: ValType = ValType::Num(NumType::I64);
-
 /// All spec-encoded atomic operations, indexed by their 0xFE subopcode.
 ///
 /// Spec subopcode assignments (WebAssembly threads proposal):
@@ -748,10 +685,65 @@ pub const ATOMIC_OPS: &[AtomicOpMeta] = &[
         results: &[I64],
     },
 ];
+const I32: ValType = ValType::Num(NumType::I32);
+const I64: ValType = ValType::Num(NumType::I64);
 
-/// Looks up the atomic operation metadata for a given 0xFE subopcode.
-pub fn lookup(subopcode: u8) -> Option<&'static AtomicOpMeta> {
-    ATOMIC_OPS.iter().find(|op| op.subopcode == subopcode)
+/// The kind of atomic operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicKind {
+    /// `memory.atomic.notify` — pops (count, address), returns i32.
+    Notify,
+    /// `memory.atomic.wait32` — pops (timeout, expected_i32, address), returns i32.
+    Wait32,
+    /// `memory.atomic.wait64` — pops (timeout, expected_i64, address), returns i32.
+    Wait64,
+    /// `atomic.fence` — no operands, no result; one reserved 0x00 immediate byte.
+    Fence,
+    /// An atomic load — pops address, pushes result.
+    Load,
+    /// An atomic store — pops (value, address), no result.
+    Store,
+    /// A read-modify-write — pops (operand, address), pushes old value.
+    Rmw,
+}
+
+/// Per-operation metadata for a spec-encoded atomic instruction.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicOpMeta {
+    /// The spec subopcode byte (the byte after the 0xFE prefix).
+    pub subopcode: u8,
+    /// The kind of operation.
+    pub kind: AtomicKind,
+    /// The operand type (the type of the value loaded/stored/rmw'd).
+    /// `None` for notify/wait/fence.
+    pub operand_type: Option<NumType>,
+    /// The result type pushed on the stack.
+    /// `None` for stores and fence.
+    pub result_type: Option<NumType>,
+    /// The access width in bytes (1, 2, 4, or 8). `0` for fence.
+    pub access_width: u32,
+    /// Parameter types in stack order (top-of-stack last so the validator can
+    /// pop in reverse by iterating front-to-back).
+    pub params: &'static [ValType],
+    /// Result types pushed on the stack.
+    pub results: &'static [ValType],
+}
+
+impl AtomicOpMeta {
+    /// Returns the number of stack operands consumed.
+    pub fn param_count(&self) -> usize {
+        self.params.len()
+    }
+
+    /// Returns whether this op has a result (pushes a value).
+    pub fn has_result(&self) -> bool {
+        !self.results.is_empty()
+    }
+
+    /// Returns a freshly-allocated `FunctionType` for this operation.
+    pub fn func_type(&self) -> FunctionType {
+        FunctionType::new(self.params.to_vec(), self.results.to_vec())
+    }
 }
 
 /// Returns the number of immediate bytes that follow the subopcode for this
@@ -764,6 +756,11 @@ pub fn immediate_count(subopcode: u8) -> Option<usize> {
         AtomicKind::Fence => Some(1), // reserved 0x00 byte
         _ => Some(2),                 // align LEB128 + offset LEB128
     }
+}
+
+/// Looks up the atomic operation metadata for a given 0xFE subopcode.
+pub fn lookup(subopcode: u8) -> Option<&'static AtomicOpMeta> {
+    ATOMIC_OPS.iter().find(|op| op.subopcode == subopcode)
 }
 
 #[cfg(test)]
