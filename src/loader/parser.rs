@@ -106,7 +106,11 @@ impl Parser {
                 9 => self.parse_elem(&mut section_reader, &mut module)?,
                 10 => self.parse_code(&mut section_reader, &mut module)?,
                 11 => self.parse_data(&mut section_reader, &mut module)?,
-                13 => self.parse_tag(&mut section_reader, &mut module)?,
+                13 => {
+                    return Err(WasmError::Load(
+                        "tag sections are not supported".to_string(),
+                    ));
+                }
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown section id: {}",
@@ -143,7 +147,6 @@ impl Parser {
             1 => 1,
             2 => 2,
             3 => 3,
-            13 => 4,
             4 => 5,
             5 => 6,
             6 => 7,
@@ -234,7 +237,6 @@ impl Parser {
                     let mutable = self.read_mutability(reader)?;
                     ImportKind::Global(GlobalType::new(content_type, mutable))
                 }
-                0x04 => ImportKind::Tag(self.read_tag_type(reader)?),
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown import kind: {}",
@@ -413,7 +415,6 @@ impl Parser {
                 0x01 => ExportKind::Table(idx),
                 0x02 => ExportKind::Memory(idx),
                 0x03 => ExportKind::Global(idx),
-                0x04 => ExportKind::Tag(idx),
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown export kind: {}",
@@ -428,18 +429,6 @@ impl Parser {
             });
         }
 
-        Ok(())
-    }
-
-    fn parse_tag(
-        &self,
-        reader: &mut BinaryReader<Cursor<&[u8]>>,
-        module: &mut Module,
-    ) -> Result<()> {
-        let count = reader.read_uleb128()?;
-        for _ in 0..count {
-            module.tags.push(self.read_tag_type(reader)?);
-        }
         Ok(())
     }
 
@@ -693,8 +682,10 @@ impl Parser {
         match reader.read_sleb128_i64()? {
             -0x10 | -0x14 => Ok(RefType::FuncRef),
             -0x11 | -0x13 => Ok(RefType::ExternRef),
-            idx if idx >= 0 => Ok(RefType::FuncRef),
-            heap_type => Err(WasmError::Load(format!("unknown heap type: {}", heap_type))),
+            heap_type => Err(WasmError::Load(format!(
+                "GC heap types are not supported: {}",
+                heap_type
+            ))),
         }
     }
 
@@ -721,17 +712,6 @@ impl Parser {
                 byte
             ))),
         }
-    }
-
-    fn read_tag_type(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<u32> {
-        let attribute = reader.read_u8()?;
-        if attribute != 0x00 {
-            return Err(WasmError::Load(format!(
-                "unsupported tag attribute: {}",
-                attribute
-            )));
-        }
-        reader.read_uleb128().map_err(Into::into)
     }
 
     fn read_const_expr(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<Vec<u8>> {

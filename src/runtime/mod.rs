@@ -14,28 +14,18 @@
 //! - [`WasmError`] - Error types for validation, loading, instantiation, and runtime
 //! - [`Memory`], [`Table`], [`Global`] - Runtime objects
 
-pub(crate) use metering::InstanceMeter;
 pub(crate) use shared_memory::SharedWaiter;
-#[cfg(feature = "llvm-jit")]
-pub(crate) use suspend::JitState;
-pub(crate) use suspend::{InterpreterState, SuspensionState};
 
 pub use crate::memory::Memory;
-pub use error::{Result, SuspensionKind, TrapCode, WasmError};
+pub use error::{Result, TrapCode, WasmError};
 pub use export::{ExportKind, ExportType};
-pub use import::{Import, ImportKind, ImportType};
+pub use import::{Import, ImportKind};
 pub use instance::{
-    Extern, GuestFuncBinding, HostCallOutcome, HostCaller, HostFunc, Instance, SharedGlobal,
-    SharedMemory, SharedTable, Store,
+    Extern, GuestFuncBinding, HostCaller, HostFunc, Instance, SharedGlobal, SharedMemory,
+    SharedTable, Store,
 };
-pub use metering::{InstanceLimits, InstanceStats};
 pub use module::{DataKind, DataSegment, ElemKind, ElemSegment, Func, Local, Module};
 pub use shared_memory::{SharedMemoryRegistry, SharedRegion, SharedRegionId};
-pub use snapshot::{
-    Result as SnapshotResult, SNAPSHOT_FORMAT_VERSION, SnapshotError, SnapshotPayload,
-    capture_snapshot, restore_snapshot, validate_snapshot_compatibility,
-};
-pub use suspend::{RuntimeSuspender, SuspendedHandle, SuspensionError, is_suspension_error};
 pub use types::{
     FunctionType, GlobalType, Limits, MemoryType, NumType, RefType, TableType, ValType,
 };
@@ -46,10 +36,7 @@ mod error;
 mod export;
 mod import;
 mod instance;
-mod metering;
 mod module;
 mod shared_memory;
-mod snapshot;
-mod suspend;
 mod types;
 mod values;

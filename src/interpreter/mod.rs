@@ -6,20 +6,13 @@
 //! # Components
 //!
 //! - [`Interpreter`] - Main interpreter implementation with execution control
-//! - [`Instruction`] - WebAssembly instruction representation
 //! - [`OperandStack`] - Stack for WebAssembly values
 //! - [`ControlStack`] - Stack for control flow frames (blocks, loops, functions)
-//! - [`SafepointConfig`] - Configuration for execution suspension points
 
-pub use exec::{Interpreter, SafepointConfig};
-pub use instructions::Instruction;
+pub use exec::Interpreter;
 pub use stack::{ControlFrame, ControlStack, FrameKind, OperandStack};
 
 /// Interpreter execution support.
 pub mod exec;
-#[allow(dead_code)]
-mod fast;
-/// Decoded WebAssembly instruction types.
-pub mod instructions;
 /// Interpreter stack types.
 pub mod stack;

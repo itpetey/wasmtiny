@@ -1,13 +1,32 @@
 ## ADDED Requirements
 
+### Requirement: Accurately named core engine
+The crate SHALL expose its core runtime (module loading, instantiation, invocation) under an `engine` module with type names reflecting its interpreter-backed nature. No public item SHALL use `Aot`/`aot_runtime` naming, and no ahead-of-time compilation pipeline SHALL exist.
+
+#### Scenario: No AOT-named public API
+- **WHEN** the crate's public API is inspected
+- **THEN** there SHALL be no `aot_runtime` module and no `AotRuntime`/`AotModule`/`AotLoader`/`AotExport` types; their roles SHALL be provided by accurately named equivalents under `engine`
+
+#### Scenario: No native-symbol concept
+- **WHEN** the engine API is inspected
+- **THEN** there SHALL be no `NativeFunc`/`native_functions`/`call_native` registration concept; host interaction SHALL occur exclusively through imported `HostFunc` functions
+
+### Requirement: Consumer-driven public API surface
+Public API items SHALL exist only where they serve the interpreter-based embedder use case (module loading, host-function registration, instantiation, invocation, shared-region management, memory access). Items without any caller in the crate or its known embedder SHALL be removed rather than retained.
+
+#### Scenario: No dead convenience methods
+- **WHEN** the public APIs of `engine`, `runtime`, and `application` modules are audited for callers
+- **THEN** every public method SHALL have at least one caller in the crate, the test suites, or the known embedder (Selium)
+
 ### Requirement: Module initialization
 The runtime SHALL provide a `Module` struct representing a loaded WASM module with types, functions, memories, tables, globals, and exports.
 
 ### Requirement: Instance creation
-The runtime SHALL allow instantiation of a module into an `Instance` with isolated linear memory and table spaces.
+The runtime SHALL allow instantiation of a module into an `Instance` with isolated linear memory and table spaces. Instance construction and binding SHALL be managed by the core engine; per-invocation instance state SHALL be cached and reused across calls to the same loaded module rather than rebuilt from a cloned module.
 
-### Requirement: Function invocation
-The runtime SHALL support calling exported functions with typed arguments and return values via `Instance::call`.
+#### Scenario: Instantiation through the engine
+- **WHEN** a loaded module is instantiated via `WasmApplication::instantiate`
+- **THEN** an instance with isolated linear memory and table spaces is created and associated with that loaded module
 
 ### Requirement: Memory access
 The runtime SHALL provide safe read/write access to linear memory with bounds checking. Memory access SHALL include both owned pages and mapped shared region pages. Writes to read-only shared pages SHALL trap before reaching memory.
@@ -69,14 +88,6 @@ The `Memory` struct SHALL track which page ranges are owned vs. mapped from shar
 #### Scenario: Shared range queryable
 - **WHEN** a guest has attached shared regions
 - **THEN** the `Memory` SHALL report the page offsets, region IDs, and protection levels of all attached regions
-
-#### Scenario: Successful function call
-- **WHEN** a valid module is instantiated and an exported function is called with correct arguments
-- **THEN** the function executes and returns the expected result
-
-#### Scenario: Type mismatch in function call
-- **WHEN** a function is called with arguments of incorrect type
-- **THEN** a validation error is returned
 
 #### Scenario: Shared instance across threads
 - **WHEN** an `Arc<Instance>` is created and shared between threads

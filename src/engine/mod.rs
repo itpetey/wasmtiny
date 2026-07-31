@@ -6,11 +6,11 @@
 //!
 //! # Components
 //!
-//! - [`AotRuntime`] - Main runtime for managing AOT modules
-//! - [`AotLoader`] - Loads WebAssembly modules into the AOT runtime
+//! - [`Engine`] - Main runtime for managing AOT modules
+//! - [`EngineLoader`] - Loads WebAssembly modules into the AOT runtime
 
-pub use loader::AotLoader;
-pub use runtime::AotRuntime;
+pub use loader::EngineLoader;
+pub use runtime::Engine;
 
 /// Loading support for ahead-of-time modules.
 pub mod loader;

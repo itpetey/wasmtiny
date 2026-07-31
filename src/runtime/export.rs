@@ -10,8 +10,6 @@ pub enum ExportKind {
     Memory(u32),
     /// A global export (index into global section).
     Global(u32),
-    /// A tag export (index into tag section).
-    Tag(u32),
 }
 
 /// Export type descriptor.
@@ -35,35 +33,11 @@ impl ExportType {
         }
     }
 
-    /// Creates a table export descriptor.
-    pub fn new_table(name: String, idx: u32) -> Self {
-        Self {
-            name,
-            kind: ExportKind::Table(idx),
-        }
-    }
-
     /// Creates a memory export descriptor.
     pub fn new_memory(name: String, idx: u32) -> Self {
         Self {
             name,
             kind: ExportKind::Memory(idx),
-        }
-    }
-
-    /// Creates a global export descriptor.
-    pub fn new_global(name: String, idx: u32) -> Self {
-        Self {
-            name,
-            kind: ExportKind::Global(idx),
-        }
-    }
-
-    /// Creates a tag export descriptor.
-    pub fn new_tag(name: String, idx: u32) -> Self {
-        Self {
-            name,
-            kind: ExportKind::Tag(idx),
         }
     }
 }

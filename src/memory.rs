@@ -19,16 +19,13 @@
 //! - Write: `memory.write(offset, data)`
 //! - Grow: `memory.grow(pages)`
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Weak},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::{
     runtime::SharedWaiter,
-    runtime::{InstanceMeter, MemoryType, Result, SharedRegionId, TrapCode, WasmError},
+    runtime::{MemoryType, Result, SharedRegionId, TrapCode, WasmError},
 };
 
 /// Maximum number of pages (65536 pages = 4 GiB).
@@ -98,7 +95,6 @@ pub struct Memory {
     capacity: usize,
     /// Shared page ranges mapped into this memory.
     shared_ranges: Vec<SharedRange>,
-    meters: Vec<Weak<InstanceMeter>>,
     waiters: Arc<RwLock<std::collections::HashMap<u32, Arc<Waiter>>>>,
 }
 
@@ -168,7 +164,6 @@ impl Memory {
             len: initial_bytes,
             capacity,
             shared_ranges: Vec::new(),
-            meters: Vec::new(),
             waiters: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
     }
@@ -332,11 +327,6 @@ impl Memory {
     pub fn grow(&mut self, delta: u32) -> Result<u32> {
         let old_size = self.size();
         let new_size = old_size.saturating_add(delta);
-
-        self.prune_meters();
-        for meter in self.meters.iter().filter_map(Weak::upgrade) {
-            meter.ensure_memory_pages(new_size)?;
-        }
 
         if let Some(max) = self.mem_type.limits.max()
             && new_size > max
@@ -794,24 +784,6 @@ impl Memory {
 
         Ok(())
     }
-
-    pub(crate) fn attach_meter(&mut self, meter: &Arc<InstanceMeter>) {
-        self.prune_meters();
-        if self
-            .meters
-            .iter()
-            .filter_map(Weak::upgrade)
-            .any(|existing| Arc::ptr_eq(&existing, meter))
-        {
-            return;
-        }
-
-        self.meters.push(Arc::downgrade(meter));
-    }
-
-    fn prune_meters(&mut self) {
-        self.meters.retain(|meter| meter.strong_count() > 0);
-    }
 }
 
 // SAFETY: Memory manages an mmap'd region that is not aliased.
@@ -855,7 +827,6 @@ impl Clone for Memory {
 
         // Copy shared range metadata (not the actual mappings — those need re-attach)
         result.shared_ranges = self.shared_ranges.clone();
-        result.meters = self.meters.clone();
         result
     }
 }

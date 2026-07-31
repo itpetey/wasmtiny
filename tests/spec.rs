@@ -186,8 +186,11 @@ impl SpecHarness {
     fn resolve_imports(&mut self, module_idx: u32) -> Result<(), String> {
         let imports = self
             .app
-            .imports(module_idx)
-            .map_err(|error| format!("failed to inspect imports: {error}"))?;
+            .runtime
+            .get_module(module_idx)
+            .ok_or_else(|| "module not found".to_string())?
+            .imports()
+            .to_vec();
 
         for import in imports {
             if import.module == "spectest" {
@@ -208,6 +211,12 @@ impl SpecHarness {
         module_idx: u32,
         import: &wasmtiny::runtime::Import,
     ) -> Result<(), String> {
+        let target_module = self
+            .app
+            .runtime
+            .get_module_mut(module_idx)
+            .ok_or_else(|| "target module not found".to_string())?;
+
         match &import.kind {
             ImportKind::Memory(memory_type) => {
                 if import.name != "memory" {
@@ -216,9 +225,8 @@ impl SpecHarness {
                         import.module, import.name
                     ));
                 }
-                self.app
+                target_module
                     .register_memory_import(
-                        module_idx,
                         &import.module,
                         &import.name,
                         spectest_memory(memory_type),
@@ -232,19 +240,14 @@ impl SpecHarness {
                         import.module, import.name
                     ));
                 }
-                self.app
-                    .register_table_import(
-                        module_idx,
-                        &import.module,
-                        &import.name,
-                        spectest_table(table_type),
-                    )
+                target_module
+                    .register_table_import(&import.module, &import.name, spectest_table(table_type))
                     .map_err(|error| format!("failed to register spectest table import: {error}"))
             }
             ImportKind::Global(global_type) => {
                 let global = spectest_global(&import.name, global_type)?;
-                self.app
-                    .register_global_import(module_idx, &import.module, &import.name, global)
+                target_module
+                    .register_global_import(&import.module, &import.name, global)
                     .map_err(|error| format!("failed to register spectest global import: {error}"))
             }
             ImportKind::Func(_) => {
@@ -261,10 +264,6 @@ impl SpecHarness {
                     )
                     .map_err(|error| format!("failed to register spectest host import: {error}"))
             }
-            ImportKind::Tag(_) => Err(format!(
-                "unsupported spectest tag import {}.{}",
-                import.module, import.name
-            )),
         }
     }
 
@@ -274,68 +273,127 @@ impl SpecHarness {
         source_module_idx: u32,
         import: &wasmtiny::runtime::Import,
     ) -> Result<(), String> {
+        let source_module = self
+            .app
+            .runtime
+            .get_module(source_module_idx)
+            .ok_or_else(|| "source module not found".to_string())?;
+
         match &import.kind {
             ImportKind::Memory(_) => {
-                let memory = self
+                let memory = {
+                    self.app
+                        .export_memory(source_module_idx, &import.name)
+                        .map_err(|error| {
+                            format!("failed to export memory {}: {error}", import.name)
+                        })?
+                };
+                let target_module = self
                     .app
-                    .export_memory(source_module_idx, &import.name)
-                    .map_err(|error| format!("failed to export memory {}: {error}", import.name))?;
-                self.app
-                    .register_memory_import(module_idx, &import.module, &import.name, memory)
+                    .runtime
+                    .get_module_mut(module_idx)
+                    .ok_or_else(|| "target module not found".to_string())?;
+                target_module
+                    .register_memory_import(&import.module, &import.name, memory)
                     .map_err(|error| {
                         format!("failed to register memory import {}: {error}", import.name)
                     })
             }
             ImportKind::Table(_) => {
-                let table_idx = self
+                let table_idx = match source_module.get_export(&import.name) {
+                    Some(wasmtiny::engine::runtime::Export::Table(idx)) => *idx,
+                    _ => return Err(format!("table export {} not found", import.name)),
+                };
+                let table = source_module
+                    .get_table(table_idx)
+                    .ok_or_else(|| format!("table {} not found", table_idx))?;
+                let target_module = self
                     .app
-                    .export_table_index(source_module_idx, &import.name)
-                    .map_err(|error| format!("failed to locate table {}: {error}", import.name))?;
-                let table = self
-                    .app
-                    .table_binding(source_module_idx, table_idx)
-                    .map_err(|error| format!("failed to export table {}: {error}", import.name))?;
-                self.app
-                    .register_table_import_binding(module_idx, &import.module, &import.name, table)
+                    .runtime
+                    .get_module_mut(module_idx)
+                    .ok_or_else(|| "target module not found".to_string())?;
+                target_module
+                    .register_table_import(&import.module, &import.name, table)
                     .map_err(|error| {
                         format!("failed to register table import {}: {error}", import.name)
                     })
             }
             ImportKind::Global(_) => {
-                let global = self
+                let global_idx = match source_module.get_export(&import.name) {
+                    Some(wasmtiny::engine::runtime::Export::Global(idx)) => *idx,
+                    _ => return Err(format!("global export {} not found", import.name)),
+                };
+                let global = source_module
+                    .get_global(global_idx)
+                    .ok_or_else(|| format!("global {} not found", global_idx))?;
+                let target_module = self
                     .app
-                    .export_global(source_module_idx, &import.name)
-                    .map_err(|error| format!("failed to export global {}: {error}", import.name))?;
-                self.app
-                    .register_global_import(module_idx, &import.module, &import.name, global)
+                    .runtime
+                    .get_module_mut(module_idx)
+                    .ok_or_else(|| "target module not found".to_string())?;
+                target_module
+                    .register_global_import(&import.module, &import.name, global)
                     .map_err(|error| {
                         format!("failed to register global import {}: {error}", import.name)
                     })
             }
-            ImportKind::Tag(_) => {
-                let function_type = self
-                    .app
-                    .tag_type(source_module_idx, &import.name)
-                    .map_err(|error| format!("failed to export tag {}: {error}", import.name))?;
-                self.app
-                    .register_tag_import(module_idx, &import.module, &import.name, function_type)
-                    .map_err(|error| {
-                        format!("failed to register tag import {}: {error}", import.name)
-                    })
-            }
             ImportKind::Func(_type_idx) => {
-                let binding = self
-                    .app
-                    .function_binding(source_module_idx, &import.name)
-                    .map_err(|error| {
-                        format!("failed to export function {}: {error}", import.name)
-                    })?;
+                let func_idx = match source_module.get_export(&import.name) {
+                    Some(wasmtiny::engine::runtime::Export::Function(idx)) => *idx,
+                    _ => return Err(format!("function export {} not found", import.name)),
+                };
+                let func_type = source_module
+                    .module()
+                    .func_type(func_idx)
+                    .cloned()
+                    .ok_or_else(|| format!("failed to get function type for {}", import.name))?;
+                let source_module_clone = source_module.module().clone();
+
+                struct GuestFunc {
+                    source_module: wasmtiny::runtime::Module,
+                    func_idx: u32,
+                    func_type: wasmtiny::runtime::FunctionType,
+                }
+
+                impl HostFunc for GuestFunc {
+                    fn call(
+                        &self,
+                        _caller: &mut HostCaller<'_>,
+                        args: &[WasmValue],
+                    ) -> wasmtiny::runtime::Result<Vec<WasmValue>> {
+                        let imports: Vec<(&str, &str, wasmtiny::runtime::Extern)> = vec![];
+                        let instance = std::sync::Arc::new(std::sync::Mutex::new(
+                            wasmtiny::runtime::Instance::with_imports(
+                                std::sync::Arc::new(self.source_module.clone()),
+                                &imports,
+                            )
+                            .map_err(|error| {
+                                wasmtiny::runtime::WasmError::Runtime(format!("{error}"))
+                            })?,
+                        ));
+                        let mut interpreter =
+                            wasmtiny::interpreter::Interpreter::with_instance(instance);
+                        interpreter.execute_function(&self.source_module, self.func_idx, args)
+                    }
+
+                    fn function_type(&self) -> Option<&wasmtiny::runtime::FunctionType> {
+                        Some(&self.func_type)
+                    }
+                }
+
+                let host_func = GuestFunc {
+                    source_module: source_module_clone,
+                    func_idx,
+                    func_type: func_type.clone(),
+                };
+
                 self.app
-                    .register_function_import_binding(
+                    .register_host_function(
                         module_idx,
                         &import.module,
                         &import.name,
-                        binding,
+                        Box::new(host_func),
+                        func_type.clone(),
                     )
                     .map_err(|error| {
                         format!(
@@ -438,11 +496,19 @@ impl SpecHarness {
             }
             WastExecute::Get { module, global, .. } => {
                 let module_idx = self.lookup_module(module.map(|id| id.name()))?;
-                let global = self
+                let source_module = self
                     .app
-                    .export_global(module_idx, global)
-                    .map_err(|error| format!("failed to read global {global}: {error}"))?;
-                Ok(vec![global.get()])
+                    .runtime
+                    .get_module(module_idx)
+                    .ok_or_else(|| "module not found".to_string())?;
+                let global_idx = match source_module.get_export(global) {
+                    Some(wasmtiny::engine::runtime::Export::Global(idx)) => *idx,
+                    _ => return Err(format!("global {} not found", global)),
+                };
+                let global = source_module
+                    .get_global(global_idx)
+                    .ok_or_else(|| format!("global {} not found", global_idx))?;
+                Ok(vec![global.value])
             }
         }
     }

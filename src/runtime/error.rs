@@ -36,18 +36,6 @@ pub enum TrapCode {
     HostTrap,
 }
 
-/// Suspension kinds for async execution.
-///
-/// Indicates why execution was suspended (e.g., for safepoints or host calls).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Suspension kind.
-pub enum SuspensionKind {
-    /// Execution paused at a safepoint.
-    Safepoint,
-    /// Execution paused for pending host call.
-    HostcallPending,
-}
-
 /// WebAssembly errors.
 ///
 /// Represents errors that can occur during validation, loading, instantiation,
@@ -63,8 +51,6 @@ pub enum WasmError {
     Instantiate(String),
     /// Runtime error during execution.
     Runtime(String),
-    /// Execution suspended (async support).
-    Suspended(SuspensionKind),
     /// Execution trapped.
     Trap(TrapCode),
     /// Other error.
@@ -78,12 +64,6 @@ impl std::fmt::Display for WasmError {
             WasmError::Load(msg) => write!(f, "Load error: {}", msg),
             WasmError::Instantiate(msg) => write!(f, "Instantiate error: {}", msg),
             WasmError::Runtime(msg) => write!(f, "Runtime error: {}", msg),
-            WasmError::Suspended(SuspensionKind::Safepoint) => {
-                write!(f, "Execution suspended at safepoint")
-            }
-            WasmError::Suspended(SuspensionKind::HostcallPending) => {
-                write!(f, "Execution suspended for pending hostcall")
-            }
             WasmError::Trap(code) => write!(f, "Trap: {:?}", code),
             WasmError::Other(msg) => write!(f, "Error: {}", msg),
         }
@@ -106,12 +86,6 @@ mod tests {
     fn test_error_display() {
         let err = WasmError::Validation("type mismatch".to_string());
         assert_eq!(format!("{}", err), "Validation error: type mismatch");
-    }
-
-    #[test]
-    fn test_suspension_display() {
-        let err = WasmError::Suspended(SuspensionKind::Safepoint);
-        assert_eq!(format!("{}", err), "Execution suspended at safepoint");
     }
 
     #[test]

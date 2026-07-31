@@ -61,7 +61,6 @@ impl Validator {
         self.validate_types(module)?;
         self.validate_imports(module)?;
         self.validate_functions(module)?;
-        self.validate_tags(module)?;
         self.validate_instruction_set(module)?;
         self.validate_tables(module)?;
         self.validate_memories(module)?;
@@ -89,30 +88,12 @@ impl Validator {
         Ok(())
     }
 
-    fn validate_tags(&self, module: &Module) -> Result<()> {
-        for (i, type_idx) in module.tags.iter().enumerate() {
-            if *type_idx as usize >= module.types.len() {
-                return Err(WasmError::Validation(format!(
-                    "tag {}: invalid type index",
-                    i
-                )));
-            }
-        }
-        Ok(())
-    }
-
     fn validate_imports(&self, module: &Module) -> Result<()> {
         for (i, import) in module.imports.iter().enumerate() {
             match import.kind {
                 ImportKind::Func(type_idx) if type_idx as usize >= module.types.len() => {
                     return Err(WasmError::Validation(format!(
                         "import {}: invalid function type index",
-                        i
-                    )));
-                }
-                ImportKind::Tag(type_idx) if type_idx as usize >= module.types.len() => {
-                    return Err(WasmError::Validation(format!(
-                        "import {}: invalid tag type index",
                         i
                     )));
                 }
@@ -397,14 +378,20 @@ impl Validator {
                 0xD0 => match Self::read_byte(code, &mut cursor)? {
                     0x70 => type_stack.push(ValType::Ref(RefType::FuncRef)),
                     0x6F => type_stack.push(ValType::Ref(RefType::ExternRef)),
-                    byte if byte < 0x40 => {
-                        if module.type_at(byte as u32).is_none() {
-                            return Err(WasmError::Validation(format!(
-                                "function {} has invalid ref.null type {:02x}",
-                                func_idx, byte
-                            )));
+                    0x63 | 0x64 => {
+                        let first = Self::read_byte(code, &mut cursor)?;
+                        let heap_type =
+                            Self::read_signed_leb_continuation(code, &mut cursor, first)?;
+                        match heap_type {
+                            -0x10 | -0x14 => type_stack.push(ValType::Ref(RefType::FuncRef)),
+                            -0x11 | -0x13 => type_stack.push(ValType::Ref(RefType::ExternRef)),
+                            _ => {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} has unsupported GC heap type: {}",
+                                    func_idx, heap_type
+                                )));
+                            }
                         }
-                        type_stack.push(ValType::Ref(RefType::FuncRef));
                     }
                     value => {
                         return Err(WasmError::Validation(format!(
@@ -1058,18 +1045,9 @@ impl Validator {
                 let ref_type = match heap_type {
                     -0x10 | -0x14 => RefType::FuncRef,
                     -0x11 | -0x13 => RefType::ExternRef,
-                    idx if idx >= 0 => {
-                        if module.type_at(idx as u32).is_none() {
-                            return Err(WasmError::Validation(format!(
-                                "invalid block heap type {}",
-                                heap_type
-                            )));
-                        }
-                        RefType::FuncRef
-                    }
                     _ => {
                         return Err(WasmError::Validation(format!(
-                            "invalid block heap type {}",
+                            "GC heap types are not supported: {}",
                             heap_type
                         )));
                     }
@@ -1094,7 +1072,7 @@ impl Validator {
 
     fn read_value_type_immediate(
         &self,
-        module: &Module,
+        _module: &Module,
         code: &[u8],
         cursor: &mut usize,
     ) -> Result<ValType> {
@@ -1112,11 +1090,8 @@ impl Validator {
                 match heap_type {
                     -0x10 | -0x14 => Ok(ValType::Ref(RefType::FuncRef)),
                     -0x11 | -0x13 => Ok(ValType::Ref(RefType::ExternRef)),
-                    idx if idx >= 0 && module.type_at(idx as u32).is_some() => {
-                        Ok(ValType::Ref(RefType::FuncRef))
-                    }
                     _ => Err(WasmError::Validation(format!(
-                        "invalid value type heap type {}",
+                        "GC heap types are not supported: {}",
                         heap_type
                     ))),
                 }
@@ -1713,12 +1688,6 @@ impl Validator {
                 .iter()
                 .filter(|i| matches!(i.kind, ImportKind::Global(_)))
                 .count();
-        let tag_count = module.tags.len()
-            + module
-                .imports
-                .iter()
-                .filter(|i| matches!(i.kind, ImportKind::Tag(_)))
-                .count();
 
         for (i, export) in module.exports.iter().enumerate() {
             if !seen_names.insert(export.name.as_str()) {
@@ -1763,14 +1732,6 @@ impl Validator {
                     if *idx as usize >= global_count {
                         return Err(WasmError::Validation(format!(
                             "export {}: invalid global index",
-                            i
-                        )));
-                    }
-                }
-                crate::runtime::ExportKind::Tag(idx) => {
-                    if *idx as usize >= tag_count {
-                        return Err(WasmError::Validation(format!(
-                            "export {}: invalid tag index",
                             i
                         )));
                     }
@@ -1848,31 +1809,13 @@ impl Validator {
                     0x63 | 0x64 => match reader.read_sleb128_i64().map_err(WasmError::from)? {
                         -0x10 | -0x14 => ValType::Ref(crate::runtime::RefType::FuncRef),
                         -0x11 | -0x13 => ValType::Ref(crate::runtime::RefType::ExternRef),
-                        idx if idx >= 0 => {
-                            if module.type_at(idx as u32).is_none() {
-                                return Err(WasmError::Validation(format!(
-                                    "invalid ref.null heap type: {}",
-                                    idx
-                                )));
-                            }
-                            ValType::Ref(crate::runtime::RefType::FuncRef)
-                        }
                         heap_type => {
                             return Err(WasmError::Validation(format!(
-                                "invalid ref.null heap type: {}",
+                                "GC heap types are not supported: {}",
                                 heap_type
                             )));
                         }
                     },
-                    byte if byte < 0x40 => {
-                        if module.type_at(byte as u32).is_none() {
-                            return Err(WasmError::Validation(format!(
-                                "invalid ref.null type: {:02x}",
-                                byte
-                            )));
-                        }
-                        ValType::Ref(crate::runtime::RefType::FuncRef)
-                    }
                     value => {
                         return Err(WasmError::Validation(format!(
                             "invalid ref.null type: {:02x}",

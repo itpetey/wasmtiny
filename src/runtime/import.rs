@@ -10,8 +10,6 @@ pub enum ImportKind {
     Memory(crate::runtime::MemoryType),
     /// A global import (global type).
     Global(crate::runtime::GlobalType),
-    /// A tag import (function type index).
-    Tag(u32),
 }
 
 /// Import descriptor from the WebAssembly module.
@@ -24,33 +22,8 @@ pub struct Import {
     pub module: String,
     /// The field name of the import.
     pub name: String,
-    /// The kind of import (function, table, memory, global, or tag).
+    /// The kind of import (function, table, memory, or global).
     pub kind: ImportKind,
-}
-
-/// Import type descriptor.
-///
-/// Used during instantiation to specify what imports a module requires.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Import type.
-pub struct ImportType {
-    /// The module name of the import.
-    pub module: String,
-    /// The field name of the import.
-    pub name: String,
-    /// The type of import required.
-    pub type_: ImportKind,
-}
-
-impl ImportType {
-    /// Creates a new `ImportType`.
-    pub fn new(module: String, name: String, kind: ImportKind) -> Self {
-        Self {
-            module,
-            name,
-            type_: kind,
-        }
-    }
 }
 
 #[cfg(test)]

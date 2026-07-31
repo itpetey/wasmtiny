@@ -21,6 +21,8 @@ fn main() -> Result<()> {
 
     let module_idx = app.load_module_from_file(&args.module)?;
 
+    app.instantiate(module_idx)?;
+
     println!("Loaded WASM module from {}", args.module);
 
     match args.function {
@@ -37,8 +39,8 @@ fn main() -> Result<()> {
                 }
             }
         }
-        None => match app.execute_main(module_idx, &[]) {
-            Ok(_) => {
+        None => match app.execute_start(module_idx) {
+            Ok(()) => {
                 println!("Module executed successfully");
             }
             Err(e) => {

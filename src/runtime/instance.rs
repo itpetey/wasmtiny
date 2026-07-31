@@ -4,9 +4,8 @@ use std::{
 };
 
 use super::{
-    ExportKind, FunctionType, Global, ImportKind, InstanceLimits, InstanceMeter, InstanceStats,
-    Memory, Module, RefType, Result, SharedMemoryRegistry, SharedRegionId, Table, TrapCode,
-    ValType, WasmError, WasmValue,
+    ExportKind, FunctionType, Global, ImportKind, Memory, Module, RefType, Result,
+    SharedMemoryRegistry, SharedRegionId, Table, TrapCode, ValType, WasmError, WasmValue,
 };
 use parking_lot::Mutex as ParkingMutex;
 
@@ -51,46 +50,8 @@ pub trait HostFunc: Send + Sync + 'static {
     /// Executes the host function synchronously.
     fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>>;
 
-    /// Executes the host function and may suspend before completion.
-    fn call_with_suspension(
-        &self,
-        caller: &mut HostCaller<'_>,
-        args: &[WasmValue],
-    ) -> Result<HostCallOutcome> {
-        self.call(caller, args).map(HostCallOutcome::Complete)
-    }
-
     /// Returns the declared function signature for this host function.
     fn function_type(&self) -> Option<&FunctionType>;
-}
-
-/// Outcome of a host function call.
-///
-/// Used to support asynchronous host calls that may yield pending work.
-#[derive(Debug, Clone, PartialEq)]
-/// Result of invoking a host function.
-pub enum HostCallOutcome {
-    /// The host call completed immediately with result values.
-    Complete(Vec<WasmValue>),
-    /// The host call yielded and must be resumed later.
-    Pending {
-        /// Opaque host-managed state required to resume the call.
-        pending_work: Vec<u8>,
-    },
-}
-
-/// A registered host function together with its signature metadata.
-pub struct NativeFuncRef {
-    /// The host function implementation.
-    pub func: Arc<dyn HostFunc>,
-    /// The function signature exposed to WebAssembly.
-    pub func_type: FunctionType,
-    /// Optional symbolic name used for diagnostics.
-    pub name: Option<String>,
-    /// Whether this native function is an internal implementation detail.
-    pub internal: bool,
-    /// Guest-function metadata for direct same-module dispatch.
-    pub(crate) guest_target: Option<GuestFuncTarget>,
 }
 
 #[derive(Clone)]
@@ -112,7 +73,6 @@ pub struct Instance {
     module: Arc<Module>,
     store: Arc<Mutex<Store>>,
     shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
-    meter: Arc<InstanceMeter>,
     /// The memory values.
     pub memories: Vec<SharedMemory>,
     /// The table values.
@@ -139,7 +99,7 @@ pub struct Instance {
 pub struct Store {
     /// Instances currently owned by this store.
     pub instances: Vec<Instance>,
-    native_funcs: Vec<NativeFuncRef>,
+    native_funcs: Vec<(Arc<dyn HostFunc>, FunctionType, Option<GuestFuncTarget>)>,
     shared_memory: Arc<ParkingMutex<SharedMemoryRegistry>>,
 }
 
@@ -166,8 +126,6 @@ pub enum Extern {
     Memory(SharedMemory),
     /// A shared global value.
     Global(SharedGlobal),
-    /// A tag signature.
-    Tag(FunctionType),
 }
 
 #[derive(Clone)]
@@ -185,39 +143,6 @@ struct GuestFuncRefHost {
     func_type: FunctionType,
 }
 
-impl NativeFuncRef {
-    /// Creates a new `NativeFuncRef`.
-    pub fn new(func: Arc<dyn HostFunc>, func_type: FunctionType) -> Self {
-        Self {
-            func,
-            func_type,
-            name: None,
-            internal: false,
-            guest_target: None,
-        }
-    }
-
-    /// Returns this value configured with name.
-    pub fn with_name(mut self, name: String) -> Self {
-        self.name = Some(name);
-        self
-    }
-
-    /// Invokes the target function.
-    pub fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        self.func.call(caller, args)
-    }
-
-    /// Calls with suspension.
-    pub fn call_with_suspension(
-        &self,
-        caller: &mut HostCaller<'_>,
-        args: &[WasmValue],
-    ) -> Result<HostCallOutcome> {
-        self.func.call_with_suspension(caller, args)
-    }
-}
-
 impl TypedHostFunc {
     fn new(inner: Arc<dyn HostFunc>, func_type: FunctionType) -> Self {
         Self { inner, func_type }
@@ -227,14 +152,6 @@ impl TypedHostFunc {
 impl HostFunc for TypedHostFunc {
     fn call(&self, caller: &mut HostCaller<'_>, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.inner.call(caller, args)
-    }
-
-    fn call_with_suspension(
-        &self,
-        caller: &mut HostCaller<'_>,
-        args: &[WasmValue],
-    ) -> Result<HostCallOutcome> {
-        self.inner.call_with_suspension(caller, args)
     }
 
     fn function_type(&self) -> Option<&FunctionType> {
@@ -249,6 +166,7 @@ impl Instance {
     }
 
     /// Returns the shared memory registry (crate-internal).
+    #[allow(dead_code)]
     pub(crate) fn shared_memory_registry(&self) -> Arc<ParkingMutex<SharedMemoryRegistry>> {
         self.shared_memory.clone()
     }
@@ -336,7 +254,6 @@ impl Instance {
             module,
             store,
             shared_memory,
-            meter: Arc::new(InstanceMeter::default()),
             memories: Vec::new(),
             tables: Vec::new(),
             globals: Vec::new(),
@@ -415,8 +332,7 @@ impl Instance {
         let mut const_globals = self.const_expr_globals();
 
         for memory_type in &self.module.memories {
-            let mut memory = Memory::try_new(memory_type.clone())?;
-            memory.attach_meter(&self.meter);
+            let memory = Memory::try_new(memory_type.clone())?;
             self.memories.push(Arc::new(Mutex::new(memory)));
         }
 
@@ -488,13 +404,7 @@ impl Instance {
         let store = self.store.lock().map_err(poisoned_lock)?;
         store
             .get_native_func(native_idx)
-            .map(|func| {
-                (
-                    func.func.clone(),
-                    func.func_type.clone(),
-                    func.guest_target.clone(),
-                )
-            })
+            .map(|(func, func_type, target)| (func.clone(), func_type.clone(), target.cloned()))
             .ok_or_else(|| WasmError::Runtime(format!("native function {} not found", native_idx)))
     }
 
@@ -609,7 +519,6 @@ impl Instance {
                 ExportKind::Global(idx) => {
                     self.globals.get(idx as usize).cloned().map(Extern::Global)
                 }
-                ExportKind::Tag(idx) => self.module.tag_type(idx).cloned().map(Extern::Tag),
             };
 
             if let Some(extern_) = extern_ {
@@ -920,26 +829,6 @@ impl Instance {
             .read_from_region(region_id, offset, buf)
     }
 
-    /// Returns runtime statistics.
-    pub fn stats(&self) -> Result<InstanceStats> {
-        Ok(self.meter.snapshot(self.total_memory_pages()?))
-    }
-
-    /// Returns the configured limits.
-    pub fn limits(&self) -> InstanceLimits {
-        self.meter.limits()
-    }
-
-    /// Sets limits.
-    pub fn set_limits(&mut self, limits: InstanceLimits) -> Result<()> {
-        self.meter.set_limits(limits, self.total_memory_pages()?)
-    }
-
-    /// Records executed instruction units for metering.
-    pub fn record_execution(&self, units: u64) -> Result<()> {
-        self.meter.charge_execution(units)
-    }
-
     /// Grows the selected memory by the requested number of pages.
     pub fn grow_memory(&mut self, idx: u32, delta: u32) -> Result<u32> {
         let memory = self
@@ -947,10 +836,11 @@ impl Instance {
             .cloned()
             .ok_or_else(|| WasmError::Runtime(format!("memory {} out of bounds", idx)))?;
         let current_pages = self.total_memory_pages()?;
-        let new_total_pages = current_pages
-            .checked_add(delta)
-            .ok_or_else(|| WasmError::Runtime("memory size exceeds maximum allowed".to_string()))?;
-        self.meter.ensure_memory_pages(new_total_pages)?;
+        if current_pages.checked_add(delta).is_none() {
+            return Err(WasmError::Runtime(
+                "memory size exceeds maximum allowed".to_string(),
+            ));
+        };
 
         memory.lock().map_err(poisoned_lock)?.grow(delta)
     }
@@ -966,10 +856,9 @@ impl Instance {
         };
 
         let current_pages = self.total_memory_pages()?;
-        let Some(new_total_pages) = current_pages.checked_add(delta) else {
+        if current_pages.checked_add(delta).is_none() {
             return Ok(-1);
         };
-        self.meter.ensure_memory_pages(new_total_pages)?;
 
         match memory.lock().map_err(poisoned_lock)?.grow(delta) {
             Ok(old_size) => Ok(old_size as i32),
@@ -1081,20 +970,6 @@ impl Instance {
 
     /// Invokes the target function.
     pub fn call(&mut self, func_idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
-        match self.call_with_suspension(func_idx, args)? {
-            HostCallOutcome::Complete(results) => Ok(results),
-            HostCallOutcome::Pending { .. } => Err(WasmError::Runtime(
-                "pending hostcall is not supported in synchronous call context".to_string(),
-            )),
-        }
-    }
-
-    /// Calls with suspension.
-    pub fn call_with_suspension(
-        &mut self,
-        func_idx: u32,
-        args: &[WasmValue],
-    ) -> Result<HostCallOutcome> {
         if let Some(func) = self.get_func(func_idx) {
             let func_type = func.function_type().ok_or_else(|| {
                 WasmError::Runtime(format!("function {} type not found", func_idx))
@@ -1102,15 +977,9 @@ impl Instance {
             validate_values(args, &func_type.params, "argument")?;
             let mut store = self.store.lock().map_err(poisoned_lock)?;
             let mut caller = HostCaller::new(&mut store, &self.memories);
-            match func.call_with_suspension(&mut caller, args)? {
-                HostCallOutcome::Complete(results) => {
-                    validate_values(&results, &func_type.results, "result")?;
-                    Ok(HostCallOutcome::Complete(results))
-                }
-                HostCallOutcome::Pending { pending_work } => {
-                    Ok(HostCallOutcome::Pending { pending_work })
-                }
-            }
+            let results = func.call(&mut caller, args)?;
+            validate_values(&results, &func_type.results, "result")?;
+            Ok(results)
         } else {
             Err(WasmError::Runtime(format!(
                 "function {} not found",
@@ -1127,16 +996,6 @@ impl Instance {
     /// Adds export.
     pub fn add_export(&mut self, name: String, extern_: Extern) {
         self.exports.insert(name, extern_);
-    }
-
-    pub(crate) fn set_meter(&mut self, meter: Arc<InstanceMeter>) -> Result<()> {
-        self.meter = meter;
-        for memory in &self.memories {
-            let mut memory = memory.lock().map_err(poisoned_lock)?;
-            memory.attach_meter(&self.meter);
-        }
-
-        Ok(())
     }
 
     fn add_import_at(&mut self, import_idx: usize, extern_: &Extern) -> Result<()> {
@@ -1179,30 +1038,18 @@ impl Instance {
                 }
             }
             (ImportKind::Memory(expected), Extern::Memory(memory)) => {
-                let mut memory = memory.lock().map_err(poisoned_lock)?;
+                let memory = memory.lock().map_err(poisoned_lock)?;
                 if !memory_matches_required(&memory, expected) {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} memory type mismatch",
                         import.module, import.name
                     )));
                 }
-                memory.attach_meter(&self.meter);
             }
             (ImportKind::Global(expected), Extern::Global(global)) => {
                 if global.lock().map_err(poisoned_lock)?.type_ != *expected {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} global type mismatch",
-                        import.module, import.name
-                    )));
-                }
-            }
-            (ImportKind::Tag(type_idx), Extern::Tag(actual)) => {
-                let expected = self.module.type_at(*type_idx).ok_or_else(|| {
-                    WasmError::Instantiate(format!("type {} not found", type_idx))
-                })?;
-                if actual != expected {
-                    return Err(WasmError::Instantiate(format!(
-                        "import {}.{} tag type mismatch",
                         import.module, import.name
                     )));
                 }
@@ -1261,7 +1108,6 @@ impl Instance {
                 (ImportKind::Global(_), Extern::Global(global)) => {
                     self.globals.push(global.clone())
                 }
-                (ImportKind::Tag(_), Extern::Tag(_)) => {}
                 _ => {
                     return Err(WasmError::Instantiate(format!(
                         "import {}.{} kind mismatch",
@@ -1341,29 +1187,13 @@ impl Store {
         }
     }
 
-    /// Adds instance.
-    pub fn add_instance(&mut self, instance: Instance) -> usize {
-        self.instances.push(instance);
-        self.instances.len() - 1
-    }
-
-    /// Registers native.
-    pub fn register_native(&mut self, func: Box<dyn HostFunc>, func_type: FunctionType) -> u32 {
-        let idx = self.native_funcs.len() as u32;
-        self.native_funcs
-            .push(NativeFuncRef::new(Arc::from(func), func_type));
-        idx
-    }
-
     pub(crate) fn register_internal_native(
         &mut self,
         func: Box<dyn HostFunc>,
         func_type: FunctionType,
     ) -> u32 {
         let idx = self.native_funcs.len() as u32;
-        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
-        native.internal = true;
-        self.native_funcs.push(native);
+        self.native_funcs.push((Arc::from(func), func_type, None));
         idx
     }
 
@@ -1375,34 +1205,21 @@ impl Store {
         func_idx: u32,
     ) -> u32 {
         let idx = self.native_funcs.len() as u32;
-        let mut native = NativeFuncRef::new(Arc::from(func), func_type);
-        native.internal = true;
-        native.guest_target = Some(GuestFuncTarget { module, func_idx });
-        self.native_funcs.push(native);
+        self.native_funcs.push((
+            Arc::from(func),
+            func_type,
+            Some(GuestFuncTarget { module, func_idx }),
+        ));
         idx
     }
 
-    /// Registers native func.
-    pub fn register_native_func(
-        &mut self,
-        _name: &str,
-        func: Box<dyn HostFunc>,
-        func_type: FunctionType,
-    ) -> u32 {
-        self.register_native(func, func_type)
-    }
-
-    /// Returns native func.
-    pub fn get_native_func(&self, idx: u32) -> Option<&NativeFuncRef> {
-        self.native_funcs.get(idx as usize)
-    }
-
-    /// Returns native func count.
-    pub fn get_native_func_count(&self) -> u32 {
+    pub(crate) fn get_native_func(
+        &self,
+        idx: u32,
+    ) -> Option<(&Arc<dyn HostFunc>, &FunctionType, Option<&GuestFuncTarget>)> {
         self.native_funcs
-            .iter()
-            .filter(|func| !func.internal)
-            .count() as u32
+            .get(idx as usize)
+            .map(|(func, func_type, target)| (func, func_type, target.as_ref()))
     }
 
     /// Allocates a shared region without mapping it into any guest memory.
@@ -1469,7 +1286,6 @@ impl std::fmt::Debug for Extern {
             Extern::Table(table) => f.debug_tuple("Table").field(table).finish(),
             Extern::Memory(memory) => f.debug_tuple("Memory").field(memory).finish(),
             Extern::Global(global) => f.debug_tuple("Global").field(global).finish(),
-            Extern::Tag(tag) => f.debug_tuple("Tag").field(tag).finish(),
         }
     }
 }
@@ -1731,38 +1547,6 @@ mod tests {
     use crate::runtime::{
         Func, GlobalType, Import, Limits, MemoryType, TableType, TrapCode, ValType,
     };
-
-    #[test]
-    fn test_store() {
-        let mut store = Store::new();
-        let module = Arc::new(Module::new());
-        let instance = Instance::new(module).unwrap();
-        let idx = store.add_instance(instance);
-        assert_eq!(idx, 0);
-    }
-
-    #[test]
-    fn test_native_func_registration() {
-        let mut store = Store::new();
-        let func_type = FunctionType::new(
-            vec![
-                ValType::Num(crate::runtime::NumType::I32),
-                ValType::Num(crate::runtime::NumType::I32),
-            ],
-            vec![ValType::Num(crate::runtime::NumType::I32)],
-        );
-
-        let func: Box<dyn HostFunc> =
-            Box::new(|_caller: &mut HostCaller<'_>, args: &[WasmValue]| {
-                let a = args[0].i32()?;
-                let b = args[1].i32()?;
-                Ok(vec![WasmValue::I32(a + b)])
-            });
-
-        let idx = store.register_native(func, func_type);
-        assert_eq!(idx, 0);
-        assert_eq!(store.get_native_func_count(), 1);
-    }
 
     #[test]
     fn test_imported_state_is_shared() {
@@ -2087,42 +1871,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_grow_memory_invalid_index_beats_limit_check() {
-        let mut module = Module::new();
-        module.memories.push(MemoryType::new(Limits::Min(1)));
-
-        let mut instance = Instance::new(Arc::new(module)).unwrap();
-        instance
-            .set_limits(InstanceLimits::new(None, Some(1)))
-            .unwrap();
-
-        let error = instance.grow_memory(1, 1).unwrap_err();
-
-        assert!(
-            matches!(error, WasmError::Runtime(message) if message.contains("memory 1 out of bounds"))
-        );
-    }
-
-    #[test]
-    fn test_direct_memory_handle_growth_respects_memory_limit() {
-        let mut module = Module::new();
-        module.memories.push(MemoryType::new(Limits::Min(1)));
-
-        let mut instance = Instance::new(Arc::new(module)).unwrap();
-        instance
-            .set_limits(InstanceLimits::new(None, Some(1)))
-            .unwrap();
-
-        let memory = instance.memory(0).cloned().unwrap();
-        let error = memory.lock().unwrap().grow(1).unwrap_err();
-
-        assert_eq!(
-            error,
-            WasmError::Trap(crate::runtime::TrapCode::MemoryLimitExceeded)
-        );
-    }
-
     fn module_with_memory() -> Module {
         let mut module = Module::new();
         module.memories.push(MemoryType::new(Limits::Min(1)));
@@ -2322,94 +2070,6 @@ mod tests {
 
         // Reading from page 0 should still work (PROT_READ)
         assert_eq!(mem.read_u32(page0_offset).unwrap(), 0);
-    }
-
-    #[test]
-    fn test_snapshot_shared_regions() {
-        use crate::memory::RegionProt;
-        use crate::runtime::snapshot::{capture_snapshot, restore_snapshot};
-
-        let store = Arc::new(Mutex::new(Store::new()));
-        let module = Arc::new(module_with_memory());
-        let mut instance = Instance::new_with_store(module.clone(), store.clone()).unwrap();
-
-        // Allocate and attach a shared region
-        let (region_id, page_offset) = instance
-            .allocate_shared_region(PAGE_SIZE_BYTES, RegionProt::ReadWrite)
-            .unwrap();
-
-        // Write to owned memory
-        {
-            let memory = instance.memory(0).unwrap().clone();
-            let mut mem = memory.lock().unwrap();
-            mem.write_u32(0, 0x0000_0001).unwrap();
-        }
-
-        // Write to shared memory via host-side API
-        instance
-            .write_shared_region(region_id, 0, &0x0000_0002u32.to_le_bytes())
-            .unwrap();
-
-        // Capture snapshot
-        let snapshot = capture_snapshot(&instance, None).unwrap();
-
-        // Verify snapshot contains owned memory data
-        assert_eq!(snapshot.memory_snapshots.len(), 1);
-        let mem_snapshot = &snapshot.memory_snapshots[0];
-        assert_eq!(mem_snapshot.data.len(), PAGE_SIZE_BYTES as usize);
-
-        // Verify owned data is in snapshot
-        let owned_val = u32::from_le_bytes([
-            mem_snapshot.data[0],
-            mem_snapshot.data[1],
-            mem_snapshot.data[2],
-            mem_snapshot.data[3],
-        ]);
-        assert_eq!(owned_val, 0x0000_0001);
-
-        // Verify shared_mappings is recorded
-        assert_eq!(mem_snapshot.shared_mappings.len(), 1);
-        assert_eq!(mem_snapshot.shared_mappings[0].0, page_offset);
-        assert_eq!(mem_snapshot.shared_mappings[0].1, region_id.raw());
-
-        // Create a new instance and restore the snapshot
-        let mut instance2 = Instance::new_with_store(module.clone(), store.clone()).unwrap();
-        let _suspended = restore_snapshot(&snapshot, module.clone(), &mut instance2).unwrap();
-
-        // Verify owned data is restored
-        {
-            let memory = instance2.memory(0).unwrap().clone();
-            let mem = memory.lock().unwrap();
-            assert_eq!(mem.read_u32(0).unwrap(), 0x0000_0001);
-        }
-
-        // Verify shared region is re-attached: data readable via guest memory.
-        // The snapshot records the original page_offset, but restore computes a
-        // fresh one via map_shared_region. Look up the actual offset on instance2.
-        {
-            let memory = instance2.memory(0).unwrap().clone();
-            let mem = memory.lock().unwrap();
-            let actual_page_offset = mem
-                .shared_ranges()
-                .iter()
-                .find(|r| r.region_id == region_id)
-                .map(|r| r.page_offset)
-                .expect("shared region should be re-attached after restore");
-            let shared_byte_offset = actual_page_offset * PAGE_SIZE_BYTES;
-            let val = mem.read_u32(shared_byte_offset).unwrap();
-            assert_eq!(
-                val, 0x0000_0002,
-                "shared data should be accessible via guest memory after restore"
-            );
-        }
-
-        // Also verify through host-side API
-        let mut buf = [0u8; 4];
-        instance2
-            .read_shared_region(region_id, 0, &mut buf)
-            .unwrap();
-        let shared_val = u32::from_le_bytes(buf);
-        assert_eq!(shared_val, 0x0000_0002);
     }
 
     #[test]

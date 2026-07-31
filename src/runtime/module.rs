@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{ExportType, FunctionType, GlobalType, Import, ImportKind, MemoryType, TableType};
 
@@ -82,20 +79,6 @@ pub struct ElemSegment {
 }
 
 #[derive(Debug, Clone)]
-/// Optional symbolic names captured from the custom name section.
-pub struct NameSection {
-    #[allow(dead_code)]
-    /// Optional symbolic name for the module.
-    pub module_name: Option<String>,
-    #[allow(dead_code)]
-    /// Symbolic names keyed by function index.
-    pub func_names: HashMap<u32, String>,
-    #[allow(dead_code)]
-    /// Symbolic local names keyed by function index and local index.
-    pub local_names: HashMap<u32, HashMap<u32, String>>,
-}
-
-#[derive(Debug, Clone)]
 /// Parsed WebAssembly module.
 pub struct Module {
     /// Stable identity assigned at construction; preserved by `Clone`.
@@ -114,8 +97,6 @@ pub struct Module {
     pub memories: Vec<MemoryType>,
     /// Global types declared by the module.
     pub globals: Vec<GlobalType>,
-    /// Tag signatures declared by the module.
-    pub tags: Vec<u32>,
     /// Initialiser expressions for defined globals.
     pub global_inits: Vec<Vec<u8>>,
     /// Exports declared by the module.
@@ -128,8 +109,6 @@ pub struct Module {
     pub data: Vec<DataSegment>,
     /// Element segments declared by the module.
     pub elems: Vec<ElemSegment>,
-    #[allow(dead_code)]
-    names: HashMap<String, NameSection>,
 }
 
 impl Module {
@@ -142,31 +121,18 @@ impl Module {
             tables: Vec::new(),
             memories: Vec::new(),
             globals: Vec::new(),
-            tags: Vec::new(),
             global_inits: Vec::new(),
             exports: Vec::new(),
             imports: Vec::new(),
             start: None,
             data: Vec::new(),
             elems: Vec::new(),
-            names: HashMap::new(),
         }
     }
 
     /// Returns the function type at the given index.
     pub fn type_at(&self, idx: u32) -> Option<&FunctionType> {
         self.types.get(idx as usize)
-    }
-
-    /// Returns the function at the given index.
-    pub fn func_at(&self, idx: u32) -> Option<&Func> {
-        let import_func_count = self
-            .imports
-            .iter()
-            .filter(|import| matches!(import.kind, ImportKind::Func(_)))
-            .count() as u32;
-        let local_idx = idx.checked_sub(import_func_count)?;
-        self.defined_func_at(local_idx)
     }
 
     /// Returns or updates table at.
@@ -217,24 +183,6 @@ impl Module {
         self.globals.get(local_idx as usize)
     }
 
-    /// Returns the tag type at the given index.
-    pub fn tag_type(&self, idx: u32) -> Option<&FunctionType> {
-        let mut import_tag_count = 0u32;
-        for import in &self.imports {
-            if let ImportKind::Tag(type_idx) = import.kind {
-                if import_tag_count == idx {
-                    return self.type_at(type_idx);
-                }
-                import_tag_count += 1;
-            }
-        }
-
-        let local_idx = idx.checked_sub(import_tag_count)?;
-        self.tags
-            .get(local_idx as usize)
-            .and_then(|type_idx| self.type_at(*type_idx))
-    }
-
     /// Returns the function signature for the given function index.
     pub fn func_type(&self, func_idx: u32) -> Option<&FunctionType> {
         let mut import_func_count = 0u32;
@@ -252,11 +200,6 @@ impl Module {
         self.type_at(func.type_idx)
     }
 
-    /// Returns the export with the given name, if present.
-    pub fn export(&self, name: &str) -> Option<&ExportType> {
-        self.exports.iter().find(|e| e.name == name)
-    }
-
     /// Returns the total number of functions, including imports.
     pub fn func_count(&self) -> u32 {
         let import_count = self
@@ -265,19 +208,6 @@ impl Module {
             .filter(|i| matches!(i.kind, ImportKind::Func(_)))
             .count() as u32;
         import_count + self.funcs.len() as u32
-    }
-
-    /// Returns the number of imports.
-    pub fn import_count(&self) -> usize {
-        self.imports.len()
-    }
-
-    /// Returns func imports.
-    pub fn get_func_imports(&self) -> Vec<&Import> {
-        self.imports
-            .iter()
-            .filter(|i| matches!(i.kind, ImportKind::Func(_)))
-            .collect()
     }
 
     pub(crate) fn defined_func_at(&self, idx: u32) -> Option<&Func> {
@@ -294,8 +224,7 @@ impl Default for Module {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportType, Func, FunctionType, GlobalType, Import, ImportKind, MemoryType, Module,
-        TableType,
+        Func, FunctionType, GlobalType, Import, ImportKind, MemoryType, Module, TableType,
     };
     use crate::runtime::Limits;
     use crate::{NumType, RefType, ValType};
@@ -307,12 +236,8 @@ mod tests {
             vec![ValType::Num(NumType::I32)],
             vec![ValType::Num(NumType::I32)],
         ));
-        module
-            .exports
-            .push(ExportType::new_func("add".to_string(), 0));
 
         assert_eq!(module.types.len(), 1);
-        assert_eq!(module.export("add").unwrap().name, "add");
     }
 
     #[test]
@@ -330,26 +255,6 @@ mod tests {
 
         assert!(module.func_type(0).is_some());
         assert!(module.func_type(1).is_none());
-    }
-
-    #[test]
-    fn test_func_accessor_uses_combined_index_space() {
-        let mut module = Module::new();
-        module.types.push(FunctionType::new(vec![], vec![]));
-        module.imports.push(Import {
-            module: "env".to_string(),
-            name: "imported".to_string(),
-            kind: ImportKind::Func(0),
-        });
-        module.funcs.push(Func {
-            type_idx: 0,
-            locals: vec![],
-            body: vec![0x0B],
-        });
-
-        assert!(module.func_at(0).is_none());
-        assert_eq!(module.func_at(1).unwrap().type_idx, 0);
-        assert_eq!(module.defined_func_at(0).unwrap().type_idx, 0);
     }
 
     #[test]

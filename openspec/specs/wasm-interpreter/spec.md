@@ -1,10 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Classic interpreter execution
-The interpreter SHALL execute WebAssembly bytecode using a stack-based virtual machine with operand and control stacks.
-
-### Requirement: Fast interpreter execution
-The interpreter SHALL provide an optimized execution mode with register-based intermediate representation.
+The interpreter SHALL execute WebAssembly bytecode using a stack-based virtual machine with operand and control stacks. It SHALL be the only execution mode; it SHALL NOT contain safepoint, suspension, or per-instruction metering hooks (those subsystems are removed), and it SHALL NOT dispatch host calls through a pending/outcome protocol — host functions return results or errors synchronously.
 
 ### Requirement: Instruction coverage
 The interpreter SHALL implement all WebAssembly MVP instructions including control flow, memory, numeric, and parametric operations.
@@ -43,6 +40,10 @@ The interpreter SHALL produce identical results for the same module input regard
 #### Scenario: Host function call
 - **WHEN** a module calls an imported host function
 - **THEN** the host function is invoked with correct arguments and result is returned
+
+#### Scenario: Host function call completes synchronously
+- **WHEN** a guest calls an imported host function
+- **THEN** the host function's `call` method runs to completion and its results or error are delivered directly to the interpreter
 
 #### Scenario: Indirect call through shared imported table
 - **WHEN** a module calls `call_indirect` through a table entry populated by another module

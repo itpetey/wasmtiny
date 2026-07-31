@@ -319,6 +319,7 @@ impl SharedMemoryRegistry {
     }
 
     /// Returns a reference to the shared region (crate-internal).
+    #[allow(dead_code)]
     pub(crate) fn get_region(&self, region_id: SharedRegionId) -> Result<Arc<SharedRegion>> {
         self.region(region_id)
     }

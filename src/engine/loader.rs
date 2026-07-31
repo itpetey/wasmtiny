@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use super::runtime::{AotExport, AotModule};
+use super::runtime::{Export, LoadedModule};
 
 use crate::{
     loader::{Parser, Validator},
@@ -8,14 +8,14 @@ use crate::{
 };
 
 /// Ahead-of-time module loader.
-pub struct AotLoader {
+pub struct EngineLoader {
     parser: Parser,
     validator: Validator,
     store: Arc<Mutex<crate::runtime::Store>>,
 }
 
-impl AotLoader {
-    /// Creates a new `AotLoader`.
+impl EngineLoader {
+    /// Creates a new `EngineLoader`.
     pub fn new() -> Self {
         Self::with_store(Arc::new(Mutex::new(crate::runtime::Store::new())))
     }
@@ -30,7 +30,7 @@ impl AotLoader {
     }
 
     /// Loads a WebAssembly module into the target runtime representation.
-    pub fn load(&self, data: &[u8]) -> Result<AotModule> {
+    pub fn load(&self, data: &[u8]) -> Result<LoadedModule> {
         self.load_with_store(data, self.store.clone())
     }
 
@@ -38,13 +38,13 @@ impl AotLoader {
         &self,
         data: &[u8],
         store: Arc<Mutex<crate::runtime::Store>>,
-    ) -> Result<AotModule> {
+    ) -> Result<LoadedModule> {
         let module = self.parse_validated_module(data)?;
         self.convert_to_aot_module(&module, store)
     }
 
     /// Loads wasm.
-    pub fn load_wasm(&self, data: &[u8]) -> Result<AotModule> {
+    pub fn load_wasm(&self, data: &[u8]) -> Result<LoadedModule> {
         self.load(data)
     }
 
@@ -63,8 +63,8 @@ impl AotLoader {
         &self,
         module: &Module,
         store: Arc<Mutex<crate::runtime::Store>>,
-    ) -> Result<AotModule> {
-        let mut aot_module = AotModule::from_module_with_store(module, store.clone())?;
+    ) -> Result<LoadedModule> {
+        let mut aot_module = LoadedModule::from_module_with_store(module, store.clone())?;
         if module.imports.is_empty() {
             let instance = Instance::new_with_store(Arc::new(module.clone()), store)?;
             aot_module.memories = instance.memories.to_vec();
@@ -83,11 +83,10 @@ impl AotLoader {
 
         for export in &module.exports {
             let export_idx = match &export.kind {
-                crate::runtime::ExportKind::Func(idx) => AotExport::Function(*idx),
-                crate::runtime::ExportKind::Table(idx) => AotExport::Table(*idx),
-                crate::runtime::ExportKind::Memory(idx) => AotExport::Memory(*idx),
-                crate::runtime::ExportKind::Global(idx) => AotExport::Global(*idx),
-                crate::runtime::ExportKind::Tag(idx) => AotExport::Tag(*idx),
+                crate::runtime::ExportKind::Func(idx) => Export::Function(*idx),
+                crate::runtime::ExportKind::Table(idx) => Export::Table(*idx),
+                crate::runtime::ExportKind::Memory(idx) => Export::Memory(*idx),
+                crate::runtime::ExportKind::Global(idx) => Export::Global(*idx),
             };
             aot_module.exports.insert(export.name.clone(), export_idx);
         }
@@ -96,7 +95,7 @@ impl AotLoader {
     }
 }
 
-impl Default for AotLoader {
+impl Default for EngineLoader {
     fn default() -> Self {
         Self::new()
     }
@@ -112,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_load_valid_aot() {
-        let loader = AotLoader::new();
+        let loader = EngineLoader::new();
         let mut data = vec![0x00, 0x61, 0x73, 0x6D];
         data.extend_from_slice(&[1, 0, 0, 0]);
         assert!(loader.validate(&data).is_ok());
@@ -120,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_load_wasm_module() {
-        let loader = AotLoader::new();
+        let loader = EngineLoader::new();
         let wasm_data = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
         let result = loader.load(&wasm_data);
         assert!(result.is_ok());
@@ -128,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_truncated_header_with_valid_magic() {
-        let loader = AotLoader::new();
+        let loader = EngineLoader::new();
         let truncated = vec![0x00, 0x61, 0x73, 0x6D];
         assert!(loader.validate(&truncated).is_err());
     }

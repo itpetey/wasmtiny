@@ -10,31 +10,26 @@ The loader SHALL validate WASM modules according to the WebAssembly specificatio
 The loader SHALL verify that function signatures, local types, and global types are consistent throughout the module.
 
 ### Requirement: Section ordering
-The loader SHALL enforce proper section ordering per the WASM binary specification.
+The loader SHALL enforce proper section ordering per the WASM binary specification for the sections it supports. Tag sections (exception handling) are not supported and SHALL be rejected.
 
-#### Scenario: Tag section ordering is accepted
-- **WHEN** a module places the tag section after the function section and before globals or exports, as allowed by the binary format
-- **THEN** parsing and validation SHALL succeed
-
-### Requirement: Name section support
-The loader SHALL parse the custom name section and make it available for debugging.
-
-### Requirement: Streaming parse
-The loader SHALL support streaming/partial parsing for large modules.
-
-### Requirement: Incremental validation
-The loader SHALL provide incremental validation to detect errors early during loading.
+#### Scenario: Unknown or unsupported section rejected
+- **WHEN** a module contains a tag section or an unknown section id
+- **THEN** parsing SHALL fail with an explicit unsupported-section error
 
 ### Requirement: Reference type encoding support
-The loader SHALL parse and validate supported typed-reference and tag encodings used by modules under test.
+The loader SHALL parse and validate the basic reference-type encodings needed for funcref tables (`funcref`, `externref`, `ref.null`, `ref.func`, non-null table initialisers). Exception-handling tag encodings and GC heap types are not supported and SHALL be rejected explicitly.
 
 #### Scenario: Non-null table initializer rejects ref.null
 - **WHEN** a module declares a non-null table type but uses `ref.null` as the declared initializer
 - **THEN** parsing or validation SHALL fail instead of accepting the initializer
 
-#### Scenario: Tag imports and exports are accepted
-- **WHEN** a module declares tag imports or tag exports with valid type indices
-- **THEN** parsing and validation SHALL succeed
+#### Scenario: Tag imports and exports are rejected
+- **WHEN** a module declares tag imports, tag exports, or a tag section
+- **THEN** parsing or validation SHALL fail with an explicit unsupported-feature error
+
+#### Scenario: GC heap types are rejected
+- **WHEN** a module references GC heap types (e.g. `any`, `eq`, `struct`, `array` encodings)
+- **THEN** parsing or validation SHALL fail with an explicit unsupported-feature error
 
 #### Scenario: Valid WASM module loading
 - **WHEN** a valid WASM binary is loaded
@@ -51,7 +46,3 @@ The loader SHALL parse and validate supported typed-reference and tag encodings 
 #### Scenario: Missing required section
 - **WHEN** a module is missing the Type section
 - **THEN** `Err(WasmError::Validation("type section required"))` is returned
-
-#### Scenario: Large module streaming
-- **WHEN** a large WASM module is loaded in chunks
-- **THEN** parsing succeeds with valid intermediate state
