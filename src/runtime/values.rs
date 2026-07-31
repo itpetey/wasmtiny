@@ -116,7 +116,12 @@ impl WasmValue {
             }
             WasmValue::NullRef(rt) => {
                 out.push(4);
-                out.push(*rt as u8);
+                // Use wasm heap-type bytes (0x70 for FuncRef, 0x6F for ExternRef)
+                // consistently with from_bytes / RefType::from_u8.
+                out.push(match rt {
+                    RefType::FuncRef => 0x70,
+                    RefType::ExternRef => 0x6F,
+                });
             }
             WasmValue::FuncRef(idx) => {
                 out.push(5);
@@ -263,5 +268,33 @@ mod tests {
         val.to_bytes(&mut bytes);
         let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
         assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_nullref_externref() {
+        let val = WasmValue::NullRef(crate::runtime::RefType::ExternRef);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_nullref_externref_roundtrips_correct_type() {
+        // Bug regression: NullRef(ExternRef) was round-tripping as NullRef(FuncRef)
+        let val = WasmValue::NullRef(crate::runtime::RefType::ExternRef);
+        let mut bytes = Vec::new();
+        val.to_bytes(&mut bytes);
+        let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            restored,
+            WasmValue::NullRef(crate::runtime::RefType::ExternRef),
+            "ExternRef should survive round-trip"
+        );
+        assert_ne!(
+            restored,
+            WasmValue::NullRef(crate::runtime::RefType::FuncRef),
+            "should not degrade to FuncRef"
+        );
     }
 }

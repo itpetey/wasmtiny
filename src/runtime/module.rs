@@ -109,6 +109,8 @@ pub struct Module {
     pub data: Vec<DataSegment>,
     /// Element segments declared by the module.
     pub elems: Vec<ElemSegment>,
+    /// DataCount section value (number of data segments), if present.
+    pub data_count: Option<u32>,
 }
 
 impl Module {
@@ -127,6 +129,7 @@ impl Module {
             start: None,
             data: Vec::new(),
             elems: Vec::new(),
+            data_count: None,
         }
     }
 

@@ -5,8 +5,7 @@ pub type Result<T> = std::result::Result<T, WasmError>;
 ///
 /// These codes indicate the specific reason for a WebAssembly trap, which
 /// typically terminates execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Trap code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrapCode {
     /// Execution reached an unreachable instruction.
     Unreachable,
@@ -39,42 +38,44 @@ pub enum TrapCode {
 /// WebAssembly errors.
 ///
 /// Represents errors that can occur during validation, loading, instantiation,
-/// or execution of WebAssembly modules.
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Wasm error.
+/// or execution of WebAssembly modules. Uses `thiserror` for structured error
+/// variants with typed fields. The `Runtime` and `Instantiate` variants keep
+/// their single-string shape for embedder compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WasmError {
     /// Module validation failed.
+    #[error("Validation error: {0}")]
     Validation(String),
     /// Module loading failed.
+    #[error("Load error: {0}")]
     Load(String),
     /// Module instantiation failed.
+    #[error("Instantiate error: {0}")]
     Instantiate(String),
     /// Runtime error during execution.
+    #[error("Runtime error: {0}")]
     Runtime(String),
     /// Execution trapped.
+    #[error("Trap: {0:?}")]
     Trap(TrapCode),
+    /// Unexpected end of data during decoding.
+    #[error("Unexpected end of data")]
+    UnexpectedEof,
+    /// A declared limit was exceeded (e.g. locals, tables, br_table count).
+    #[error("Limit exceeded: {0}")]
+    LimitExceeded(String),
     /// Other error.
+    #[error("Error: {0}")]
     Other(String),
 }
 
-impl std::fmt::Display for WasmError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WasmError::Validation(msg) => write!(f, "Validation error: {}", msg),
-            WasmError::Load(msg) => write!(f, "Load error: {}", msg),
-            WasmError::Instantiate(msg) => write!(f, "Instantiate error: {}", msg),
-            WasmError::Runtime(msg) => write!(f, "Runtime error: {}", msg),
-            WasmError::Trap(code) => write!(f, "Trap: {:?}", code),
-            WasmError::Other(msg) => write!(f, "Error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for WasmError {}
-
 impl From<std::io::Error> for WasmError {
     fn from(e: std::io::Error) -> Self {
-        WasmError::Load(e.to_string())
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            WasmError::UnexpectedEof
+        } else {
+            WasmError::Load(e.to_string())
+        }
     }
 }
 

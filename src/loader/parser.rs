@@ -106,6 +106,7 @@ impl Parser {
                 9 => self.parse_elem(&mut section_reader, &mut module)?,
                 10 => self.parse_code(&mut section_reader, &mut module)?,
                 11 => self.parse_data(&mut section_reader, &mut module)?,
+                12 => self.parse_data_count(&mut section_reader, &mut module)?,
                 13 => {
                     return Err(WasmError::Load(
                         "tag sections are not supported".to_string(),
@@ -142,6 +143,15 @@ impl Parser {
         Ok(())
     }
 
+    fn parse_data_count(
+        &self,
+        reader: &mut BinaryReader<Cursor<&[u8]>>,
+        module: &mut Module,
+    ) -> Result<()> {
+        module.data_count = Some(reader.read_uleb128()?);
+        Ok(())
+    }
+
     fn section_order(section_id: u8) -> Option<u8> {
         Some(match section_id {
             1 => 1,
@@ -155,6 +165,7 @@ impl Parser {
             9 => 10,
             10 => 11,
             11 => 12,
+            12 => 13, // DataCount
             _ => return None,
         })
     }
@@ -172,13 +183,13 @@ impl Parser {
             }
 
             let param_count = reader.read_uleb128()?;
-            let mut params = Vec::with_capacity(param_count as usize);
+            let mut params = Vec::new();
             for _ in 0..param_count {
                 params.push(self.read_val_type(reader)?);
             }
 
             let result_count = reader.read_uleb128()?;
-            let mut results = Vec::with_capacity(result_count as usize);
+            let mut results = Vec::new();
             for _ in 0..result_count {
                 results.push(self.read_val_type(reader)?);
             }
@@ -212,11 +223,13 @@ impl Parser {
         for _ in 0..count {
             let module_len = reader.read_uleb128()? as usize;
             let module_name = reader.read_bytes(module_len)?;
-            let module_str = String::from_utf8_lossy(&module_name).to_string();
+            let module_str = String::from_utf8(module_name)
+                .map_err(|_| WasmError::Load("invalid UTF-8 in import module name".to_string()))?;
 
             let name_len = reader.read_uleb128()? as usize;
             let name = reader.read_bytes(name_len)?;
-            let name_str = String::from_utf8_lossy(&name).to_string();
+            let name_str = String::from_utf8(name)
+                .map_err(|_| WasmError::Load("invalid UTF-8 in export name".to_string()))?;
 
             let kind_byte = reader.read_u8()?;
             let kind = match kind_byte {
@@ -307,6 +320,15 @@ impl Parser {
                         .count() as u32
                         + module.tables.len() as u32;
                     let min = limits.min() as usize;
+
+                    // Cap table minimum to prevent untrusted-count allocations
+                    const MAX_TABLE_MIN: usize = 100_000;
+                    if min > MAX_TABLE_MIN {
+                        return Err(WasmError::Load(format!(
+                            "table minimum {} exceeds supported maximum {}",
+                            min, MAX_TABLE_MIN
+                        )));
+                    }
 
                     module
                         .tables
@@ -406,7 +428,8 @@ impl Parser {
         for _ in 0..count {
             let name_len = reader.read_uleb128()? as usize;
             let name = reader.read_bytes(name_len)?;
-            let name_str = String::from_utf8_lossy(&name).to_string();
+            let name_str = String::from_utf8(name)
+                .map_err(|_| WasmError::Load("invalid UTF-8 in export name".to_string()))?;
 
             let kind_byte = reader.read_u8()?;
             let idx = reader.read_uleb128()?;
@@ -602,7 +625,7 @@ impl Parser {
 
     fn parse_locals(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<Vec<Local>> {
         let count = reader.read_uleb128()?;
-        let mut locals = Vec::with_capacity(count as usize);
+        let mut locals = Vec::new();
         for _ in 0..count {
             let local_count = reader.read_uleb128()?;
             let type_ = self.read_val_type(reader)?;
@@ -754,7 +777,7 @@ impl Parser {
 
     fn read_func_index_vector(&self, reader: &mut BinaryReader<Cursor<&[u8]>>) -> Result<Vec<u32>> {
         let count = reader.read_uleb128()?;
-        let mut funcs = Vec::with_capacity(count as usize);
+        let mut funcs = Vec::new();
         for _ in 0..count {
             funcs.push(reader.read_uleb128()?);
         }
@@ -766,7 +789,7 @@ impl Parser {
         reader: &mut BinaryReader<Cursor<&[u8]>>,
     ) -> Result<Vec<Vec<u8>>> {
         let count = reader.read_uleb128()?;
-        let mut exprs = Vec::with_capacity(count as usize);
+        let mut exprs = Vec::new();
         for _ in 0..count {
             exprs.push(self.read_const_expr(reader)?);
         }

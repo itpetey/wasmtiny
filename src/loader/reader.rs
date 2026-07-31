@@ -119,8 +119,12 @@ impl<R: Read> BinaryReader<R> {
     pub fn read_uleb128(&mut self) -> Result<u32> {
         let mut result = 0u64;
         let mut shift = 0;
+        let mut byte_count = 0u32;
+        let mut last_byte: u8;
         loop {
             let byte = self.read_u8()?;
+            byte_count += 1;
+            last_byte = byte;
             result |= ((byte & 0x7F) as u64) << shift;
             if byte & 0x80 == 0 {
                 break;
@@ -133,8 +137,22 @@ impl<R: Read> BinaryReader<R> {
                 ));
             }
         }
-        u32::try_from(result)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "uleb128 overflow"))
+        // Reject overlong encodings: for a u32, the 5th byte (shift=28) must
+        // not have bits beyond bit 3 (i.e. byte & 0xF0 must be 0).
+        if byte_count == 5 && (last_byte & 0xF0) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "uleb128 overlong encoding",
+            ));
+        }
+        // Reject values that don't fit in u32
+        if result > u32::MAX as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "uleb128 overflow",
+            ));
+        }
+        Ok(result as u32)
     }
 
     /// Reads sleb128.

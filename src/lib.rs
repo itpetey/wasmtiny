@@ -53,5 +53,3 @@ pub mod loader;
 pub mod memory;
 /// Runtime-related APIs.
 pub mod runtime;
-/// SIGSEGV signal handler for translating page faults to WASM traps.
-pub mod signal_handler;

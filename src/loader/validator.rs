@@ -133,6 +133,21 @@ impl Validator {
             allow_else: false,
             unreachable: false,
         }];
+        // Cap expanded locals total to prevent OOM from untrusted counts
+        const MAX_LOCALS: u32 = 100_000;
+        let total_locals: u32 = func
+            .locals
+            .iter()
+            .map(|l| l.count)
+            .try_fold(0u32, |acc, c| acc.checked_add(c))
+            .unwrap_or(u32::MAX);
+        if total_locals > MAX_LOCALS {
+            return Err(WasmError::Validation(format!(
+                "function {} declares {} locals exceeding maximum {}",
+                func_idx, total_locals, MAX_LOCALS
+            )));
+        }
+
         let local_types = self.local_types(func, func_type);
 
         while cursor < code.len() {
@@ -855,10 +870,18 @@ impl Validator {
                             func_idx, target
                         )));
                     }
+                    // Enforce ref.func declared rule: the target must be
+                    // imported, exported, or referenced in an element segment.
+                    if !self.is_declared_function(module, target) {
+                        return Err(WasmError::Validation(format!(
+                            "function {} uses ref.func on undeclared function {}",
+                            func_idx, target
+                        )));
+                    }
                     type_stack.push(ValType::Ref(RefType::FuncRef));
                 }
                 0xFE => {
-                    let subopcode = Self::read_byte(code, &mut cursor)?;
+                    let subopcode = Self::read_uleb(code, &mut cursor)? as u8;
                     self.validate_atomic_instruction(
                         func_idx,
                         subopcode,
@@ -934,8 +957,16 @@ impl Validator {
                         }
                         8 => {
                             let data_idx = Self::read_uleb(code, &mut cursor)?;
-                            let _memory_idx = Self::read_uleb(code, &mut cursor)?;
-                            if module.data.get(data_idx as usize).is_none() {
+                            let memory_idx = Self::read_uleb(code, &mut cursor)?;
+                            // Reject non-zero memory indices (multi-memory unsupported)
+                            if memory_idx != 0 {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} memory.init uses non-zero memory index {}",
+                                    func_idx, memory_idx
+                                )));
+                            }
+                            // Validate data segment index against data segments and DataCount
+                            if !self.is_valid_data_idx(module, data_idx) {
                                 return Err(WasmError::Validation(format!(
                                     "function {} uses invalid data segment {}",
                                     func_idx, data_idx
@@ -952,7 +983,7 @@ impl Validator {
                         }
                         9 => {
                             let data_idx = Self::read_uleb(code, &mut cursor)?;
-                            if module.data.get(data_idx as usize).is_none() {
+                            if !self.is_valid_data_idx(module, data_idx) {
                                 return Err(WasmError::Validation(format!(
                                     "function {} uses invalid data segment {}",
                                     func_idx, data_idx
@@ -960,8 +991,15 @@ impl Validator {
                             }
                         }
                         10 => {
-                            let _dst_memory = Self::read_uleb(code, &mut cursor)?;
-                            let _src_memory = Self::read_uleb(code, &mut cursor)?;
+                            let dst_memory = Self::read_uleb(code, &mut cursor)?;
+                            let src_memory = Self::read_uleb(code, &mut cursor)?;
+                            // Reject non-zero memory indices (multi-memory unsupported)
+                            if dst_memory != 0 || src_memory != 0 {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} memory.copy uses non-zero memory index",
+                                    func_idx
+                                )));
+                            }
                             for _ in 0..3 {
                                 self.pop_type(
                                     func_idx,
@@ -972,7 +1010,13 @@ impl Validator {
                             }
                         }
                         11 => {
-                            let _memory_idx = Self::read_uleb(code, &mut cursor)?;
+                            let memory_idx = Self::read_uleb(code, &mut cursor)?;
+                            if memory_idx != 0 {
+                                return Err(WasmError::Validation(format!(
+                                    "function {} memory.fill uses non-zero memory index {}",
+                                    func_idx, memory_idx
+                                )));
+                            }
                             for _ in 0..3 {
                                 self.pop_type(
                                     func_idx,
@@ -1015,10 +1059,17 @@ impl Validator {
     }
 
     fn local_types(&self, func: &Func, func_type: &FunctionType) -> Vec<ValType> {
+        const MAX_LOCALS: usize = 100_000;
+
         let mut locals = func_type.params.clone();
         for local in &func.locals {
             for _ in 0..local.count {
                 locals.push(local.type_);
+                if locals.len() > MAX_LOCALS {
+                    // Cap: return what we have (validation will fail on
+                    // out-of-bounds local access rather than OOM).
+                    return locals;
+                }
             }
         }
         locals
@@ -1112,6 +1163,18 @@ impl Validator {
         let frame = control_frames.pop().ok_or_else(|| {
             WasmError::Validation(format!("function {} has unmatched end opcode", func_idx))
         })?;
+
+        // Reject `if` without `else` when params != results
+        if frame.kind == FrameKind::If && frame.allow_else {
+            // allow_else still true means no `else` was encountered
+            if frame.params != frame.results {
+                return Err(WasmError::Validation(format!(
+                    "function {} has if without else with mismatched param/result arity",
+                    func_idx
+                )));
+            }
+        }
+
         self.require_types(func_idx, type_stack, &frame, &frame.results)?;
         self.require_exact_height(func_idx, type_stack, &frame)?;
         type_stack.truncate(frame.height);
@@ -1301,6 +1364,7 @@ impl Validator {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn validate_atomic_instruction(
         &self,
         func_idx: usize,
@@ -1311,8 +1375,9 @@ impl Validator {
         code: &[u8],
         cursor: &mut usize,
     ) -> Result<()> {
-        use NumType::{I32, I64};
+        use crate::runtime::atomic_op::{AtomicKind, lookup};
 
+        // Require shared memory for all atomic instructions.
         let memory = module.memory_at(0).ok_or_else(|| {
             WasmError::Validation(format!(
                 "function {} uses atomic instructions without a memory",
@@ -1327,148 +1392,50 @@ impl Validator {
             )));
         }
 
-        Self::skip_uleb(code, cursor)?;
-        Self::skip_uleb(code, cursor)?;
+        // Look up the operation metadata from the shared table.
+        let op = lookup(subopcode).ok_or_else(|| {
+            WasmError::Validation(format!(
+                "function {} uses unknown atomic subopcode 0xFE{:02x}",
+                func_idx, subopcode
+            ))
+        })?;
 
-        match subopcode {
-            0x00 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
+        // Skip memarg immediates and validate fence's reserved byte.
+        match op.kind {
+            AtomicKind::Fence => {
+                let reserved = Self::read_byte(code, cursor)?;
+                if reserved != 0 {
+                    return Err(WasmError::Validation(format!(
+                        "function {} atomic.fence reserved immediate must be 0x00",
+                        func_idx
+                    )));
+                }
             }
-            0x01 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x02 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x03 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x04 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x05 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x06 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x07 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x0A => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x0B => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x0C => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-            }
-            0x0D => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-            }
-            0x0E => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-            }
-            0x0F => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-            }
-            0x10 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-            }
-            0x11 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-            }
-            0x12 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x13 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x14 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x15 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x16 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x17 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x18 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x19 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x1A => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x1B => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x1C => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x1D => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x37 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x38 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I64))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0x39 => {
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I64))?;
-                self.pop_type(func_idx, type_stack, frame, ValType::Num(I32))?;
-                type_stack.push(ValType::Num(I32));
-            }
-            0xFF => {}
             _ => {
-                return Err(WasmError::Validation(format!(
-                    "function {} uses unknown atomic subopcode {:02x}",
-                    func_idx, subopcode
-                )));
+                let align = Self::read_uleb(code, cursor)?;
+                Self::skip_uleb(code, cursor)?;
+
+                // Validate alignment: align must not exceed natural alignment.
+                if op.access_width > 0 {
+                    let natural_align = (op.access_width as f64).log2() as u32;
+                    if align > natural_align {
+                        return Err(WasmError::Validation(format!(
+                            "function {} atomic 0xFE{:02x} alignment {} exceeds natural {}",
+                            func_idx, subopcode, align, natural_align
+                        )));
+                    }
+                }
             }
         }
+
+        // Pop operands and push results using the shared metadata.
+        for &param_type in op.params.iter().rev() {
+            self.pop_type(func_idx, type_stack, frame, param_type)?;
+        }
+        for &result_type in op.results {
+            type_stack.push(result_type);
+        }
+
         Ok(())
     }
 
@@ -1497,6 +1464,66 @@ impl Validator {
     fn mark_unreachable(&self, type_stack: &mut Vec<ValType>, frame: &mut ValidationFrame) {
         type_stack.truncate(frame.height);
         frame.unreachable = true;
+    }
+
+    /// Returns true if the data segment index is valid (within data.len() or
+    /// within data_count if a DataCount section was present).
+    fn is_valid_data_idx(&self, module: &Module, idx: u32) -> bool {
+        if let Some(count) = module.data_count {
+            idx < count
+        } else {
+            module.data.get(idx as usize).is_some()
+        }
+    }
+
+    /// Returns true if a function is "declared" — imported, exported, or
+    /// referenced in an element segment — as required by the ref.func rule.
+    fn is_declared_function(&self, module: &Module, func_idx: u32) -> bool {
+        // Imported functions are always declared
+        let import_func_count = module
+            .imports
+            .iter()
+            .filter(|i| matches!(i.kind, ImportKind::Func(_)))
+            .count() as u32;
+        if func_idx < import_func_count {
+            return true;
+        }
+
+        // Exported functions are declared
+        for export in &module.exports {
+            if let crate::runtime::ExportKind::Func(idx) = &export.kind
+                && *idx == func_idx
+            {
+                return true;
+            }
+        }
+
+        // Functions referenced in element segments are declared
+        for elem in &module.elems {
+            for init_expr in &elem.init {
+                // ref.func encodes as 0xD2 <uleb> 0x0B
+                if init_expr.first() == Some(&0xD2) {
+                    // Parse the uleb128 function index from the init expr
+                    let mut cursor = 1;
+                    let mut result = 0u32;
+                    let mut shift = 0u32;
+                    while cursor < init_expr.len() {
+                        let byte = init_expr[cursor];
+                        cursor += 1;
+                        result |= ((byte & 0x7F) as u32) << shift;
+                        if byte & 0x80 == 0 {
+                            break;
+                        }
+                        shift += 7;
+                    }
+                    if result == func_idx {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     fn validate_tables(&self, module: &Module) -> Result<()> {
@@ -1546,6 +1573,26 @@ impl Validator {
                         i
                     )));
                 }
+            }
+            // shared memory must have a maximum
+            if memory.shared && memory.limits.max().is_none() {
+                return Err(WasmError::Validation(format!(
+                    "memory {}: shared memory requires a maximum",
+                    i
+                )));
+            }
+        }
+
+        // Also check imported memories
+        for (i, import) in module.imports.iter().enumerate() {
+            if let ImportKind::Memory(memory) = &import.kind
+                && memory.shared
+                && memory.limits.max().is_none()
+            {
+                return Err(WasmError::Validation(format!(
+                    "import {}: shared memory {} requires a maximum",
+                    i, import.name
+                )));
             }
         }
         Ok(())

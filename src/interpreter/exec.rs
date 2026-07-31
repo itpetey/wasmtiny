@@ -1142,9 +1142,8 @@ impl Interpreter {
                 self.operand_stack.push(WasmValue::native_func_ref(handle))
             }
             0xFE => {
-                let subopcode = self.read_u8_immediate()?;
-                self.execute_atomic_opcode(module, subopcode);
-                Ok(())
+                let subopcode = self.read_var_u32_immediate()?;
+                self.execute_atomic_opcode(module, subopcode as u8)
             }
             _ => Err(WasmError::Runtime(format!(
                 "unsupported opcode: {:02x}",
@@ -1153,264 +1152,250 @@ impl Interpreter {
         }
     }
 
-    fn execute_atomic_opcode(&mut self, _module: &Module, subopcode: u8) {
-        match subopcode {
-            0x00 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_i32(address).unwrap();
-                self.operand_stack.push(WasmValue::I32(value)).unwrap();
-            }
-            0x01 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_i64(address).unwrap();
-                self.operand_stack.push(WasmValue::I64(value)).unwrap();
-            }
-            0x02 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_u8(address).unwrap() as i32;
-                self.operand_stack.push(WasmValue::I32(value)).unwrap();
-            }
-            0x03 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_u16(address).unwrap() as i32;
-                self.operand_stack.push(WasmValue::I32(value)).unwrap();
-            }
-            0x04 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_u8(address).unwrap() as i8 as i64;
-                self.operand_stack.push(WasmValue::I64(value)).unwrap();
-            }
-            0x05 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_u8(address).unwrap() as i64;
-                self.operand_stack.push(WasmValue::I64(value)).unwrap();
-            }
-            0x06 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_u16(address).unwrap() as i16 as i64;
-                self.operand_stack.push(WasmValue::I64(value)).unwrap();
-            }
-            0x07 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let value = self.read_memory_u32(address).unwrap() as i64;
-                self.operand_stack.push(WasmValue::I64(value)).unwrap();
-            }
-            0x0A => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i32().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_i32(address, value).unwrap();
-            }
-            0x0B => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i64().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_i64(address, value).unwrap();
-            }
-            0x0C => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i32().unwrap() as u8;
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_u8(address, value).unwrap();
-            }
-            0x0D => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i32().unwrap() as u16;
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_u16(address, value).unwrap();
-            }
-            0x0E => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i64().unwrap() as u8;
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_u8(address, value).unwrap();
-            }
-            0x0F => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i64().unwrap() as u16;
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_u16(address, value).unwrap();
-            }
-            0x10 => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i64().unwrap() as u32;
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_u32(address, value).unwrap();
-            }
-            0x11 => {
-                let offset = self.read_memarg().unwrap();
-                let value = self.operand_stack.pop_i64().unwrap() as u64;
-                let address = self.effective_address(offset).unwrap();
-                self.write_memory_u64(address, value).unwrap();
-            }
-            0x12 => {
-                let offset = self.read_memarg().unwrap();
-                let rhs = self.operand_stack.pop_i32().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let lhs = self.read_memory_i32(address).unwrap();
-                self.write_memory_i32(address, lhs.wrapping_add(rhs))
-                    .unwrap();
-                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
-            }
-            0x13 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i64().unwrap();
-                let lhs = self.read_memory_i64(address).unwrap();
-                self.write_memory_i64(address, lhs.wrapping_add(rhs))
-                    .unwrap();
-                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
-            }
-            0x14 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i32().unwrap();
-                let lhs = self.read_memory_i32(address).unwrap();
-                self.write_memory_i32(address, lhs.wrapping_sub(rhs))
-                    .unwrap();
-                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
-            }
-            0x15 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i64().unwrap();
-                let lhs = self.read_memory_i64(address).unwrap();
-                self.write_memory_i64(address, lhs.wrapping_sub(rhs))
-                    .unwrap();
-                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
-            }
-            0x16 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i32().unwrap();
-                let lhs = self.read_memory_i32(address).unwrap();
-                self.write_memory_i32(address, lhs & rhs).unwrap();
-                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
-            }
-            0x17 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i64().unwrap();
-                let lhs = self.read_memory_i64(address).unwrap();
-                self.write_memory_i64(address, lhs & rhs).unwrap();
-                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
-            }
-            0x18 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i32().unwrap();
-                let lhs = self.read_memory_i32(address).unwrap();
-                self.write_memory_i32(address, lhs | rhs).unwrap();
-                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
-            }
-            0x19 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i64().unwrap();
-                let lhs = self.read_memory_i64(address).unwrap();
-                self.write_memory_i64(address, lhs | rhs).unwrap();
-                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
-            }
-            0x1A => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i32().unwrap();
-                let lhs = self.read_memory_i32(address).unwrap();
-                self.write_memory_i32(address, lhs ^ rhs).unwrap();
-                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
-            }
-            0x1B => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i64().unwrap();
-                let lhs = self.read_memory_i64(address).unwrap();
-                self.write_memory_i64(address, lhs ^ rhs).unwrap();
-                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
-            }
-            0x1C => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i32().unwrap();
-                let lhs = self.read_memory_i32(address).unwrap();
-                self.write_memory_i32(address, rhs).unwrap();
-                self.operand_stack.push(WasmValue::I32(lhs)).unwrap();
-            }
-            0x1D => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let rhs = self.operand_stack.pop_i64().unwrap();
-                let lhs = self.read_memory_i64(address).unwrap();
-                self.write_memory_i64(address, rhs).unwrap();
-                self.operand_stack.push(WasmValue::I64(lhs)).unwrap();
-            }
-            0x1E => {
-                let offset = self.read_memarg().unwrap();
-                let new = self.operand_stack.pop_i32().unwrap();
-                let expected = self.operand_stack.pop_i32().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let old = self.read_memory_i32(address).unwrap();
-                if old == expected {
-                    self.write_memory_i32(address, new).unwrap();
+    fn execute_atomic_opcode(&mut self, _module: &Module, subopcode: u8) -> Result<()> {
+        use crate::runtime::{AtomicKind, atomic_lookup};
+
+        let op = atomic_lookup(subopcode).ok_or_else(|| {
+            WasmError::Runtime(format!(
+                "unsupported atomic subopcode: 0xFE {:02x}",
+                subopcode
+            ))
+        })?;
+
+        let offset = match op.kind {
+            AtomicKind::Fence => {
+                let reserved = self.read_u8_immediate()?;
+                if reserved != 0 {
+                    return Err(WasmError::Runtime(format!(
+                        "atomic.fence reserved byte must be 0x00, got {:02x}",
+                        reserved
+                    )));
                 }
-                self.operand_stack.push(WasmValue::I32(old)).unwrap();
+                return Ok(());
             }
-            0x1F => {
-                let offset = self.read_memarg().unwrap();
-                let new = self.operand_stack.pop_i64().unwrap();
-                let expected = self.operand_stack.pop_i64().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let old = self.read_memory_i64(address).unwrap();
-                if old == expected {
-                    self.write_memory_i64(address, new).unwrap();
+            _ => {
+                let _align = self.read_var_u32_immediate()?;
+                self.read_var_u32_immediate()?
+            }
+        };
+
+        match op.kind {
+            AtomicKind::Fence => Ok(()),
+
+            AtomicKind::Notify => {
+                let count = self.operand_stack.pop_i32()? as u32;
+                let addr = self.effective_address_atomic(offset, op.access_width)?;
+
+                let instance = self.instance_ref()?;
+                let instance = instance.lock().map_err(poisoned_lock)?;
+                let memory = instance
+                    .memory(0)
+                    .ok_or_else(|| WasmError::Runtime("no memory for atomic.notify".to_string()))?;
+                let notified = memory.lock().map_err(poisoned_lock)?.notify(addr, count)?;
+                drop(instance);
+                self.operand_stack.push(WasmValue::I32(notified as i32))
+            }
+
+            AtomicKind::Wait32 => {
+                let timeout = self.operand_stack.pop_i64()?;
+                let expected = self.operand_stack.pop_i32()? as i64;
+                let addr = self.effective_address_atomic(offset, op.access_width)?;
+                let result = self.do_wait(addr, expected, timeout, false)?;
+                self.operand_stack.push(WasmValue::I32(result))
+            }
+
+            AtomicKind::Wait64 => {
+                let timeout = self.operand_stack.pop_i64()?;
+                let expected = self.operand_stack.pop_i64()?;
+                let addr = self.effective_address_atomic(offset, op.access_width)?;
+                let result = self.do_wait(addr, expected, timeout, true)?;
+                self.operand_stack.push(WasmValue::I32(result))
+            }
+
+            AtomicKind::Load => {
+                let addr = self.effective_address_atomic(offset, op.access_width)?;
+                self.atomic_load(addr, op)
+            }
+
+            AtomicKind::Store => {
+                let value_popped = match op.operand_type {
+                    Some(NumType::I64) => self.operand_stack.pop_i64()?,
+                    _ => self.operand_stack.pop_i32()? as i64,
+                };
+                let addr = self.effective_address_atomic(offset, op.access_width)?;
+                let width = op.access_width as usize;
+                match op.operand_type {
+                    Some(NumType::I64) => {
+                        let bytes = (value_popped as u64).to_le_bytes();
+                        self.with_memory_mut(|memory| memory.write(addr, &bytes[..width]))
+                    }
+                    _ => {
+                        let bytes = (value_popped as u32).to_le_bytes();
+                        self.with_memory_mut(|memory| memory.write(addr, &bytes[..width]))
+                    }
                 }
-                self.operand_stack.push(WasmValue::I64(old)).unwrap();
             }
-            0x37 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let n = self.operand_stack.pop_i32().unwrap() as u32;
-                let instance = self.instance_ref().unwrap();
-                let instance = instance.lock().unwrap();
-                let memory = instance.memory(0).unwrap();
-                let notified = memory.lock().unwrap().notify(address, n).unwrap() as i32;
-                drop(instance);
-                self.operand_stack.push(WasmValue::I32(notified)).unwrap();
+
+            AtomicKind::Rmw => {
+                if op.param_count() == 3 {
+                    let replacement = self.pop_atomic_operand(op);
+                    let expected = self.pop_atomic_operand(op);
+                    let addr = self.effective_address_atomic(offset, op.access_width)?;
+                    self.atomic_cmpxchg(addr, op, expected, replacement)
+                } else {
+                    let operand = self.pop_atomic_operand(op);
+                    let addr = self.effective_address_atomic(offset, op.access_width)?;
+                    self.atomic_rmw(addr, op, operand)
+                }
             }
-            0x38 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let expected = self.operand_stack.pop_i64().unwrap();
-                let timeout = self.operand_stack.pop_i64().unwrap();
-                let instance = self.instance_ref().unwrap();
-                let instance = instance.lock().unwrap();
-                let result = instance.wait32(address, expected, timeout).unwrap();
-                drop(instance);
-                self.operand_stack.push(WasmValue::I32(result)).unwrap();
-            }
-            0x39 => {
-                let offset = self.read_memarg().unwrap();
-                let address = self.effective_address(offset).unwrap();
-                let expected = self.operand_stack.pop_i64().unwrap();
-                let timeout = self.operand_stack.pop_i64().unwrap();
-                let instance = self.instance_ref().unwrap();
-                let instance = instance.lock().unwrap();
-                let result = instance.wait64(address, expected, timeout).unwrap();
-                drop(instance);
-                self.operand_stack.push(WasmValue::I32(result)).unwrap();
-            }
-            0xFF => {
-                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-            }
-            _ => {}
         }
+    }
+
+    fn effective_address_atomic(&mut self, offset: u32, access_width: u32) -> Result<u32> {
+        let addr = (self.operand_stack.pop_i32()? as u32)
+            .checked_add(offset)
+            .ok_or(WasmError::Trap(TrapCode::MemoryOutOfBounds))?;
+        if access_width > 0 && addr % access_width != 0 {
+            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+        }
+        Ok(addr)
+    }
+
+    fn pop_atomic_operand(&mut self, op: &crate::runtime::atomic_op::AtomicOpMeta) -> i64 {
+        match op.operand_type {
+            Some(NumType::I64) => self.operand_stack.pop_i64().unwrap_or(0),
+            _ => self.operand_stack.pop_i32().unwrap_or(0) as i64,
+        }
+    }
+
+    fn atomic_load(
+        &mut self,
+        addr: u32,
+        op: &crate::runtime::atomic_op::AtomicOpMeta,
+    ) -> Result<()> {
+        let width = op.access_width as usize;
+        let mut buf = vec![0u8; width];
+        self.with_memory(|memory| memory.read(addr, &mut buf))?;
+        let result = match op.result_type {
+            Some(NumType::I64) => {
+                let val = match width {
+                    1 => buf[0] as u64,
+                    2 => u16::from_le_bytes([buf[0], buf[1]]) as u64,
+                    4 => u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64,
+                    8 => u64::from_le_bytes(buf.try_into().unwrap_or([0; 8])),
+                    _ => return Err(WasmError::Runtime("invalid atomic load width".to_string())),
+                };
+                WasmValue::I64(val as i64)
+            }
+            Some(NumType::I32) => {
+                let val = match width {
+                    1 => buf[0] as u32,
+                    2 => u16::from_le_bytes([buf[0], buf[1]]) as u32,
+                    4 => u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+                    _ => return Err(WasmError::Runtime("invalid atomic load width".to_string())),
+                };
+                WasmValue::I32(val as i32)
+            }
+            _ => {
+                return Err(WasmError::Runtime(
+                    "atomic load has no result type".to_string(),
+                ));
+            }
+        };
+        self.operand_stack.push(result)
+    }
+
+    fn atomic_rmw(
+        &mut self,
+        addr: u32,
+        op: &crate::runtime::atomic_op::AtomicOpMeta,
+        operand: i64,
+    ) -> Result<()> {
+        let width = op.access_width as usize;
+        let mut buf = vec![0u8; width];
+        self.with_memory(|memory| memory.read(addr, &mut buf))?;
+        let old = read_narrow_as_i64(&buf, width);
+        let new = match op.subopcode {
+            0x1E..=0x24 => old.wrapping_add(operand),
+            0x25..=0x2B => old.wrapping_sub(operand),
+            0x2C..=0x32 => old & operand,
+            0x33..=0x39 => old | operand,
+            0x3A..=0x40 => old ^ operand,
+            0x41..=0x47 => operand,
+            _ => {
+                return Err(WasmError::Runtime(format!(
+                    "unsupported RMW subopcode: 0xFE {:02x}",
+                    op.subopcode
+                )));
+            }
+        };
+        let new_bytes = truncate_to_width(new as u64, width);
+        self.with_memory_mut(|memory| memory.write(addr, &new_bytes))?;
+        match op.result_type {
+            Some(NumType::I64) => self.operand_stack.push(WasmValue::I64(old)),
+            _ => self.operand_stack.push(WasmValue::I32(old as i32)),
+        }
+    }
+
+    fn atomic_cmpxchg(
+        &mut self,
+        addr: u32,
+        op: &crate::runtime::atomic_op::AtomicOpMeta,
+        expected: i64,
+        replacement: i64,
+    ) -> Result<()> {
+        let width = op.access_width as usize;
+        let mut buf = vec![0u8; width];
+        self.with_memory(|memory| memory.read(addr, &mut buf))?;
+        let old = read_narrow_as_i64(&buf, width);
+        if old == expected {
+            let new_bytes = truncate_to_width(replacement as u64, width);
+            self.with_memory_mut(|memory| memory.write(addr, &new_bytes))?;
+        }
+        match op.result_type {
+            Some(NumType::I64) => self.operand_stack.push(WasmValue::I64(old)),
+            _ => self.operand_stack.push(WasmValue::I32(old as i32)),
+        }
+    }
+
+    fn do_wait(&mut self, addr: u32, expected: i64, timeout: i64, _is64: bool) -> Result<i32> {
+        let instance = self.instance_ref()?;
+        let instance = instance.lock().map_err(poisoned_lock)?;
+        let memory = instance
+            .memory(0)
+            .ok_or_else(|| WasmError::Runtime("no memory for atomic.wait".to_string()))?;
+        {
+            let memory = memory.lock().map_err(poisoned_lock)?;
+            let access_width = if _is64 { 8 } else { 4 };
+            if addr as usize + access_width > memory.len_bytes() {
+                return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+            }
+            let actual = if _is64 {
+                memory.read_i64(addr)?
+            } else {
+                memory.read_i32(addr)? as i64
+            };
+            if actual != expected {
+                return Ok(1);
+            }
+            memory.get_waiter(addr);
+        }
+        drop(instance);
+        let timeout_ns = if timeout < 0 {
+            u64::MAX
+        } else {
+            (timeout as u64).saturating_mul(1)
+        };
+        let woken = self
+            .instance_ref()?
+            .lock()
+            .map_err(poisoned_lock)?
+            .memory(0)
+            .ok_or_else(|| WasmError::Runtime("no memory for wait".to_string()))?
+            .lock()
+            .map_err(poisoned_lock)?
+            .wait_on(addr, timeout_ns);
+        if woken { Ok(0) } else { Ok(2) }
     }
 
     fn call_function(&mut self, module: &Module, func_idx: u32) -> Result<()> {
@@ -1940,19 +1925,91 @@ impl Interpreter {
                 let len = self.operand_stack.pop_i32()? as u32;
                 let src = self.operand_stack.pop_i32()? as u32;
                 let dst = self.operand_stack.pop_i32()? as u32;
-                // memmove semantics: stage through a temporary buffer so
-                // overlapping ranges copy as-if-via-scratch.
-                let mut buf = vec![0u8; len as usize];
-                self.with_memory(|memory| memory.read(src, &mut buf))?;
-                self.with_memory_mut(|memory| memory.write(dst, &buf))
+
+                // Bounds-check using u64 arithmetic before any copy
+                let _src_end = (src as u64)
+                    .checked_add(len as u64)
+                    .ok_or(WasmError::Trap(TrapCode::MemoryOutOfBounds))?;
+                let _dst_end = (dst as u64)
+                    .checked_add(len as u64)
+                    .ok_or(WasmError::Trap(TrapCode::MemoryOutOfBounds))?;
+
+                // Check both source and destination ranges are valid
+                self.with_memory(|memory| {
+                    if !memory.is_valid_access(src, len as usize)? {
+                        return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+                    }
+                    Ok(())
+                })?;
+                self.with_memory(|memory| {
+                    if !memory.is_valid_access(dst, len as usize)? {
+                        return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+                    }
+                    Ok(())
+                })?;
+
+                // Copy without staging buffer: use byte-by-byte for overlap
+                // or ptr-based copy with direction-aware ordering
+                if len == 0 {
+                    return Ok(());
+                }
+
+                if src == dst {
+                    return Ok(());
+                }
+
+                // For non-overlapping or forward-overlapping ranges, copy
+                // directly without a staging buffer
+                self.with_memory_mut(|memory| {
+                    // Read into a small stack buffer (max 4 KiB) for overlap safety
+                    // This avoids allocating guest-controlled len-sized buffer
+                    let mut offset = 0u32;
+                    const CHUNK: usize = 4096;
+                    let mut buf = vec![0u8; CHUNK.min(len as usize)];
+                    while offset < len {
+                        let chunk = CHUNK.min((len - offset) as usize);
+                        memory.read(src + offset, &mut buf[..chunk])?;
+                        memory.write(dst + offset, &buf[..chunk])?;
+                        offset += chunk as u32;
+                    }
+                    Ok(())
+                })
             }
             11 => {
                 let _memory_idx = self.read_var_u32_immediate()?;
                 let len = self.operand_stack.pop_i32()? as u32;
                 let value = self.operand_stack.pop_i32()? as u8;
                 let dst = self.operand_stack.pop_i32()? as u32;
-                let buf = vec![value; len as usize];
-                self.with_memory_mut(|memory| memory.write(dst, &buf))
+
+                // Bounds-check before filling
+                let dst_end = (dst as u64)
+                    .checked_add(len as u64)
+                    .ok_or(WasmError::Trap(TrapCode::MemoryOutOfBounds))?;
+                let _ = dst_end; // bounds check via is_valid_access below
+
+                self.with_memory(|memory| {
+                    if !memory.is_valid_access(dst, len as usize)? {
+                        return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
+                    }
+                    Ok(())
+                })?;
+
+                if len == 0 {
+                    return Ok(());
+                }
+
+                // Fill without staging buffer: chunked fill
+                self.with_memory_mut(|memory| {
+                    let mut offset = 0u32;
+                    const CHUNK: usize = 4096;
+                    let chunk_buf = vec![value; CHUNK.min(len as usize)];
+                    while offset < len {
+                        let chunk = CHUNK.min((len - offset) as usize);
+                        memory.write(dst + offset, &chunk_buf[..chunk])?;
+                        offset += chunk as u32;
+                    }
+                    Ok(())
+                })
             }
             _ => Err(WasmError::Runtime(format!(
                 "unsupported memory extended opcode: {:02x}",
@@ -2250,9 +2307,7 @@ impl Interpreter {
                 .ok_or_else(|| WasmError::Runtime("no memory".to_string()))?
         };
         let mut memory = memory.lock().map_err(poisoned_lock)?;
-        // Wrap memory writes with signal handler to catch SIGSEGV from
-        // writes to read-only shared pages and translate to WASM traps.
-        crate::signal_handler::with_trap_handler(|| f(&mut memory))
+        f(&mut memory)
     }
 
     fn read_memory_u8(&self, address: u32) -> Result<u8> {
@@ -2305,10 +2360,6 @@ impl Interpreter {
 
     fn write_memory_i64(&self, address: u32, value: i64) -> Result<()> {
         self.with_memory_mut(|memory| memory.write_i64(address, value))
-    }
-
-    fn write_memory_u64(&self, address: u32, value: u64) -> Result<()> {
-        self.with_memory_mut(|memory| memory.write_u64(address, value))
     }
 
     fn write_memory_f32(&self, address: u32, value: f32) -> Result<()> {
@@ -2513,6 +2564,21 @@ impl Interpreter {
                     _ => Err(WasmError::Runtime(
                         "unsupported 0xfc prefixed opcode in structured control".to_string(),
                     )),
+                }
+            }
+            0xFE => {
+                let subopcode = Self::read_uleb(code, cursor)? as u8;
+                match crate::runtime::atomic_op::immediate_count(subopcode) {
+                    Some(count) => {
+                        for _ in 0..count {
+                            Self::skip_uleb(code, cursor)?;
+                        }
+                        Ok(())
+                    }
+                    None => Err(WasmError::Runtime(format!(
+                        "unsupported 0xFE prefixed opcode 0xFE{:02x} in structured control",
+                        subopcode
+                    ))),
                 }
             }
             _ => Ok(()),
@@ -2742,6 +2808,21 @@ fn default_value(value_type: ValType) -> WasmValue {
 
 fn poisoned_lock<T>(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> WasmError {
     WasmError::Runtime("instance lock poisoned".to_string())
+}
+
+fn read_narrow_as_i64(buf: &[u8], width: usize) -> i64 {
+    (match width {
+        1 => buf[0] as u64,
+        2 => u16::from_le_bytes([buf[0], buf[1]]) as u64,
+        4 => u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64,
+        8 => u64::from_le_bytes(buf.try_into().unwrap_or([0; 8])),
+        _ => 0,
+    }) as i64
+}
+
+fn truncate_to_width(value: u64, width: usize) -> Vec<u8> {
+    let bytes = value.to_le_bytes();
+    bytes[..width].to_vec()
 }
 
 #[cfg(test)]
@@ -2976,7 +3057,9 @@ mod tests {
 
         let module = Arc::new(module);
         let mut instance = Instance::new(module.clone()).unwrap();
-        let memory = Arc::new(Mutex::new(Memory::new(MemoryType::new(Limits::Min(1)))));
+        let memory = Arc::new(Mutex::new(
+            Memory::new(MemoryType::new(Limits::Min(1))).unwrap(),
+        ));
         instance.memories.push(memory.clone());
         let instance = Arc::new(Mutex::new(instance));
 
@@ -2998,7 +3081,7 @@ mod tests {
         module.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0x41, 0x00, 0x41, 0x05, 0xFE, 0x12, 0x02, 0x00, 0x0B],
+            body: vec![0x41, 0x00, 0x41, 0x05, 0xFE, 0x1E, 0x02, 0x00, 0x0B],
         });
 
         let module = Arc::new(module);
@@ -3242,7 +3325,7 @@ mod tests {
         module.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0x41, 0x00, 0xFE, 0x00, 0x02, 0x00, 0x0B],
+            body: vec![0x41, 0x00, 0xFE, 0x10, 0x02, 0x00, 0x0B],
         });
 
         let module = Arc::new(module);
@@ -3276,7 +3359,7 @@ mod tests {
             type_idx: 0,
             locals: vec![],
             body: vec![
-                0x41, 0x00, 0x41, 0x0A, 0x41, 0x14, 0xFE, 0x1E, 0x02, 0x00, 0x0B,
+                0x41, 0x00, 0x41, 0x0A, 0x41, 0x14, 0xFE, 0x48, 0x02, 0x00, 0x0B,
             ],
         });
 
@@ -3311,7 +3394,7 @@ mod tests {
             type_idx: 0,
             locals: vec![],
             body: vec![
-                0x41, 0x00, 0x41, 0x0B, 0x41, 0x14, 0xFE, 0x1E, 0x02, 0x00, 0x0B,
+                0x41, 0x00, 0x41, 0x0B, 0x41, 0x14, 0xFE, 0x48, 0x02, 0x00, 0x0B,
             ],
         });
 

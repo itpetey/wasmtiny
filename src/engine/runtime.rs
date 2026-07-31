@@ -46,6 +46,9 @@ pub struct LoadedModule {
     custom_memories: bool,
     custom_tables: bool,
     custom_globals: bool,
+    /// Cached instance reused across `invoke_function` calls to avoid
+    /// per-call module cloning and instance rebuild.
+    cached_instance: Option<Arc<Mutex<Instance>>>,
     /// Defined memories shared with every instance created from this module.
     ///
     /// The same `SharedMemory` is installed into each per-invocation
@@ -120,14 +123,17 @@ impl LoadedModule {
             custom_memories: false,
             custom_tables: false,
             custom_globals: false,
+            cached_instance: None,
             memories: Vec::new(),
             tables: Vec::new(),
             globals: Vec::new(),
             attached_regions: Vec::new(),
             exports: HashMap::new(),
         };
-        aot_module.initialise_defined_allocations();
-        aot_module.initialisation_error = aot_module.initialise_globals_without_imports().err();
+        aot_module.initialisation_error = aot_module
+            .initialise_defined_allocations()
+            .err()
+            .or_else(|| aot_module.initialise_globals_without_imports().err());
         aot_module
     }
 
@@ -154,66 +160,61 @@ impl LoadedModule {
     /// Invokes function.
     pub fn invoke_function(&mut self, idx: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>> {
         self.ensure_initialised()?;
-        let (imported_memories, imported_tables, imported_globals) = self.import_counts();
+
         let imported_funcs = self
             .module
             .imports
             .iter()
             .filter(|import| matches!(import.kind, ImportKind::Func(_)))
             .count() as u32;
-        let imports = self.ordered_imports();
-        let instance: Arc<Mutex<Instance>> =
-            Arc::new(Mutex::new(Instance::with_imports_and_store(
-                Arc::new(self.module.clone()),
-                &imports,
-                self.store.clone(),
-            )?));
-        {
-            let mut instance_guard = instance.lock().map_err(poisoned_lock)?;
-            for (offset, memory) in self.memories.iter().cloned().enumerate() {
-                let target = imported_memories + offset;
-                if target >= instance_guard.memories.len() {
-                    instance_guard.memories.push(memory);
-                } else {
-                    instance_guard.memories[target] = memory;
-                }
-            }
-            for (offset, table) in self.tables.iter().cloned().enumerate() {
-                let target = imported_tables + offset;
-                if target >= instance_guard.tables.len() {
-                    instance_guard.tables.push(table);
-                } else {
-                    instance_guard.tables[target] = table;
-                }
-            }
-            for (offset, global) in self.globals.iter().cloned().enumerate() {
-                let target = imported_globals + offset;
-                if target >= instance_guard.globals.len() {
-                    instance_guard.globals.push(Arc::new(Mutex::new(global)));
-                } else {
-                    instance_guard.globals[target] = Arc::new(Mutex::new(global));
-                }
-            }
-        }
 
-        let result = if idx < imported_funcs {
+        // Reuse the cached instance if available; otherwise build one.
+        let instance = if let Some(ref cached) = self.cached_instance {
+            cached.clone()
+        } else {
+            let (imported_memories, imported_tables, imported_globals) = self.import_counts();
+            let imports = self.ordered_imports();
+            let instance: Arc<Mutex<Instance>> =
+                Arc::new(Mutex::new(Instance::with_imports_and_store(
+                    Arc::new(self.module.clone()),
+                    &imports,
+                    self.store.clone(),
+                )?));
+            {
+                let mut instance_guard = instance.lock().map_err(poisoned_lock)?;
+                for (offset, memory) in self.memories.iter().cloned().enumerate() {
+                    let target = imported_memories + offset;
+                    if target >= instance_guard.memories.len() {
+                        instance_guard.memories.push(memory);
+                    } else {
+                        instance_guard.memories[target] = memory;
+                    }
+                }
+                for (offset, table) in self.tables.iter().cloned().enumerate() {
+                    let target = imported_tables + offset;
+                    if target >= instance_guard.tables.len() {
+                        instance_guard.tables.push(table);
+                    } else {
+                        instance_guard.tables[target] = table;
+                    }
+                }
+                for (offset, global) in self.globals.iter().cloned().enumerate() {
+                    let target = imported_globals + offset;
+                    if target >= instance_guard.globals.len() {
+                        instance_guard.globals.push(Arc::new(Mutex::new(global)));
+                    } else {
+                        instance_guard.globals[target] = Arc::new(Mutex::new(global));
+                    }
+                }
+            }
+            instance
+        };
+
+        if idx < imported_funcs {
             instance.lock().map_err(poisoned_lock)?.call(idx, args)
         } else {
             let mut interpreter = Interpreter::with_instance(instance.clone());
             interpreter.execute_function(&self.module, idx, args)
-        };
-
-        let sync_result = self.sync_defined_state_from_instance(
-            &instance,
-            imported_memories,
-            imported_tables,
-            imported_globals,
-        );
-
-        match (result, sync_result) {
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Ok(results), Ok(())) => Ok(results),
         }
     }
 
@@ -612,7 +613,8 @@ impl LoadedModule {
                 .ok_or_else(|| WasmError::Runtime("memory not found".to_string()))?;
             return match memory.lock().map_err(poisoned_lock)?.grow(delta) {
                 Ok(old_size) => Ok(old_size as i32),
-                Err(WasmError::Runtime(_)) => Ok(-1),
+                Err(WasmError::Runtime(_))
+                | Err(WasmError::Trap(crate::runtime::TrapCode::MemoryLimitExceeded)) => Ok(-1),
                 Err(error) => Err(error),
             };
         }
@@ -627,7 +629,8 @@ impl LoadedModule {
             .grow(delta)
         {
             Ok(old_size) => Ok(old_size as i32),
-            Err(WasmError::Runtime(_)) => Ok(-1),
+            Err(WasmError::Runtime(_))
+            | Err(WasmError::Trap(crate::runtime::TrapCode::MemoryLimitExceeded)) => Ok(-1),
             Err(error) => Err(error),
         }
     }
@@ -687,13 +690,12 @@ impl LoadedModule {
         self.imports.iter().all(Option::is_some)
     }
 
-    fn initialise_defined_allocations(&mut self) {
+    fn initialise_defined_allocations(&mut self) -> Result<()> {
         if self.memories.is_empty() {
-            self.memories.extend(
-                self.module.memories.iter().cloned().map(|memory_type| {
-                    Arc::new(Mutex::new(crate::memory::Memory::new(memory_type)))
-                }),
-            );
+            for memory_type in self.module.memories.iter().cloned() {
+                let memory = crate::memory::Memory::new(memory_type)?;
+                self.memories.push(Arc::new(Mutex::new(memory)));
+            }
         }
         if self.tables.is_empty() {
             self.tables.extend(
@@ -705,6 +707,7 @@ impl LoadedModule {
                     .map(|table| Arc::new(Mutex::new(table))),
             );
         }
+        Ok(())
     }
 
     fn initialise_globals_without_imports(&mut self) -> Result<()> {
@@ -748,11 +751,8 @@ impl LoadedModule {
             &imports,
             self.store.clone(),
         )?;
-        let instance = instance;
 
         if !self.custom_memories {
-            // Share (rather than deep-copy) the defined memories so that
-            // growth and shared-region mappings persist across invocations.
             self.memories = instance
                 .memories
                 .iter()
@@ -782,42 +782,37 @@ impl LoadedModule {
                 .collect::<Result<Vec<_>>>()?;
         }
 
-        Ok(())
-    }
-
-    fn sync_defined_state_from_instance(
-        &mut self,
-        instance: &Arc<Mutex<Instance>>,
-        imported_memories: usize,
-        imported_tables: usize,
-        imported_globals: usize,
-    ) -> Result<()> {
-        let instance_guard = instance.lock().map_err(poisoned_lock)?;
-        // The instance shares this module's `SharedMemory` handles, so the
-        // sync only needs to adopt the same handles (no deep copy).
-        self.memories = instance_guard
-            .memories
-            .iter()
-            .skip(imported_memories)
-            .cloned()
-            .collect();
-        self.tables = instance_guard
-            .tables
-            .iter()
-            .skip(imported_tables)
-            .cloned()
-            .collect();
-        self.globals = instance_guard
-            .globals
-            .iter()
-            .skip(imported_globals)
-            .map(|global| {
-                global
-                    .lock()
-                    .map_err(poisoned_lock)
-                    .map(|global| global.clone())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // Cache the instance for reuse across invoke_function calls.
+        // Install the defined memories/tables/globals into it.
+        let instance = Arc::new(Mutex::new(instance));
+        {
+            let mut guard = instance.lock().map_err(poisoned_lock)?;
+            for (offset, memory) in self.memories.iter().cloned().enumerate() {
+                let target = imported_memories + offset;
+                if target >= guard.memories.len() {
+                    guard.memories.push(memory);
+                } else {
+                    guard.memories[target] = memory;
+                }
+            }
+            for (offset, table) in self.tables.iter().cloned().enumerate() {
+                let target = imported_tables + offset;
+                if target >= guard.tables.len() {
+                    guard.tables.push(table);
+                } else {
+                    guard.tables[target] = table;
+                }
+            }
+            for (offset, global) in self.globals.iter().cloned().enumerate() {
+                let target = imported_globals + offset;
+                if target >= guard.globals.len() {
+                    guard.globals.push(Arc::new(Mutex::new(global)));
+                } else {
+                    guard.globals[target] = Arc::new(Mutex::new(global));
+                }
+            }
+        }
+        self.cached_instance = Some(instance);
 
         Ok(())
     }
@@ -1507,7 +1502,7 @@ mod tests {
         {
             let aot_module = runtime.get_module_mut(module_idx).unwrap();
             let mem_type = crate::runtime::MemoryType::new(crate::runtime::Limits::Min(1));
-            let memory = crate::memory::Memory::new(mem_type);
+            let memory = crate::memory::Memory::new(mem_type).unwrap();
             aot_module.set_memory(memory);
         }
 
@@ -1529,7 +1524,8 @@ mod tests {
         let mut aot_module = LoadedModule::from_module(&module);
         let mut memory = crate::memory::Memory::new(crate::runtime::MemoryType::new(
             crate::runtime::Limits::Min(1),
-        ));
+        ))
+        .unwrap();
         memory.grow(1).unwrap();
         aot_module
             .register_memory_import("env", "memory", memory)
@@ -1708,7 +1704,8 @@ mod tests {
                 "memory",
                 crate::memory::Memory::new(crate::runtime::MemoryType::new(
                     crate::runtime::Limits::Min(1),
-                )),
+                ))
+                .unwrap(),
             )
             .unwrap();
         aot_module
@@ -1829,10 +1826,12 @@ mod tests {
         let mut aot_module = LoadedModule::from_module(&module);
         let first = crate::memory::Memory::new(crate::runtime::MemoryType::new(
             crate::runtime::Limits::Min(1),
-        ));
+        ))
+        .unwrap();
         let mut second = crate::memory::Memory::new(crate::runtime::MemoryType::new(
             crate::runtime::Limits::Min(1),
-        ));
+        ))
+        .unwrap();
         second.write_u8(1, 5).unwrap();
         aot_module.memories = vec![
             std::sync::Arc::new(std::sync::Mutex::new(first)),
@@ -2002,7 +2001,8 @@ mod tests {
             "memory",
             crate::memory::Memory::new(crate::runtime::MemoryType::new(
                 crate::runtime::Limits::Min(1),
-            )),
+            ))
+            .unwrap(),
         );
         assert!(result.is_err());
     }
@@ -2024,7 +2024,8 @@ mod tests {
             "memory",
             crate::memory::Memory::new(crate::runtime::MemoryType::new(
                 crate::runtime::Limits::MinMax(1, 3),
-            )),
+            ))
+            .unwrap(),
         );
         assert!(result.is_err());
     }
@@ -2056,7 +2057,8 @@ mod tests {
                     "memory",
                     crate::memory::Memory::new(crate::runtime::MemoryType::new(
                         crate::runtime::Limits::MinMax(2, 3),
-                    )),
+                    ))
+                    .unwrap(),
                 )
                 .is_ok()
         );

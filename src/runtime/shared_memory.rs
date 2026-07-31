@@ -77,6 +77,9 @@ impl SharedRegionId {
     }
 }
 
+/// Maximum shared region size (1 GiB).
+const MAX_REGION_SIZE: u32 = 1 << 30;
+
 impl SharedRegion {
     /// Creates a new shared region backed by `shm_open` + `mmap(MAP_SHARED)`.
     ///
@@ -89,12 +92,25 @@ impl SharedRegion {
                 "shared region size must be greater than zero".to_string(),
             ));
         }
+        if size > MAX_REGION_SIZE {
+            return Err(WasmError::Runtime(format!(
+                "shared region size {} exceeds maximum {}",
+                size, MAX_REGION_SIZE
+            )));
+        }
 
         let len = size as usize;
 
-        // Generate a unique name for the POSIX shared memory object.
+        // Generate a unique name incorporating PID and entropy for
+        // cross-process uniqueness. POSIX shm names are limited in length
+        // (e.g. 31 chars on macOS), so use a short prefix + hash.
         let id = NEXT_SHM_ID.fetch_add(1, Ordering::Relaxed);
-        let name = format!("/wasmtiny_shm_{}", id);
+        let pid = std::process::id();
+        let entropy = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let name = format!("/wt_{}_{}_{}", pid, id, entropy);
         let c_name = CString::new(name.as_bytes())
             .map_err(|_| WasmError::Runtime("failed to create shm name".to_string()))?;
 
@@ -268,9 +284,14 @@ impl SharedMemoryRegistry {
             ));
         }
 
-        // Round up to page boundary
+        // Overflow-safe page-aligned size
         let page_size = PAGE_SIZE_BYTES;
-        let aligned_size = size.div_ceil(page_size) * page_size;
+        let aligned_size = size
+            .div_ceil(page_size)
+            .checked_mul(page_size)
+            .ok_or_else(|| {
+                WasmError::Runtime("shared region size overflow during alignment".to_string())
+            })?;
 
         let region = SharedRegion::new(aligned_size)?;
         let region_id = SharedRegionId(self.next_region_id);
@@ -302,7 +323,12 @@ impl SharedMemoryRegistry {
         }
 
         let page_size = PAGE_SIZE_BYTES;
-        let aligned_size = size.div_ceil(page_size) * page_size;
+        let aligned_size = size
+            .div_ceil(page_size)
+            .checked_mul(page_size)
+            .ok_or_else(|| {
+                WasmError::Runtime("shared region size overflow during alignment".to_string())
+            })?;
 
         let region = SharedRegion::new(aligned_size)?;
         let region_id = SharedRegionId(self.next_region_id);
@@ -395,7 +421,10 @@ impl SharedMemoryRegistry {
         data: &[u8],
     ) -> Result<()> {
         let region = self.region(region_id)?;
-        if offset + data.len() > region.len() {
+        let end = offset.checked_add(data.len()).ok_or_else(|| {
+            WasmError::Runtime("shared region write offset+length overflow".to_string())
+        })?;
+        if end > region.len() {
             return Err(WasmError::Runtime(
                 "shared region write out of bounds".to_string(),
             ));
@@ -417,7 +446,10 @@ impl SharedMemoryRegistry {
         buf: &mut [u8],
     ) -> Result<()> {
         let region = self.region(region_id)?;
-        if offset + buf.len() > region.len() {
+        let end = offset.checked_add(buf.len()).ok_or_else(|| {
+            WasmError::Runtime("shared region read offset+length overflow".to_string())
+        })?;
+        if end > region.len() {
             return Err(WasmError::Runtime(
                 "shared region read out of bounds".to_string(),
             ));

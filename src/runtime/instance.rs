@@ -862,7 +862,9 @@ impl Instance {
 
         match memory.lock().map_err(poisoned_lock)?.grow(delta) {
             Ok(old_size) => Ok(old_size as i32),
-            Err(WasmError::Runtime(_)) => Ok(-1),
+            Err(WasmError::Runtime(_)) | Err(WasmError::Trap(TrapCode::MemoryLimitExceeded)) => {
+                Ok(-1)
+            }
             Err(error) => Err(error),
         }
     }
@@ -877,10 +879,7 @@ impl Instance {
 
         let memory = memory.lock().map_err(poisoned_lock)?;
 
-        if address as usize + 4 > memory.len_bytes() {
-            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
-        }
-
+        // read_i32 uses ptr_at which checks owned OR shared ranges
         let actual = memory.read_i32(address)? as i64;
         if actual != expected {
             return Ok(1);
@@ -889,10 +888,11 @@ impl Instance {
         memory.get_waiter(address);
         drop(memory);
 
+        // Nanosecond timeout: negative means wait forever
         let timeout_ns = if timeout < 0 {
             u64::MAX
         } else {
-            (timeout as u64) * 1_000_000
+            (timeout as u64).saturating_mul(1)
         };
 
         let woken = self
@@ -915,10 +915,7 @@ impl Instance {
 
         let memory = memory.lock().map_err(poisoned_lock)?;
 
-        if address as usize + 8 > memory.len_bytes() {
-            return Err(WasmError::Trap(TrapCode::MemoryOutOfBounds));
-        }
-
+        // read_i64 uses ptr_at which checks owned OR shared ranges
         let actual = memory.read_i64(address)?;
         if actual != expected {
             return Ok(1);
@@ -927,10 +924,11 @@ impl Instance {
         memory.get_waiter(address);
         drop(memory);
 
+        // Nanosecond timeout: negative means wait forever
         let timeout_ns = if timeout < 0 {
             u64::MAX
         } else {
-            (timeout as u64) * 1_000_000
+            (timeout as u64).saturating_mul(1)
         };
 
         let woken = self
@@ -1570,7 +1568,9 @@ mod tests {
             )),
         });
 
-        let memory = Arc::new(Mutex::new(Memory::new(MemoryType::new(Limits::Min(1)))));
+        let memory = Arc::new(Mutex::new(
+            Memory::new(MemoryType::new(Limits::Min(1))).unwrap(),
+        ));
         let table = Arc::new(Mutex::new(Table::new(TableType::new(
             RefType::FuncRef,
             Limits::Min(1),
@@ -1707,9 +1707,9 @@ mod tests {
             kind: ImportKind::Table(TableType::new(RefType::FuncRef, Limits::MinMax(1, 4))),
         });
 
-        let memory = Arc::new(Mutex::new(Memory::new(MemoryType::new(Limits::MinMax(
-            2, 3,
-        )))));
+        let memory = Arc::new(Mutex::new(
+            Memory::new(MemoryType::new(Limits::MinMax(2, 3))).unwrap(),
+        ));
         let table = Arc::new(Mutex::new(Table::new(TableType::new(
             RefType::FuncRef,
             Limits::MinMax(2, 3),
@@ -2113,8 +2113,8 @@ mod tests {
             mem.notify(shared_addr, 1).unwrap();
         });
 
-        // Wait on the shared address (should be woken by the notify)
-        let result = instance1.wait32(shared_addr, 42, 1000).unwrap();
+        // Wait on the shared address with 1-second nanosecond timeout
+        let result = instance1.wait32(shared_addr, 42, 1_000_000_000).unwrap();
 
         // Result should be 0 (woken) not 2 (timeout)
         assert_eq!(result, 0, "wait32 should have been woken by notify");

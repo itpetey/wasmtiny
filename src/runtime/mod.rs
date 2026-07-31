@@ -17,6 +17,7 @@
 pub(crate) use shared_memory::SharedWaiter;
 
 pub use crate::memory::Memory;
+pub use atomic_op::{ATOMIC_OPS, AtomicKind, AtomicOpMeta, lookup as atomic_lookup};
 pub use error::{Result, TrapCode, WasmError};
 pub use export::{ExportKind, ExportType};
 pub use import::{Import, ImportKind};
@@ -32,6 +33,7 @@ pub use types::{
 pub use types::{Global, Table};
 pub use values::WasmValue;
 
+pub mod atomic_op;
 mod error;
 mod export;
 mod import;

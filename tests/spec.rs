@@ -850,7 +850,7 @@ fn spectest_global(name: &str, global_type: &GlobalType) -> Result<Global, Strin
 }
 
 fn spectest_memory(_required: &MemoryType) -> Memory {
-    Memory::new(MemoryType::new(Limits::MinMax(1, 2)))
+    Memory::new(MemoryType::new(Limits::MinMax(1, 2))).unwrap()
 }
 
 fn spectest_table(required: &TableType) -> Table {
