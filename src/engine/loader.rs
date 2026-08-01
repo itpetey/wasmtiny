@@ -87,6 +87,7 @@ impl EngineLoader {
                 crate::runtime::ExportKind::Table(idx) => Export::Table(*idx),
                 crate::runtime::ExportKind::Memory(idx) => Export::Memory(*idx),
                 crate::runtime::ExportKind::Global(idx) => Export::Global(*idx),
+                crate::runtime::ExportKind::Tag(_) => continue,
             };
             aot_module.exports.insert(export.name.clone(), export_idx);
         }

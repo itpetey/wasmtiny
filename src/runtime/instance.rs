@@ -519,6 +519,7 @@ impl Instance {
                 ExportKind::Global(idx) => {
                     self.globals.get(idx as usize).cloned().map(Extern::Global)
                 }
+                ExportKind::Tag(_) => None,
             };
 
             if let Some(extern_) = extern_ {

@@ -10,6 +10,8 @@ pub enum ExportKind {
     Memory(u32),
     /// A global export (index into global section).
     Global(u32),
+    /// A tag export (index into tag section).
+    Tag(u32),
 }
 
 /// Export type descriptor.

@@ -107,11 +107,7 @@ impl Parser {
                 10 => self.parse_code(&mut section_reader, &mut module)?,
                 11 => self.parse_data(&mut section_reader, &mut module)?,
                 12 => self.parse_data_count(&mut section_reader, &mut module)?,
-                13 => {
-                    return Err(WasmError::Load(
-                        "tag sections are not supported".to_string(),
-                    ));
-                }
+                13 => self.parse_tag(&mut section_reader, &mut module)?,
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown section id: {}",
@@ -152,20 +148,34 @@ impl Parser {
         Ok(())
     }
 
+    fn parse_tag(
+        &self,
+        reader: &mut BinaryReader<Cursor<&[u8]>>,
+        _module: &mut Module,
+    ) -> Result<()> {
+        let count = reader.read_uleb128()?;
+        for _ in 0..count {
+            let _attribute = reader.read_u8()?;
+            let _type_idx = reader.read_uleb128()?;
+        }
+        Ok(())
+    }
+
     fn section_order(section_id: u8) -> Option<u8> {
         Some(match section_id {
-            1 => 1,
-            2 => 2,
-            3 => 3,
-            4 => 5,
-            5 => 6,
-            6 => 7,
-            7 => 8,
-            8 => 9,
-            9 => 10,
-            10 => 11,
-            11 => 12,
-            12 => 13, // DataCount
+            1 => 1,   // Type
+            2 => 2,   // Import
+            3 => 3,   // Function
+            13 => 4,  // Tag (wast crate places between Function and Table)
+            4 => 5,   // Table
+            5 => 6,   // Memory
+            6 => 7,   // Global
+            7 => 8,   // Export
+            8 => 9,   // Start
+            9 => 10,  // Elem
+            12 => 11, // DataCount (before Code)
+            10 => 12, // Code
+            11 => 13, // Data
             _ => return None,
         })
     }
@@ -245,11 +255,16 @@ impl Parser {
                     memory_type.shared = shared;
                     ImportKind::Memory(memory_type)
                 }
-                0x03 => {
-                    let content_type = self.read_val_type(reader)?;
-                    let mutable = self.read_mutability(reader)?;
-                    ImportKind::Global(GlobalType::new(content_type, mutable))
-                }
+            0x03 => {
+                let content_type = self.read_val_type(reader)?;
+                let mutable = self.read_mutability(reader)?;
+                ImportKind::Global(GlobalType::new(content_type, mutable))
+            }
+            0x04 => {
+                let attribute = reader.read_u8()?;
+                let type_idx = reader.read_uleb128()?;
+                ImportKind::Tag(attribute, type_idx)
+            }
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown import kind: {}",
@@ -438,6 +453,7 @@ impl Parser {
                 0x01 => ExportKind::Table(idx),
                 0x02 => ExportKind::Memory(idx),
                 0x03 => ExportKind::Global(idx),
+                0x04 => ExportKind::Tag(idx),
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown export kind: {}",
@@ -705,6 +721,9 @@ impl Parser {
         match reader.read_sleb128_i64()? {
             -0x10 | -0x14 => Ok(RefType::FuncRef),
             -0x11 | -0x13 => Ok(RefType::ExternRef),
+            // Positive heap type indices reference concrete types (e.g. (ref null $t)).
+            // They are sub-types of funcref; treat them as funcref for the runtime.
+            heap_type if heap_type >= 0 => Ok(RefType::FuncRef),
             heap_type => Err(WasmError::Load(format!(
                 "GC heap types are not supported: {}",
                 heap_type

@@ -10,6 +10,8 @@ pub enum ImportKind {
     Memory(crate::runtime::MemoryType),
     /// A global import (global type).
     Global(crate::runtime::GlobalType),
+    /// A tag import (attribute, type index).
+    Tag(u8, u32),
 }
 
 /// Import descriptor from the WebAssembly module.

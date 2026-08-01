@@ -517,6 +517,19 @@ impl LoadedModule {
         }
     }
 
+    /// Returns a shared memory binding by index.
+    pub fn memory_binding(&self, idx: u32) -> Option<SharedMemory> {
+        if self.ensure_initialised().is_err() {
+            return None;
+        }
+        let imported_memories = self.import_counts().0 as u32;
+        if idx < imported_memories {
+            self.imported_memory(idx)
+        } else {
+            self.memories.get((idx - imported_memories) as usize).cloned()
+        }
+    }
+
     /// Replaces the table at the given index.
     pub fn set_table(&mut self, idx: u32, table: Table) -> Result<()> {
         self.ensure_initialised()?;
@@ -683,6 +696,7 @@ impl LoadedModule {
                 crate::runtime::ImportKind::Table(_) => tables += 1,
                 crate::runtime::ImportKind::Global(_) => globals += 1,
                 crate::runtime::ImportKind::Func(_) => {}
+                crate::runtime::ImportKind::Tag(..) => {}
             }
         }
         (memories, tables, globals)

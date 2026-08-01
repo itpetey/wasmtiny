@@ -390,31 +390,22 @@ impl Validator {
                     }
                     type_stack.push(ValType::Num(NumType::I32));
                 }
-                0xD0 => match Self::read_byte(code, &mut cursor)? {
-                    0x70 => type_stack.push(ValType::Ref(RefType::FuncRef)),
-                    0x6F => type_stack.push(ValType::Ref(RefType::ExternRef)),
-                    0x63 | 0x64 => {
-                        let first = Self::read_byte(code, &mut cursor)?;
-                        let heap_type =
-                            Self::read_signed_leb_continuation(code, &mut cursor, first)?;
-                        match heap_type {
-                            -0x10 | -0x14 => type_stack.push(ValType::Ref(RefType::FuncRef)),
-                            -0x11 | -0x13 => type_stack.push(ValType::Ref(RefType::ExternRef)),
-                            _ => {
-                                return Err(WasmError::Validation(format!(
-                                    "function {} has unsupported GC heap type: {}",
-                                    func_idx, heap_type
-                                )));
-                            }
+                0xD0 => {
+                    let first = Self::read_byte(code, &mut cursor)?;
+                    let heap_type = Self::read_signed_leb_continuation(code, &mut cursor, first)?;
+                    match heap_type {
+                        -0x10 | -0x14 => type_stack.push(ValType::Ref(RefType::FuncRef)),
+                        -0x11 | -0x13 => type_stack.push(ValType::Ref(RefType::ExternRef)),
+                        // Positive heap type indices are concrete types; treat as funcref.
+                        h if h >= 0 => type_stack.push(ValType::Ref(RefType::FuncRef)),
+                        _ => {
+                            return Err(WasmError::Validation(format!(
+                                "function {} has unsupported GC heap type: {}",
+                                func_idx, heap_type
+                            )));
                         }
                     }
-                    value => {
-                        return Err(WasmError::Validation(format!(
-                            "function {} has invalid ref.null type {:02x}",
-                            func_idx, value
-                        )));
-                    }
-                },
+                }
                 0x41 => {
                     Self::skip_sleb(code, &mut cursor)?;
                     type_stack.push(ValType::Num(NumType::I32));
@@ -1096,6 +1087,8 @@ impl Validator {
                 let ref_type = match heap_type {
                     -0x10 | -0x14 => RefType::FuncRef,
                     -0x11 | -0x13 => RefType::ExternRef,
+                    // Positive heap type indices are concrete types; treat as funcref.
+                    h if h >= 0 => RefType::FuncRef,
                     _ => {
                         return Err(WasmError::Validation(format!(
                             "GC heap types are not supported: {}",
@@ -1141,6 +1134,8 @@ impl Validator {
                 match heap_type {
                     -0x10 | -0x14 => Ok(ValType::Ref(RefType::FuncRef)),
                     -0x11 | -0x13 => Ok(ValType::Ref(RefType::ExternRef)),
+                    // Positive heap type indices are concrete types; treat as funcref.
+                    h if h >= 0 => Ok(ValType::Ref(RefType::FuncRef)),
                     _ => Err(WasmError::Validation(format!(
                         "GC heap types are not supported: {}",
                         heap_type
@@ -1783,6 +1778,9 @@ impl Validator {
                         )));
                     }
                 }
+                crate::runtime::ExportKind::Tag(_) => {
+                    // Tag exports are parsed but not validated.
+                }
             }
         }
         Ok(())
@@ -1850,23 +1848,15 @@ impl Validator {
                     let _ = reader.read_f64().map_err(WasmError::from)?;
                     stack.push(ValType::Num(NumType::F64));
                 }
-                0xD0 => stack.push(match reader.read_u8().map_err(WasmError::from)? {
-                    0x70 => ValType::Ref(crate::runtime::RefType::FuncRef),
-                    0x6F => ValType::Ref(crate::runtime::RefType::ExternRef),
-                    0x63 | 0x64 => match reader.read_sleb128_i64().map_err(WasmError::from)? {
-                        -0x10 | -0x14 => ValType::Ref(crate::runtime::RefType::FuncRef),
-                        -0x11 | -0x13 => ValType::Ref(crate::runtime::RefType::ExternRef),
-                        heap_type => {
-                            return Err(WasmError::Validation(format!(
-                                "GC heap types are not supported: {}",
-                                heap_type
-                            )));
-                        }
-                    },
-                    value => {
+                0xD0 => stack.push(match reader.read_sleb128_i64().map_err(WasmError::from)? {
+                    -0x10 | -0x14 => ValType::Ref(crate::runtime::RefType::FuncRef),
+                    -0x11 | -0x13 => ValType::Ref(crate::runtime::RefType::ExternRef),
+                    // Positive heap type indices are concrete types; treat as funcref.
+                    h if h >= 0 => ValType::Ref(crate::runtime::RefType::FuncRef),
+                    heap_type => {
                         return Err(WasmError::Validation(format!(
-                            "invalid ref.null type: {:02x}",
-                            value
+                            "GC heap types are not supported: {}",
+                            heap_type
                         )));
                     }
                 }),
@@ -2155,7 +2145,7 @@ mod tests {
             ValType::Ref(crate::runtime::RefType::FuncRef),
             false,
         ));
-        module.global_inits.push(vec![0xD0, 0x00, 0x0B]);
+        module.global_inits.push(vec![0xD0, 0x7F, 0x0B]); // heap type -1 is invalid
 
         let validator = Validator::new();
         assert!(validator.validate(&module).is_err());
@@ -2168,7 +2158,7 @@ mod tests {
         module.funcs.push(Func {
             type_idx: 0,
             locals: vec![],
-            body: vec![0xD0, 0x01, 0x1A, 0x0B],
+            body: vec![0xD0, 0x7F, 0x1A, 0x0B], // heap type -1 is invalid
         });
 
         let validator = Validator::new();
