@@ -73,7 +73,11 @@ impl SpecHarness {
                     .parse(&wasm)
                     .map_err(|error| format!("module parse failed: {error}"))?;
                 // Skip modules that require tag imports, which are not yet supported.
-                if parsed.imports.iter().any(|i| matches!(i.kind, ImportKind::Tag(..))) {
+                if parsed
+                    .imports
+                    .iter()
+                    .any(|i| matches!(i.kind, ImportKind::Tag(..)))
+                {
                     self.current_module = None;
                     return Ok(DirectiveOutcome::Skipped(
                         "module requires tag imports".to_string(),
@@ -278,12 +282,10 @@ impl SpecHarness {
                     )
                     .map_err(|error| format!("failed to register spectest host import: {error}"))
             }
-            ImportKind::Tag(..) => {
-                Err(format!(
-                    "unsupported spectest tag import {}.{}",
-                    import.module, import.name
-                ))
-            }
+            ImportKind::Tag(..) => Err(format!(
+                "unsupported spectest tag import {}.{}",
+                import.module, import.name
+            )),
         }
     }
 

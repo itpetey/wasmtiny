@@ -26,3 +26,15 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      # Stage 2 of host-region-wait-notify: the emission conformance tests
+      # are gated behind the feature; run them on platforms where the
+      # backends are compiled in (Linux; Windows/FreeBSD would need a
+      # runner). macOS correctly compiles to a no-op even with the feature.
+      - name: Run tests with platform wake emission
+        if: runner.os == 'Linux'
+        run: cargo test --features platform-wake-emission
+
+      - name: Clippy with platform wake emission
+        if: runner.os == 'Linux'
+        run: cargo clippy --features platform-wake-emission -- -D warnings

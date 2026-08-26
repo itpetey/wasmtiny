@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-05
+goal: Public host-facing wait/notify API on shared regions + capability query +
+  optional per-OS wake emission

@@ -19,13 +19,13 @@
 //! - Write: `memory.write(offset, data)`
 //! - Grow: `memory.grow(pages)`
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::{
-    runtime::SharedWaiter,
     runtime::{MemoryType, Result, SharedRegionId, TrapCode, WasmError},
+    runtime::{ensure_shared_waiter, os_wake, shared_notify, shared_wait},
 };
 
 /// Maximum number of pages (65536 pages = 4 GiB).
@@ -55,9 +55,13 @@ pub struct SharedRange {
     pub prot: RegionProt,
     /// Which page within the range is writable by this consumer (if any).
     pub reader_slot: Option<u32>,
+    /// Base pointer of the region's host mapping. Used for Stage 2 platform
+    /// wake emission (`region.ptr() + offset`); not valid for data access
+    /// from guests.
+    pub(crate) region_ptr: *mut u8,
     /// Shared waiters for atomic wait/notify on addresses within this range.
     /// This is a reference to the SharedRegion's waiters map.
-    pub(crate) waiters: Arc<RwLock<HashMap<u32, Arc<SharedWaiter>>>>,
+    pub(crate) waiters: crate::runtime::WaiterMap,
 }
 
 /// WebAssembly linear memory.
@@ -174,41 +178,12 @@ impl Memory {
     /// Blocks the current thread waiting for the address to be notified.
     /// Returns true if woken, false if timeout.
     pub(crate) fn wait_on(&self, address: u32, timeout_ns: u64) -> bool {
-        // Check if address falls in a shared range
+        // Shared ranges use the per-region waiter registry (the same
+        // mechanism backing the public host wait/notify API). The guest
+        // memory lock is not held while parked — shared_wait only takes
+        // the waiter's own mutex/condvar.
         if let Some((range, region_offset)) = self.find_shared_range(address) {
-            // Delegate to shared waiters
-            let waiter = {
-                let mut waiters = range.waiters.write();
-                waiters
-                    .entry(region_offset)
-                    .or_insert_with(|| {
-                        Arc::new(SharedWaiter {
-                            notified: Mutex::new(false),
-                            condvar: Condvar::new(),
-                        })
-                    })
-                    .clone()
-            };
-
-            if timeout_ns == 0 {
-                return false;
-            }
-
-            let mut notified = waiter.notified.lock();
-            if *notified {
-                *notified = false;
-                return true;
-            }
-
-            let timeout = std::time::Duration::from_nanos(timeout_ns);
-            let result = waiter.condvar.wait_for(&mut notified, timeout);
-
-            return if result.timed_out() {
-                false
-            } else {
-                *notified = false;
-                true
-            };
+            return shared_wait(&range.waiters, region_offset, timeout_ns);
         }
 
         // Use local waiters for owned memory
@@ -256,18 +231,20 @@ impl Memory {
 
         // Check if address falls in a shared range
         if let Some((range, region_offset)) = self.find_shared_range(address) {
-            // Delegate to shared waiters
-            let waiters = range.waiters.read();
-            let Some(waiter) = waiters.get(&region_offset) else {
-                return Ok(0);
-            };
+            // Delegate to the shared waiters registry (same mechanism as
+            // SharedMemoryRegistry::notify_region).
+            let notified = shared_notify(&range.waiters, region_offset, n);
 
-            let mut notified = 0;
-            for _ in 0..n {
-                let mut flag = waiter.notified.lock();
-                *flag = true;
-                waiter.condvar.notify_one();
-                notified += 1;
+            // Stage 2 side effect: when compiled in and enabled, also emit
+            // the host platform's wake primitive for the region's host
+            // mapping address. This never affects the instruction's return
+            // value, which counts only WASM waiters woken.
+            if os_wake::active() {
+                // SAFETY: region_ptr is the region's live mmap base and
+                // region_offset is within its length.
+                unsafe {
+                    os_wake::emit_wake(range.region_ptr.add(region_offset as usize));
+                }
             }
 
             return Ok(notified);
@@ -294,13 +271,7 @@ impl Memory {
     pub(crate) fn get_waiter(&self, address: u32) {
         // Check if address falls in a shared range
         if let Some((range, region_offset)) = self.find_shared_range(address) {
-            let mut waiters = range.waiters.write();
-            waiters.entry(region_offset).or_insert_with(|| {
-                Arc::new(SharedWaiter {
-                    notified: Mutex::new(false),
-                    condvar: Condvar::new(),
-                })
-            });
+            ensure_shared_waiter(&range.waiters, region_offset);
             return;
         }
 
@@ -631,6 +602,7 @@ impl Memory {
     /// immediately visible to all other guests attached to the same region.
     ///
     /// Returns the page offset where the shared region was mapped.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn map_shared_region(
         &mut self,
         region_fd: i32,
@@ -638,7 +610,8 @@ impl Memory {
         region_id: SharedRegionId,
         prot: RegionProt,
         reader_slot: Option<u32>,
-        waiters: Arc<RwLock<HashMap<u32, Arc<SharedWaiter>>>>,
+        region_ptr: *mut u8,
+        waiters: crate::runtime::WaiterMap,
     ) -> Result<u32> {
         let page_size = PAGE_SIZE_BYTES as usize;
 
@@ -736,6 +709,7 @@ impl Memory {
             len: region_len as u32,
             prot,
             reader_slot,
+            region_ptr,
             waiters,
         });
 

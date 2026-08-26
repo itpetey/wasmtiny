@@ -14,7 +14,8 @@
 //! - [`WasmError`] - Error types for validation, loading, instantiation, and runtime
 //! - [`Memory`], [`Table`], [`Global`] - Runtime objects
 
-pub(crate) use shared_memory::SharedWaiter;
+pub(crate) use shared_memory::WaiterMap;
+pub(crate) use shared_memory::{ensure_shared_waiter, shared_notify, shared_wait};
 
 pub use crate::memory::Memory;
 pub use atomic_op::{ATOMIC_OPS, AtomicKind, AtomicOpMeta, lookup as atomic_lookup};
@@ -26,7 +27,10 @@ pub use instance::{
     SharedTable, Store,
 };
 pub use module::{DataKind, DataSegment, ElemKind, ElemSegment, Func, Local, Module};
-pub use shared_memory::{SharedMemoryRegistry, SharedRegion, SharedRegionId};
+pub mod os_wake;
+pub use shared_memory::{
+    HostWaitSupport, RegionWaiter, SharedMemoryRegistry, SharedRegion, SharedRegionId, WakeOutcome,
+};
 pub use types::{
     FunctionType, GlobalType, Limits, MemoryType, NumType, RefType, TableType, ValType,
 };

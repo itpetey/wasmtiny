@@ -526,7 +526,9 @@ impl LoadedModule {
         if idx < imported_memories {
             self.imported_memory(idx)
         } else {
-            self.memories.get((idx - imported_memories) as usize).cloned()
+            self.memories
+                .get((idx - imported_memories) as usize)
+                .cloned()
         }
     }
 

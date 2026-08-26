@@ -26,6 +26,13 @@ wat = "1.245"
 [features]
 default = []
 cli = ["clap", "anyhow"]
+# Stage 2 of host-region-wait-notify: compile in platform wake emission
+# (Linux futex, Windows WakeByAddress, FreeBSD _umtx_op) as a side effect
+# of memory.atomic.notify on shared ranges. Build-time only — there is no
+# runtime toggle; embedders detect via SharedMemoryRegistry::host_wait_support().
+# Gated per-OS inside src/runtime/os_wake.rs; unsupported platforms (macOS)
+# compile to a no-op even with this feature on.
+platform-wake-emission = []
 
 [[bin]]
 name = "wasmtiny"

@@ -255,16 +255,16 @@ impl Parser {
                     memory_type.shared = shared;
                     ImportKind::Memory(memory_type)
                 }
-            0x03 => {
-                let content_type = self.read_val_type(reader)?;
-                let mutable = self.read_mutability(reader)?;
-                ImportKind::Global(GlobalType::new(content_type, mutable))
-            }
-            0x04 => {
-                let attribute = reader.read_u8()?;
-                let type_idx = reader.read_uleb128()?;
-                ImportKind::Tag(attribute, type_idx)
-            }
+                0x03 => {
+                    let content_type = self.read_val_type(reader)?;
+                    let mutable = self.read_mutability(reader)?;
+                    ImportKind::Global(GlobalType::new(content_type, mutable))
+                }
+                0x04 => {
+                    let attribute = reader.read_u8()?;
+                    let type_idx = reader.read_uleb128()?;
+                    ImportKind::Tag(attribute, type_idx)
+                }
                 _ => {
                     return Err(WasmError::Load(format!(
                         "unknown import kind: {}",
