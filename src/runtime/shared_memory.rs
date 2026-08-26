@@ -15,13 +15,13 @@ use crate::{
     runtime::{Memory, Result, WasmError, os_wake},
 };
 
+/// Shared waiter map for a region: byte offset within the region -> waiter.
+pub(crate) type WaiterMap = Arc<RwLock<HashMap<u32, Arc<SharedWaiter>>>>;
+
 /// Maximum shared region size (1 GiB).
 const MAX_REGION_SIZE: u32 = 1 << 30;
 /// Monotonic counter for generating unique shm names.
 static NEXT_SHM_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Shared waiter map for a region: byte offset within the region -> waiter.
-pub(crate) type WaiterMap = Arc<RwLock<HashMap<u32, Arc<SharedWaiter>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// Shared region id.
@@ -46,22 +46,6 @@ pub struct SharedRegion {
     /// Shared waiters for atomic wait/notify on addresses within this region.
     /// Keyed by byte offset within the region (not guest address).
     waiters: WaiterMap,
-}
-
-/// A waiter for atomic wait/notify on shared memory addresses.
-#[derive(Debug)]
-pub(crate) struct SharedWaiter {
-    pub(crate) notified: ParkingMutex<bool>,
-    pub(crate) condvar: Condvar,
-}
-
-impl SharedWaiter {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            notified: ParkingMutex::new(false),
-            condvar: Condvar::new(),
-        })
-    }
 }
 
 /// Outcome of a host-side [`RegionWaiter::wait`].
@@ -106,50 +90,11 @@ pub struct RegionWaiter {
     inner: Arc<SharedWaiter>,
 }
 
-impl RegionWaiter {
-    /// Blocks until a notify arrives for this waiter or the timeout elapses.
-    ///
-    /// A notify that arrived after registration but before this call is
-    /// observed here (the flag is checked under the waiter's mutex before
-    /// sleeping), which is what makes the register → re-check → wait idiom
-    /// race-free. Spurious condvar wakeups are re-checked against the
-    /// notified flag and re-slept with the remaining timeout, so `Woken`
-    /// really means "a notify arrived".
-    pub fn wait(&self, timeout: Duration) -> Result<WakeOutcome> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .expect("wait timeout overflows Instant");
-        let mut notified = self.inner.notified.lock();
-        loop {
-            if *notified {
-                *notified = false;
-                return Ok(WakeOutcome::Woken);
-            }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return Ok(WakeOutcome::TimedOut);
-            };
-            let result = self.inner.condvar.wait_for(&mut notified, remaining);
-            if result.timed_out() && !*notified {
-                return Ok(WakeOutcome::TimedOut);
-            }
-            // Either the flag was set (loop head returns Woken) or the
-            // wake was spurious — re-check and keep waiting.
-        }
-    }
-}
-
-impl Drop for RegionWaiter {
-    fn drop(&mut self) {
-        // Deregister from the region's waiter map, but only if the map
-        // entry is still this waiter (it may have been removed and
-        // recreated since registration).
-        let mut map = self.map.write();
-        if let Some(entry) = map.get(&self.offset)
-            && Arc::ptr_eq(entry, &self.inner)
-        {
-            map.remove(&self.offset);
-        }
-    }
+/// A waiter for atomic wait/notify on shared memory addresses.
+#[derive(Debug)]
+pub(crate) struct SharedWaiter {
+    pub(crate) notified: ParkingMutex<bool>,
+    pub(crate) condvar: Condvar,
 }
 
 /// Shared memory registry.
@@ -166,6 +111,21 @@ impl Drop for RegionWaiter {
 pub struct SharedMemoryRegistry {
     next_region_id: u64,
     regions: HashMap<SharedRegionId, Arc<SharedRegion>>,
+}
+
+/// The engine's host-wait support level for shared regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostWaitSupport {
+    /// Only the in-process registry is available: host waiters registered
+    /// via [`SharedMemoryRegistry::register_region_waiter`] are woken by
+    /// guest/host notifies going through the registry.
+    RegistryOnly,
+    /// Registry support plus platform wake emission: a guest
+    /// `memory.atomic.notify` on a shared range additionally emits the host
+    /// platform's wake primitive on the region's host mapping address.
+    /// Reported only when emission is compiled in (build-time; there is no
+    /// runtime toggle).
+    RegistryAndOsWake,
 }
 
 impl SharedRegionId {
@@ -364,6 +324,61 @@ impl Drop for SharedRegion {
                 libc::close(self.fd);
             }
         }
+    }
+}
+
+impl RegionWaiter {
+    /// Blocks until a notify arrives for this waiter or the timeout elapses.
+    ///
+    /// A notify that arrived after registration but before this call is
+    /// observed here (the flag is checked under the waiter's mutex before
+    /// sleeping), which is what makes the register → re-check → wait idiom
+    /// race-free. Spurious condvar wakeups are re-checked against the
+    /// notified flag and re-slept with the remaining timeout, so `Woken`
+    /// really means "a notify arrived".
+    pub fn wait(&self, timeout: Duration) -> Result<WakeOutcome> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .expect("wait timeout overflows Instant");
+        let mut notified = self.inner.notified.lock();
+        loop {
+            if *notified {
+                *notified = false;
+                return Ok(WakeOutcome::Woken);
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(WakeOutcome::TimedOut);
+            };
+            let result = self.inner.condvar.wait_for(&mut notified, remaining);
+            if result.timed_out() && !*notified {
+                return Ok(WakeOutcome::TimedOut);
+            }
+            // Either the flag was set (loop head returns Woken) or the
+            // wake was spurious — re-check and keep waiting.
+        }
+    }
+}
+
+impl Drop for RegionWaiter {
+    fn drop(&mut self) {
+        // Deregister from the region's waiter map, but only if the map
+        // entry is still this waiter (it may have been removed and
+        // recreated since registration).
+        let mut map = self.map.write();
+        if let Some(entry) = map.get(&self.offset)
+            && Arc::ptr_eq(entry, &self.inner)
+        {
+            map.remove(&self.offset);
+        }
+    }
+}
+
+impl SharedWaiter {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            notified: ParkingMutex::new(false),
+            condvar: Condvar::new(),
+        })
     }
 }
 
@@ -647,19 +662,22 @@ impl SharedMemoryRegistry {
     }
 }
 
-/// The engine's host-wait support level for shared regions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostWaitSupport {
-    /// Only the in-process registry is available: host waiters registered
-    /// via [`SharedMemoryRegistry::register_region_waiter`] are woken by
-    /// guest/host notifies going through the registry.
-    RegistryOnly,
-    /// Registry support plus platform wake emission: a guest
-    /// `memory.atomic.notify` on a shared range additionally emits the host
-    /// platform's wake primitive on the region's host mapping address.
-    /// Reported only when emission is compiled in (build-time; there is no
-    /// runtime toggle).
-    RegistryAndOsWake,
+impl std::fmt::Debug for SharedMemoryRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedMemoryRegistry")
+            .field("next_region_id", &self.next_region_id)
+            .field("regions", &self.regions.len())
+            .finish()
+    }
+}
+
+impl Default for SharedMemoryRegistry {
+    fn default() -> Self {
+        Self {
+            next_region_id: 1,
+            regions: HashMap::new(),
+        }
+    }
 }
 
 /// Gets or creates the shared waiter entry for `offset` (crate-internal;
@@ -667,6 +685,25 @@ pub enum HostWaitSupport {
 pub(crate) fn ensure_shared_waiter(waiters: &WaiterMap, offset: u32) {
     let mut map = waiters.write();
     map.entry(offset).or_insert_with(SharedWaiter::new);
+}
+
+/// Wakes up to `count` threads parked on the shared waiter for `offset`.
+/// Returns the number of wake attempts delivered (zero when no waiter is
+/// registered).
+pub(crate) fn shared_notify(waiters: &WaiterMap, offset: u32, n: u32) -> u32 {
+    let map = waiters.read();
+    let Some(waiter) = map.get(&offset) else {
+        return 0;
+    };
+
+    let mut notified = 0;
+    for _ in 0..n {
+        let mut flag = waiter.notified.lock();
+        *flag = true;
+        waiter.condvar.notify_one();
+        notified += 1;
+    }
+    notified
 }
 
 /// Parks the calling thread on the shared waiter for `offset`.
@@ -705,42 +742,5 @@ pub(crate) fn shared_wait(waiters: &WaiterMap, offset: u32, timeout_ns: u64) -> 
         }
         // Either the flag was set (loop head returns true) or the wake was
         // spurious — re-check and keep waiting.
-    }
-}
-
-/// Wakes up to `count` threads parked on the shared waiter for `offset`.
-/// Returns the number of wake attempts delivered (zero when no waiter is
-/// registered).
-pub(crate) fn shared_notify(waiters: &WaiterMap, offset: u32, n: u32) -> u32 {
-    let map = waiters.read();
-    let Some(waiter) = map.get(&offset) else {
-        return 0;
-    };
-
-    let mut notified = 0;
-    for _ in 0..n {
-        let mut flag = waiter.notified.lock();
-        *flag = true;
-        waiter.condvar.notify_one();
-        notified += 1;
-    }
-    notified
-}
-
-impl std::fmt::Debug for SharedMemoryRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedMemoryRegistry")
-            .field("next_region_id", &self.next_region_id)
-            .field("regions", &self.regions.len())
-            .finish()
-    }
-}
-
-impl Default for SharedMemoryRegistry {
-    fn default() -> Self {
-        Self {
-            next_region_id: 1,
-            regions: HashMap::new(),
-        }
     }
 }

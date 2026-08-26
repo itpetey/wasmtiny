@@ -27,7 +27,6 @@ pub use instance::{
     SharedTable, Store,
 };
 pub use module::{DataKind, DataSegment, ElemKind, ElemSegment, Func, Local, Module};
-pub mod os_wake;
 pub use shared_memory::{
     HostWaitSupport, RegionWaiter, SharedMemoryRegistry, SharedRegion, SharedRegionId, WakeOutcome,
 };
@@ -43,6 +42,7 @@ mod export;
 mod import;
 mod instance;
 mod module;
+pub mod os_wake;
 mod shared_memory;
 mod types;
 mod values;
