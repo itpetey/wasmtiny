@@ -691,19 +691,24 @@ pub(crate) fn ensure_shared_waiter(waiters: &WaiterMap, offset: u32) {
 /// Returns the number of wake attempts delivered (zero when no waiter is
 /// registered).
 pub(crate) fn shared_notify(waiters: &WaiterMap, offset: u32, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
     let map = waiters.read();
     let Some(waiter) = map.get(&offset) else {
         return 0;
     };
 
-    let mut notified = 0;
-    for _ in 0..n {
-        let mut flag = waiter.notified.lock();
-        *flag = true;
-        waiter.condvar.notify_one();
-        notified += 1;
-    }
-    notified
+    // The map holds ONE waiter entry per offset, whose `notified` flag
+    // satisfies exactly one parked thread; notify counts above 1 can never
+    // wake more than one distinct waiter and must not loop `n` times (a
+    // guest notify with a huge count would spin the loop under this read
+    // lock, stalling every registrant's deregistration).
+    let mut notified = waiter.notified.lock();
+    *notified = true;
+    drop(notified);
+    waiter.condvar.notify_one();
+    1
 }
 
 /// Parks the calling thread on the shared waiter for `offset`.
