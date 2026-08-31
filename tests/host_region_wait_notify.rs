@@ -140,7 +140,10 @@ fn guest_notify_wakes_host_os_waiter_conformance() {
     let notified = spawn_guest_notify(fx.app.clone(), addr, Duration::ZERO)
         .join()
         .expect("notify thread");
-    assert_eq!(notified, 1);
+    // No WASM waiter is parked here: the host thread rides the platform
+    // primitive directly, so the instruction counts zero WASM waiters.
+    // The OS wake is verified below via the parked thread's result.
+    assert_eq!(notified, 0);
 
     let woken = parked.join().expect("parked host thread");
     assert_eq!(

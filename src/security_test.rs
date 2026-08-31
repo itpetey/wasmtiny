@@ -88,12 +88,15 @@ pub fn finish(verdict: Verdict, detail: &str) -> i32 {
 pub fn apply_resource_caps(memory_mb: u64) -> Result<(), String> {
     #[cfg(unix)]
     {
-        let limits: &[(libc::c_int, libc::rlim_t)] = &[
-            (libc::RLIMIT_AS, memory_mb * 1024 * 1024),
-            (libc::RLIMIT_NOFILE, 256),
-            (libc::RLIMIT_NPROC, 64),
+        // The resource constants use the platform's `rlimit_resource_t`
+        // (`u32` on Linux, `i32` on macOS), so let inference produce the
+        // right type instead of hardcoding `c_int`.
+        let limits = [
+            (libc::RLIMIT_AS, (memory_mb * 1024 * 1024) as libc::rlim_t),
+            (libc::RLIMIT_NOFILE, 256 as libc::rlim_t),
+            (libc::RLIMIT_NPROC, 64 as libc::rlim_t),
         ];
-        for &(res, limit) in limits {
+        for (res, limit) in limits {
             let lim = libc::rlimit {
                 rlim_cur: limit,
                 rlim_max: limit,
