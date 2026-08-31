@@ -80,7 +80,10 @@ fn dropped_waiter_is_deregistered() {
     assert_eq!(woken, 0, "registry must not retain dropped waiters");
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(all(
+    feature = "platform-wake-emission",
+    any(target_os = "linux", target_os = "freebsd")
+))]
 fn errno() -> i32 {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -286,7 +289,7 @@ fn notify_return_value_unaffected_by_emission() {
     assert_eq!(result, 1, "one WASM waiter => return 1");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "platform-wake-emission", target_os = "linux"))]
 unsafe fn park_on_word(ptr: *mut u8) -> bool {
     unsafe {
         let ts = libc::timespec {
@@ -314,7 +317,7 @@ unsafe fn park_on_word(ptr: *mut u8) -> bool {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "platform-wake-emission", target_os = "windows"))]
 unsafe fn park_on_word(ptr: *mut u8) -> bool {
     unsafe extern "system" {
         fn WaitOnAddress(
@@ -335,7 +338,7 @@ unsafe fn park_on_word(ptr: *mut u8) -> bool {
     }
 }
 
-#[cfg(target_os = "freebsd")]
+#[cfg(all(feature = "platform-wake-emission", target_os = "freebsd"))]
 unsafe fn park_on_word(ptr: *mut u8) -> bool {
     unsafe extern "C" {
         fn _umtx_op(
