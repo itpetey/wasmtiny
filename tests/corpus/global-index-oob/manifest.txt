@@ -1,0 +1,9 @@
+name: global-index-oob
+threat: TM-03
+expected: trapped
+# Hand-encoded: global.get 5 in a module declaring exactly one
+# global. The wat assembler refuses to emit this, so the bytes are
+# inline — the manifest is the byte-level source of truth.
+# Recipe: one () -> () type; one global (i32, mutable, init 0); code
+# body [locals=0, global.get 5 (0x24 0x05), drop, end].
+bytes: 0061736d010000000104016000000606017f0041000b0a0701050024051a0b

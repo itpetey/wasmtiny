@@ -187,7 +187,7 @@ mod tests {
             ValType::Num(crate::runtime::NumType::I32)
         );
         assert_eq!(
-            WasmValue::F64(3.14).val_type(),
+            WasmValue::F64(std::f64::consts::PI).val_type(),
             ValType::Num(crate::runtime::NumType::F64)
         );
     }
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_serialization_roundtrip_f32() {
-        let val = WasmValue::F32(3.14);
+        let val = WasmValue::F32(std::f32::consts::PI);
         let mut bytes = Vec::new();
         val.to_bytes(&mut bytes);
         let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_serialization_roundtrip_f64() {
-        let val = WasmValue::F64(2.718281828459045);
+        let val = WasmValue::F64(std::f64::consts::E);
         let mut bytes = Vec::new();
         val.to_bytes(&mut bytes);
         let (restored, _) = WasmValue::from_bytes(&bytes).unwrap();

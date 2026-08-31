@@ -1,0 +1,6 @@
+name: table-callindirect-oob
+threat: TM-03
+expected: trapped
+wat: fixture.wat
+entry: main
+# call_indirect on index 999 against a 1-entry table.

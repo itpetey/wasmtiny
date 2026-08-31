@@ -38,3 +38,57 @@ jobs:
       - name: Clippy with platform wake emission
         if: runner.os == 'Linux'
         run: cargo clippy --features platform-wake-emission -- -D warnings
+
+  # Sandbox-escape test build: adversarial corpus, canary harness,
+  # boundary fuzzing, and wasmtiny-scoped static gates. Guests are
+  # untrusted binaries — no static gate applies to them; all judgement
+  # is runtime behaviour observed from outside the sandbox
+  # (docs/threat-model.md, openspec sandbox-escape-testing spec).
+  # Job-level caps: timeout-minutes bounds the job; per-fixture hard
+  # resource caps (rlimits) are applied by the corpus runner itself.
+  security-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Dual-build check: both configurations must compile cleanly.
+      - name: Build (default features)
+        run: cargo build --all-targets
+
+      - name: Build (security-test feature)
+        run: cargo build --all-targets --features security-test
+
+      # Testing-build isolation: default builds must contain no
+      # security-test instrumentation.
+      - name: Check no instrumentation in default build
+        run: ./scripts/check_no_instrumentation.sh
+
+      # Static gates (wasmtiny only; guests exempt by design).
+      - name: Unsafe-code allowlist gate
+        run: ./scripts/check_unsafe.sh
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Dependency advisories / licenses / duplicates
+        run: cargo deny --all-features check
+
+      - name: Clippy (security-test tier)
+        run: cargo clippy --all-targets --features security-test -- -D warnings
+
+      # Corpus + traceability + fuzz burst: every adversarial fixture
+      # fails closed, canaries hold, the threat model is fully covered,
+      # and the fuzz burst completes with no findings.
+      - name: Security test suites
+        run: cargo test --features security-test
+
+      # Failure paths must be distinct and attributable (broken
+      # fixture / hung fixture / off-list unsafe).
+      - name: Verify failure paths
+        run: ./scripts/verify_failure_paths.sh

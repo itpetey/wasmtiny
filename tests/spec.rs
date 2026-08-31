@@ -152,6 +152,8 @@ impl SpecHarness {
             }
             WastDirective::AssertException { .. }
             | WastDirective::AssertSuspension { .. }
+            | WastDirective::AssertInvalidCustom { .. }
+            | WastDirective::AssertMalformedCustom { .. }
             | WastDirective::Thread(_)
             | WastDirective::Wait { .. }
             | WastDirective::ModuleInstance { .. } => Ok(DirectiveOutcome::Skipped(

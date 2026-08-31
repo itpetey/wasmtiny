@@ -1,0 +1,7 @@
+name: malformed-length-overrun
+threat: TM-02
+expected: trapped
+# Type section claims 14 bytes of content where only 4 remain before
+# the next section: the length must be checked against the buffer,
+# not trusted.
+bytes: 0061736d01000000010e01600000030201000a0a01080041002800001a0b

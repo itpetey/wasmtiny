@@ -1,0 +1,38 @@
+# cargo-deny configuration for wasmtiny.
+# Static gate scoped to wasmtiny's own code and dependency tree —
+# guests (tests/corpus) are exempt by design (docs/threat-model.md).
+# CI runs: cargo deny --all-features check
+
+[advisories]
+# Fail on any known-vulnerable dependency.
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# wasmtiny is Apache-2.0 OR MIT; dev/test tooling may add permissive
+# crates. Anything unlisted here fails the gate.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "Unicode-3.0",
+    "BSD-3-Clause",
+    "Zlib",
+]
+
+[bans]
+# Multiple versions of the same crate invite subtle divergence.
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+# syn 2.x is pinned by thiserror-impl (=2.0.19) while serde_derive and
+# clap_derive moved to syn 3.x — semver-incompatible, not unifiable.
+# Proc-macro only: never linked into wasmtiny's runtime code.
+skip = [{ name = "syn", version = "=2.0.117" }]
+
+[sources]
+# Self-contained builds: no git or unregistered sources.
+unknown-registry = "deny"
+unknown-git = "deny"

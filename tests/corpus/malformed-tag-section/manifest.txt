@@ -1,0 +1,6 @@
+name: malformed-tag-section
+threat: TM-02
+expected: trapped
+# Tag section (id 0x0D, exception handling): unsupported and must be
+# rejected at load, never interpreted.
+bytes: 0061736d01000000010401600000030201000d0201000a0a01080041002800001a0b

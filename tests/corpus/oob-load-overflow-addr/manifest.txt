@@ -1,0 +1,7 @@
+name: oob-load-overflow-addr
+threat: TM-01
+expected: trapped
+wat: fixture.wat
+entry: main
+# effective address = 0x7FFFFFFF + 0x80000001 offset: checked addition
+# must trap on overflow rather than wrap to 0.

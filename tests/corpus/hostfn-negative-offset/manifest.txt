@@ -1,0 +1,8 @@
+name: hostfn-negative-offset
+threat: TM-04
+expected: trapped
+wat: fixture.wat
+entry: main
+host_abuse: true
+# Guest passes a negative offset: as u32 it is near 2^32; the
+# bounds-checked read must reject it, not wrap it into a small index.

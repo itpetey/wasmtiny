@@ -20,8 +20,8 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 walkdir = "2.5"
-wast = "245.0"
-wat = "1.245"
+wast = "258.0"
+wat = "1.258"
 
 [features]
 default = []
@@ -33,7 +33,20 @@ cli = ["clap", "anyhow"]
 # Gated per-OS inside src/runtime/os_wake.rs; unsupported platforms (macOS)
 # compile to a no-op even with this feature on.
 platform-wake-emission = []
+# Sandbox-escape testing build: corpus-runner instrumentation (verdict
+# emission, per-fixture resource caps, budget timer). Compiled into the
+# library and the wasmtiny-corpus-runner / wasmtiny-fuzz binaries only;
+# absent from default and release builds by construction.
+security-test = []
 
 [[bin]]
 name = "wasmtiny"
 required-features = ["cli"]
+
+[[bin]]
+name = "wasmtiny-corpus-runner"
+required-features = ["security-test"]
+
+[[bin]]
+name = "wasmtiny-fuzz"
+required-features = ["security-test"]

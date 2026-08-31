@@ -1,0 +1,15 @@
+# Audited unsafe-code allowlist for wasmtiny (src/ only).
+#
+# Format: <repo-relative-path> <allowed-count> <reason>
+# The CI check (scripts/check_unsafe.sh) counts unsafe-code items per
+# file (unsafe blocks, unsafe fn, unsafe impl) and compares against
+# this list. Any off-list occurrence, any count drift, or any file
+# missing here fails the gate.
+#
+# Guests (tests/corpus) are EXEMPT by design: they are hostile
+# binaries/fixtures, not wasmtiny code. No static gate applies to
+# guest payloads (docs/threat-model.md).
+src/memory.rs 23 mmap-backed linear memory: raw pointer arithmetic, mprotect/munmap on mappings, and slice views over mmap regions; every site carries a SAFETY comment
+src/runtime/shared_memory.rs 12 shm_open/mmap/ftruncate for shared regions and raw mapping teardown; every site carries a SAFETY comment
+src/runtime/os_wake.rs 5 platform wake-word primitives (futex/_umtx_op/WaitOnAddress) on raw pointers behind cfg(os)
+src/security_test.rs 3 testing build only: signal handler install, alarm write(2)/_exit(2), and setrlimit — libc calls with no safe wrapper; feature-gated, absent from shipped builds

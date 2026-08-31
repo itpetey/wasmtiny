@@ -1,0 +1,7 @@
+name: exhaust-deep-recursion
+threat: TM-05
+expected: trapped
+wat: fixture.wat
+entry: main
+# Unbounded self-recursion: the interpreter's call-depth limit must
+# trap (StackOverflow) before the host stack is endangered.

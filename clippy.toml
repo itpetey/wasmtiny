@@ -1,0 +1,12 @@
+# Clippy tier configuration for wasmtiny (static gates, scoped to
+# wasmtiny's own code — guests in tests/corpus are data, not Rust, and
+# exempt by design; docs/threat-model.md).
+#
+# CI runs: cargo clippy --all-targets --features security-test -- -D warnings
+# This file raises the floor beyond default warnings.
+
+disallowed-methods = [
+    { path = "std::mem::uninitialized", reason = "UB for non-zero types; use typed constructors or MaybeUninit" },
+    { path = "std::hint::unreachable_unchecked", reason = "UB if reached; use unreachable!() so misuse panics instead of UB" },
+    { path = "std::ptr::offset", reason = "unchecked UB on overflow/out-of-bounds; use checked_add + addr_of" },
+]

@@ -1,0 +1,7 @@
+name: oob-store-wrap
+threat: TM-01
+expected: trapped
+wat: fixture.wat
+entry: main
+# Store at 0xFFFFFFF0: base + offset arithmetic must not wrap into
+# a small in-bounds address.

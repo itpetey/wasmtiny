@@ -1,0 +1,8 @@
+name: malformed-excessive-memarg
+threat: TM-02
+expected: trapped
+# i32.load with alignment exponent 3 (2^3 = 8 bytes) against a 4-byte
+# access: exceeds natural alignment, must be rejected at validation.
+# Recipe: () -> () type, one func, memory min 1, code body
+# [locals=0, i32.const 0, i32.load a=3 o=0, drop, end].
+bytes: 0061736d010000000104016000000302010005030100010a0a01080041002803001a0b

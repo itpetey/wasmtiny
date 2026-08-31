@@ -1,0 +1,10 @@
+name: exhaust-infinite-loop
+threat: TM-05
+expected: trapped
+wat: fixture.wat
+entry: main
+budget_ms: 500
+# Tight infinite loop: no fuel metering exists, so the runner's
+# wall-clock budget timer must terminate the guest within budget
+# (trapped budget-exhausted). The harness deadline (budget + grace)
+# must never be the one to fire: that would be a hung verdict.

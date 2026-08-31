@@ -1,0 +1,6 @@
+name: malformed-bad-leb128
+threat: TM-02
+expected: trapped
+# Type section with an unterminated LEB128 continuation sequence in
+# the parameter vector.
+bytes: 0061736d0100000001050160ffffffffffff

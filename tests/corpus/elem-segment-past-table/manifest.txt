@@ -1,0 +1,7 @@
+name: elem-segment-past-table
+threat: TM-03
+expected: trapped
+wat: fixture.wat
+entry: main
+# element segment writes a function index past the table bounds at
+# instantiation: must be rejected, not silently clipped.

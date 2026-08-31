@@ -53,3 +53,7 @@ pub mod loader;
 pub mod memory;
 /// Runtime-related APIs.
 pub mod runtime;
+/// Sandbox-escape testing build support. Compiled only with the
+/// `security-test` feature; absent from default and release builds.
+#[cfg(feature = "security-test")]
+pub mod security_test;

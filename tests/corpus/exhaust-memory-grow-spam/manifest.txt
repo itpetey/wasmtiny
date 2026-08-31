@@ -1,0 +1,10 @@
+name: exhaust-memory-grow-spam
+threat: TM-05
+expected: trapped
+wat: fixture.wat
+entry: main
+memory_mb: 256
+# memory.grow loop against a declared maximum: growth must be bounded
+# (MemoryLimitExceeded / -1 denial), and the guest traps on the
+# unreachable it reaches when denied. The rlimit address-space cap is
+# belt-and-braces on platforms that enforce it.

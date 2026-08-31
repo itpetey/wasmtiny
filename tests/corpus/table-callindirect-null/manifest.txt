@@ -1,0 +1,6 @@
+name: table-callindirect-null
+threat: TM-03
+expected: trapped
+wat: fixture.wat
+entry: main
+# call_indirect on an uninitialised (null) table slot.

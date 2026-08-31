@@ -1,0 +1,9 @@
+# Fuzz target declarations for the traceability matrix
+# (tests/traceability.rs). Format: <target-name> <TM-xx> [<TM-yy> ...]
+# Target names map to entry points in src/security_test.rs:
+#   loader-validator     -> fuzz_load
+#   interpreter-dispatch -> fuzz_execute
+#   shared-region-api    -> fuzz_shared_region
+loader-validator TM-07
+interpreter-dispatch TM-08
+shared-region-api TM-09

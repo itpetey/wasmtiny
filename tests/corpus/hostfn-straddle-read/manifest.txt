@@ -1,0 +1,8 @@
+name: hostfn-straddle-read
+threat: TM-04
+expected: trapped
+wat: fixture.wat
+entry: main
+host_abuse: true
+# Guest hands the host a (offset, len) whose read straddles the end
+# of the 1-page memory: the runtime bounds check must reject it.

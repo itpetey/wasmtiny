@@ -1,0 +1,7 @@
+name: oob-load-edge
+threat: TM-01
+expected: trapped
+wat: fixture.wat
+entry: main
+# i32.load straddling the end of a 1-page memory: starts at 65533,
+# 4-byte access ends at 65537 > 65536.

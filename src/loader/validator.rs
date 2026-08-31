@@ -344,8 +344,32 @@ impl Validator {
                             func_idx
                         )));
                     }
-                    Self::skip_uleb(code, &mut cursor)?;
-                    Self::skip_uleb(code, &mut cursor)?;
+                    // memarg immediates: align exponent, then offset.
+                    // Alignment is a hint, but it must not exceed the
+                    // natural alignment of the access (a validator that
+                    // accepts arbitrary exponents lets hostile modules
+                    // smuggle malformed immediates past validation).
+                    let align = Self::read_uleb(code, &mut cursor)?;
+                    let access_bytes: u32 = match opcode {
+                        // i32.load / f32.load / i64.load32_* /
+                        // i32.store / f32.store / i64.store32
+                        0x28 | 0x2A | 0x34 | 0x35 | 0x36 | 0x38 | 0x3E => 4,
+                        // i64.load / f64.load / i64.store / f64.store
+                        0x29 | 0x2B | 0x37 | 0x39 => 8,
+                        // 8-bit accesses
+                        0x2C | 0x2D | 0x30 | 0x31 | 0x3A | 0x3C => 1,
+                        // 16-bit accesses
+                        _ => 2,
+                    };
+                    let natural_exponent = access_bytes.trailing_zeros();
+                    if align > natural_exponent {
+                        return Err(WasmError::Validation(format!(
+                            "function {} memarg alignment exponent {align} exceeds \
+                             natural alignment ({}-byte access)",
+                            func_idx, access_bytes
+                        )));
+                    }
+                    Self::skip_uleb(code, &mut cursor)?; // offset
                     self.validate_memory_instruction(
                         func_idx,
                         opcode,

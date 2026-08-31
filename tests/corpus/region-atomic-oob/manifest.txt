@@ -1,0 +1,10 @@
+name: region-atomic-oob
+threat: TM-06
+expected: trapped
+wat: fixture.wat
+entry: probe
+region_pages: 1
+# The runner allocates + attaches a 1-page read-write shared region
+# and passes its guest base address as the first i32 argument. The
+# guest fires memory.atomic.notify just past the region end: within
+# the memory reservation but outside the granted range.

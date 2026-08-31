@@ -1034,7 +1034,7 @@ impl Drop for LoadedModule {
             return;
         }
 
-        let regions: Vec<SharedRegionId> = self.attached_regions.drain(..).collect();
+        let regions: Vec<SharedRegionId> = std::mem::take(&mut self.attached_regions);
         let mut shared_memory = self.shared_memory.lock();
 
         for region_id in regions {

@@ -1,0 +1,9 @@
+name: hostfn-huge-len
+threat: TM-04
+expected: trapped
+wat: fixture.wat
+entry: main
+host_abuse: true
+# Guest asks the host to read 1 MiB + 1 from guest memory: the host
+# must reject the length before allocating, and the runtime must
+# surface the rejection.

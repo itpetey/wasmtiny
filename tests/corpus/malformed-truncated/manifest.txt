@@ -1,0 +1,7 @@
+name: malformed-truncated
+threat: TM-02
+expected: trapped
+# Valid module truncated mid-code-section: the last 4 bytes of the
+# body are cut. Recipe: () -> () type, one func, code body
+# [locals=0, i32.const 0, i32.load a=0 o=0, drop, end] truncated.
+bytes: 0061736d01000000010401600000030201000a0a010800410028
