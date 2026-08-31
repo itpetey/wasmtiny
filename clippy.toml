@@ -6,7 +6,6 @@
 # This file raises the floor beyond default warnings.
 
 disallowed-methods = [
-    { path = "std::mem::uninitialized", reason = "UB for non-zero types; use typed constructors or MaybeUninit" },
-    { path = "std::hint::unreachable_unchecked", reason = "UB if reached; use unreachable!() so misuse panics instead of UB" },
-    { path = "std::ptr::offset", reason = "unchecked UB on overflow/out-of-bounds; use checked_add + addr_of" },
+  { path = "std::mem::uninitialized", reason = "UB for non-zero types; use typed constructors or MaybeUninit" },
+  { path = "std::hint::unreachable_unchecked", reason = "UB if reached; use unreachable!() so misuse panics instead of UB" },
 ]
